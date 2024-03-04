@@ -9,21 +9,30 @@ import urllib.request
 import stashapi.log as log
 from stashapi.stashapp import StashInterface
 from utils.nfo import build_nfo_xml
+from utils.settings import read_settings, update_setting
 
-CONFIG_FILE_PATH = os.path.join(
+# json context payload passed to us from Stash when any plugin is triggered
+json_input = json.loads(sys.stdin.read())
+# initialize INI reader
+settings_parser = configparser.ConfigParser()
+# initialize Stash API module
+stash = StashInterface(json_input["server_connection"])
+
+# Constants
+BATCH_SIZE = 100
+SETTINGS_FILEPATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "settings.ini"
 )
-PER_PAGE = 100
+PLUGIN_ARGS = getattr(json_input["args"], "mode", None)
+SETTINGS = read_settings(SETTINGS_FILEPATH)
 
-# start of the Program
-json_input = json.loads(sys.stdin.read())
-FRAGMENT_SERVER = json_input["server_connection"]
-stash = StashInterface(FRAGMENT_SERVER)
-PLUGIN_ARGS = json_input["args"]["mode"]
-
-# will get updated on load
-config = None
-settings_parser = configparser.ConfigParser()
+QUERY_WHERE_STASH_ID_NOT_NULL = {
+    "stash_id_endpoint": {
+        "endpoint": "",
+        "modifier": "NOT_NULL",
+        "stash_id": "",
+    }
+}
 
 # TODO: Collect data as it runs to provide summary on complete
 # TODO: Improve logging
@@ -38,47 +47,38 @@ settings_parser = configparser.ConfigParser()
 def process_all():
     log.info("Getting scene count")
     count = stash.find_scenes(
-        f={
-            "stash_id_endpoint": {
-                "endpoint": "",
-                "modifier": "NOT_NULL",
-                "stash_id": "",
-            }
-        },
+        f=QUERY_WHERE_STASH_ID_NOT_NULL,
         filter={"per_page": 1},
         get_count=True,
     )[0]
     log.info(str(count) + " scenes to scan.")
-    for r in range(1, int(count / PER_PAGE) + 1):
-        log.info("Processing " + str(r * PER_PAGE) + " - " + str(count))
+    for r in range(1, int(count / BATCH_SIZE) + 1):
+        log.info("Processing " + str(r * BATCH_SIZE) + " - " + str(count))
         scenes = stash.find_scenes(
-            f={
-                "stash_id_endpoint": {
-                    "endpoint": "",
-                    "modifier": "NOT_NULL",
-                    "stash_id": "",
-                }
-            },
-            filter={"page": r, "per_page": PER_PAGE},
+            f=QUERY_WHERE_STASH_ID_NOT_NULL,
+            filter={"page": r, "per_page": BATCH_SIZE},
         )
         for scene in scenes:
             process_scene(scene)
 
 
 def process_scene(scene):
-    # get primary video file path
+    try:
+        # rename/move primary video file if settings configured for that
+        # if not, function will just return the current path and we'll proceed with that
+        target_video_path = rename_video(scene)
 
-    target_video_path = rename_video(scene)
+        # overwrite nfo named after file, at file location (use renamed path if applicable)
+        nfo_path = __replace_file_ext(target_video_path, "nfo")
+        __write_nfo(scene, nfo_path)
 
-    # overwrite nfo named after file, at file location (use renamed path if applicable)
-    nfo_path = __replace_file_ext(target_video_path, "nfo")
-    __write_nfo(scene, nfo_path)
-
-    # download any missing artwork images from stash into path
-    poster_path = __replace_file_ext(target_video_path, "jpg", "-poster")
-    if not os.path.exists(poster_path):
-        screenshot_url = scene["paths"]["screenshot"] + "&apikey=" + api_key
-        __download_image(screenshot_url, poster_path)
+        # download any missing artwork images from stash into path
+        poster_path = __replace_file_ext(target_video_path, "jpg", "-poster")
+        if not os.path.exists(poster_path):
+            screenshot_url = scene["paths"]["screenshot"] + "&apikey=" + api_key
+            __download_image(screenshot_url, poster_path)
+    except Exception:
+        log.error("Error processing Scene " + scene["id"])
 
 
 def rename_video(scene):
@@ -86,16 +86,20 @@ def rename_video(scene):
     video_path = scene["files"][0]["path"]
     expected_path = __get_rename_path(scene)
 
+    if SETTINGS["enable_renamer"] is not True:
+        log.debug("Skipping renamer because it's disabled in settings")
+        return video_path
+
     # check if we should rename it
-    in_target_dir = video_path.startswith(getattr(config, "renamer_path", "$%^&@"))
+    in_target_dir = video_path.startswith(getattr(SETTINGS, "renamer_path", "$%^&@"))
 
     do_ignore = False
     if (
-        getattr(config, "renamer_ignore_files_in_path", False) is True
+        getattr(SETTINGS, "renamer_ignore_files_in_path", False) is True
         and in_target_dir is True
     ):
         do_ignore = True
-    do_rename = config["enable_renamer"] is True and do_ignore is False
+    do_rename = SETTINGS["enable_renamer"] is True and do_ignore is False
 
     if not do_rename or expected_path == video_path:
         return video_path
@@ -195,7 +199,7 @@ def db_rename_refactor(scene_id, old_filepath, new_filepath):
                 "UPDATE files SET basename=?, parent_folder_id=?, updated_at=? WHERE id=?;",
                 [new_filename, folder_id, mod_time, file_id],
             )
-            if config["renamer_enable_mark_organized"]:
+            if SETTINGS["renamer_enable_mark_organized"]:
                 cursor.execute(
                     "UPDATE scenes SET organized=? WHERE id=?;", [True, scene_id]
                 )
@@ -215,7 +219,7 @@ def __download_image(url, dest_filepath):
 
 
 def __get_rename_path(scene):
-    if config["enable_renamer"] is False:
+    if SETTINGS["enable_renamer"] is False:
         return ""
     # resolution
     resolution = str(scene["files"][0]["height"]) + "p"
@@ -234,7 +238,7 @@ def __get_rename_path(scene):
     female_performers = " ".join(female_performers)
     male_performers = " ".join(male_performers)
 
-    template = config["renamer_path_template"]
+    template = SETTINGS["renamer_path_template"]
     filename = template.replace(
         "$Studio", __replace_invalid_file_chars(scene["studio"])
     )
@@ -249,46 +253,7 @@ def __get_rename_path(scene):
     filename = filename.replace(
         "$FemalePerformers", __replace_invalid_file_chars(female_performers)
     )
-    return config["renamer_path"] + filename + ext
-
-
-def __load_config():
-    log.debug("Loading settings.ini")
-    try:
-        config = settings_parser.read(CONFIG_FILE_PATH)
-    except Exception:
-        log.error("Could not load settings.ini")
-        sys.exit(1)
-    try:
-        # validate config
-        # required config (will throw if not found)
-        config["dry_run"]
-        config["enable_hook"]
-        # optional config (only needed if enable_renamer is True)
-        if config["enable_renamer"]:
-            config["renamer_path"]
-            config["renamer_ignore_files_in_path"]
-            config["renamer_enable_mark_organized"]
-            config["renamer_path_template"]
-
-    except KeyError as key:
-        log.error(
-            str(key)
-            + " is not defined in settings.ini, but is needed for this script to proceed"
-        )
-        sys.exit(1)
-
-
-def __modify_config(key, value):
-    try:
-        settings_parser.set("settings", key, value)
-        with open(CONFIG_FILE_PATH, "w") as f:
-            settings_parser.write(f)
-            return True
-    except PermissionError as err:
-        log.error(f"You don't have the permission to edit settings.ini ({err})")
-
-    return False
+    return SETTINGS["renamer_path"] + filename + ext
 
 
 def __rename_file(filepath, dest_filepath):
@@ -330,41 +295,32 @@ def __write_nfo(scene, filepath):
     log.debug("Updated NFO file: " + filepath)
 
 
-# modify config if applicable
-__load_config()
+# if triggered via one of the plugin tasks in the UI
 if PLUGIN_ARGS:
     log.debug("--Starting Plugin 'Renamer'--")
     if "bulk" not in PLUGIN_ARGS:
         if "enable" in PLUGIN_ARGS:
-            log.info("Enable hook")
-            success = __modify_config("enable_hook", True)
+            log.info("Enabling Scene Update hook")
+            SETTINGS = update_setting("enable_hook", True)
         elif "disable" in PLUGIN_ARGS:
-            log.info("Disable hook")
-            success = __modify_config("enable_hook", False)
+            log.info("Disabling Scene Update hook")
+            SETTINGS = update_setting("enable_hook", False)
         elif "dryrun" in PLUGIN_ARGS:
-            if config["dry_run"]:
+            if SETTINGS["dry_run"]:
                 log.info("Disable dryrun")
-                success = __modify_config("dry_run", False)
+                SETTINGS = update_setting("dry_run", False)
             else:
                 log.info("Enable dryrun")
-                success = __modify_config("dry_run", True)
+                SETTINGS = update_setting("dry_run", True)
         elif "renamer" in PLUGIN_ARGS:
-            if config["enable_renamer"]:
+            if SETTINGS["enable_renamer"]:
                 log.info("Disable renamer")
-                success = __modify_config("enable_renamer", False)
+                SETTINGS = update_setting("enable_renamer", False)
             else:
                 log.info("Enable renamer")
-                success = __modify_config("enable_renamer", True)
-        if not success:
-            log.error("Failed to modify the config value")
-        log.info("Config value modified")
+                SETTINGS = update_setting("enable_renamer", True)
+
         sys.exit(0)
-else:
-    # bail if hook should not run
-    if not config["enable_hook"]:
-        log.debug("Hook disabled")
-        sys.exit(0)
-    log.debug("--Starting Hook 'Renamer'--")
 
 
 # establish db connection
@@ -379,19 +335,24 @@ except sqlite3.Error as error:
     sys.exit(1)
 
 # determine which controller function to run
-DRY_RUN = config["dry_run"]
+DRY_RUN = SETTINGS["dry_run"]
 if PLUGIN_ARGS:
+    # if running Bulk task action
     if "bulk" in PLUGIN_ARGS:
         process_all()
 else:
-    try:
-        scene_id = json_input["args"]["hookContext"]["id"]
-        scene = stash.find_scene(scene_id)
-        stash_ids = scene["stash_ids"]
-        if stash_ids is not None and len(stash_ids) > 0:
-            process_scene(scene)
-    except Exception as err:
-        log.error(f"Hook error: {err}")
+    # if triggered via Scene Update hook
+
+    # bail if hook should not run
+    if not SETTINGS["enable_hook"]:
+        log.debug("Hook disabled")
+        sys.exit(0)
+
+    scene_id = json_input["args"]["hookContext"]["id"]
+    scene = stash.find_scene(scene_id)
+    stash_ids = scene["stash_ids"]
+    if stash_ids is not None and len(stash_ids) > 0:
+        process_scene(scene)
 
 # commit db changes & cleanup
 if DRY_RUN is False:
