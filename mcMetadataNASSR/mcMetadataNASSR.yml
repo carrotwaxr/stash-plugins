@@ -7,28 +7,28 @@ exec:
   - "{pluginDir}/mcMetadataNASSR.py"
 interface: raw
 hooks:
-  - name: hook_rename
-    description: Rename/move file when you update a scene.
+  - name: hook_mcmetadata
+    description: Organize/rename video files and create/update metadata files when you update a scene.
     triggeredBy:
       - Scene.Update.Post
 tasks:
   - name: "Disable"
-    description: Disable the hook
+    description: Disable the on Scene Update hook
     defaultArgs:
       mode: disable
   - name: "Enable"
-    description: Enable the hook
+    description: Enable the on Scene Update hook
     defaultArgs:
       mode: enable
-  - name: "Dryrun"
-    description: Enable/disable dry-run
+  - name: "Toggle Dry Run"
+    description: Enable/disable dry-run mode
     defaultArgs:
       mode: dryrun
-  - name: "Renamer"
-    description: Enable/disable renamer
+  - name: "Toggle Renamer"
+    description: Enable/disable file renaming
     defaultArgs:
       mode: renamer
-  - name: "Rename scenes"
-    description: Rename all your scenes based on your config.
+  - name: "Bulk Update"
+    description: Organize/rename video files and create/update metadata files for all scenes based on your config.
     defaultArgs:
       mode: bulk

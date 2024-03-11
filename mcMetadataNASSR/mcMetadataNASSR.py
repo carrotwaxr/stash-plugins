@@ -1,14 +1,14 @@
 import configparser
-import datetime
+from datetime import datetime
 import json
 import os
-import re
 import sqlite3
 import sys
 import urllib.request
 import stashapi.log as log
 from stashapi.stashapp import StashInterface
 from utils.nfo import build_nfo_xml
+from utils.renamer import get_new_path
 from utils.settings import read_settings, update_setting
 
 # json context payload passed to us from Stash when any plugin is triggered
@@ -20,10 +20,11 @@ stash = StashInterface(json_input["server_connection"])
 
 # Constants
 BATCH_SIZE = 100
+IMPOSSIBLE_PATH = "$%^&@"
+PLUGIN_ARGS = json_input["args"]
 SETTINGS_FILEPATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "settings.ini"
 )
-PLUGIN_ARGS = getattr(json_input["args"], "mode", None)
 SETTINGS = read_settings(SETTINGS_FILEPATH)
 
 QUERY_WHERE_STASH_ID_NOT_NULL = {
@@ -34,14 +35,17 @@ QUERY_WHERE_STASH_ID_NOT_NULL = {
     }
 }
 
-# TODO: Collect data as it runs to provide summary on complete
-# TODO: Improve logging
-# TODO: Default configs better
-# TODO: Documentation
-# TODO: filename budget, error if required values not truthy
-# TODO: Add more to NFO, test with various media servers
-# TODO: File permissions (Stash runs as root)
-# TODO: Add additional filename replacers and validate for sufficient uniqueness
+# TODO:
+#   Collect data as it runs to provide summary on complete; Improve logging
+#   Documentation
+#   Test with various media servers
+#       Emby - performer images
+#       Jellyfin - performer images
+#       Plex
+#   Check all modes, settings and replacers
+#   Write unit tests?
+#   Add more config settings to allow users to customize behavior more
+#   New notifications
 
 
 def process_all():
@@ -53,7 +57,9 @@ def process_all():
     )[0]
     log.info(str(count) + " scenes to scan.")
     for r in range(1, int(count / BATCH_SIZE) + 1):
-        log.info("Processing " + str(r * BATCH_SIZE) + " - " + str(count))
+        start = r * BATCH_SIZE
+        end = start + BATCH_SIZE
+        log.info("Processing " + str(start) + " - " + str(end))
         scenes = stash.find_scenes(
             f=QUERY_WHERE_STASH_ID_NOT_NULL,
             filter={"page": r, "per_page": BATCH_SIZE},
@@ -64,79 +70,127 @@ def process_all():
 
 def process_scene(scene):
     try:
+        log.debug("Processing Scene " + scene["id"])
+        scene = hydrate_scene(scene)
         # rename/move primary video file if settings configured for that
         # if not, function will just return the current path and we'll proceed with that
         target_video_path = rename_video(scene)
 
         # overwrite nfo named after file, at file location (use renamed path if applicable)
+        log.debug("Updating NFO file with scene metadata")
         nfo_path = __replace_file_ext(target_video_path, "nfo")
         __write_nfo(scene, nfo_path)
 
         # download any missing artwork images from stash into path
+        log.debug("Downloading Poster image")
         poster_path = __replace_file_ext(target_video_path, "jpg", "-poster")
         if not os.path.exists(poster_path):
             screenshot_url = scene["paths"]["screenshot"] + "&apikey=" + api_key
             __download_image(screenshot_url, poster_path)
-    except Exception:
-        log.error("Error processing Scene " + scene["id"])
+    except Exception as err:
+        log.error("Error processing Scene " + scene["id"] + ": " + str(err))
+
+
+def hydrate_scene(scene):
+    fragmented_performers = scene["performers"] or []
+    performers = []
+    for fragmented_performer in fragmented_performers:
+        performer = stash.find_performer(
+            fragmented_performer["id"], False, "id name gender"
+        )
+        performers.append(performer)
+    scene["performers"] = sorted(
+        performers,
+        key=lambda performer: str(performer.get("gender", "UNKNOWN"))
+        + performer["name"],
+    )
+
+    if scene["studio"]:
+        scene["studio"] = stash.find_studio(
+            scene["studio"]["id"], "id name parent_studio { ...Studio }"
+        )
+
+    return scene
 
 
 def rename_video(scene):
     # get primary video file path
     video_path = scene["files"][0]["path"]
-    expected_path = __get_rename_path(scene)
 
     if SETTINGS["enable_renamer"] is not True:
-        log.debug("Skipping renamer because it's disabled in settings")
+        log.debug("Skipping renaming because it's disabled in settings")
+        return video_path
+
+    expected_path = get_new_path(
+        scene,
+        SETTINGS["renamer_path"],
+        SETTINGS["renamer_path_template"],
+        SETTINGS.get("renamer_filepath_budget", 250),
+    )
+
+    if expected_path is False:
         return video_path
 
     # check if we should rename it
-    in_target_dir = video_path.startswith(getattr(SETTINGS, "renamer_path", "$%^&@"))
+    renamer_path = SETTINGS.get("renamer_path", IMPOSSIBLE_PATH)
+    renamer_ignore_in_path = SETTINGS.get("renamer_ignore_files_in_path", False)
+    in_target_dir = video_path.startswith(renamer_path)
 
     do_ignore = False
-    if (
-        getattr(SETTINGS, "renamer_ignore_files_in_path", False) is True
-        and in_target_dir is True
-    ):
+    if renamer_ignore_in_path is True and in_target_dir is True:
         do_ignore = True
-    do_rename = SETTINGS["enable_renamer"] is True and do_ignore is False
 
-    if not do_rename or expected_path == video_path:
+    if do_ignore is True or expected_path == video_path:
+        log.debug("Skipping renaming because file is already organized")
         return video_path
 
     if os.path.exists(expected_path):
         log.info("Duplicate: " + video_path + "\n   =>" + expected_path)
         return video_path
 
-    # rename/move video file and any metadata files, mark organized, update db
+    # rename/move video file. Will return False if it errors
     video_renamed_path = __rename_file(video_path, expected_path)
     if not video_renamed_path:
         return video_path
 
+    # update database with new file location
+    try:
+        db_rename_refactor(scene["id"], video_path, video_renamed_path)
+    except Exception as err:
+        log.error(
+            "Error updating database for Scene "
+            + str(scene["id"])
+            + ": "
+            + str(err)
+            + "\nYou can likely resolve this by running a scan on your library."
+        )
+
     # locate any existing metadata files, rename them as well
     potential_nfo_path = __replace_file_ext(video_path, "nfo")
     if os.path.exists(potential_nfo_path):
+        log.debug("Relocating existing NFO file: " + potential_nfo_path)
         __rename_file(potential_nfo_path, __replace_file_ext(video_renamed_path, "nfo"))
 
     potential_poster_path = __replace_file_ext(video_path, "jpg", "-poster")
     if os.path.exists(potential_poster_path):
+        log.debug("Relocating existing Poster image: " + potential_poster_path)
         __rename_file(
             potential_poster_path,
             __replace_file_ext(video_renamed_path, "jpg", "-poster"),
         )
 
-    try:
-        db_rename_refactor(scene["id"], video_path, video_renamed_path)
-    except Exception:
-        log.error(
-            "Error updating database for Scene ID: "
-            + scene["id"]
-            + ". You can likely resolve this by running a scan on your library."
-        )
     return video_renamed_path
 
 
 def db_rename_refactor(scene_id, old_filepath, new_filepath):
+    log.debug(
+        "Updating database for Scene "
+        + str(scene_id)
+        + ". Old Path: "
+        + old_filepath
+        + ", New Path: "
+        + new_filepath
+    )
     old_dir = os.path.dirname(old_filepath)
     new_dir = os.path.dirname(new_filepath)
     new_filename = os.path.basename(new_filepath)
@@ -203,122 +257,89 @@ def db_rename_refactor(scene_id, old_filepath, new_filepath):
                 cursor.execute(
                     "UPDATE scenes SET organized=? WHERE id=?;", [True, scene_id]
                 )
-            cursor.execute()
         else:
             raise Exception("Failed to find file_id")
     else:
         raise Exception(
             f"You need to setup a library with the new location ({new_dir}) and scan at least 1 file"
         )
+    log.debug("Database updated")
 
 
 def __download_image(url, dest_filepath):
     if DRY_RUN is False:
         urllib.request.urlretrieve(url, dest_filepath)
-    log.debug("Downloading image " + url + " to " + dest_filepath)
-
-
-def __get_rename_path(scene):
-    if SETTINGS["enable_renamer"] is False:
-        return ""
-    # resolution
-    resolution = str(scene["files"][0]["height"]) + "p"
-    video_path = scene["files"][0]["path"]
-    __, ext = os.path.splitext(video_path)
-
-    # performers
-    female_performers = []
-    male_performers = []
-    for performer in scene["performers"]:
-        performer_name = __replace_invalid_file_chars(performer["name"])
-        if performer["gender"] == "FEMALE":
-            female_performers.append(performer_name)
-        elif performer["gender"] == "MALE":
-            male_performers.append(performer_name)
-    female_performers = " ".join(female_performers)
-    male_performers = " ".join(male_performers)
-
-    template = SETTINGS["renamer_path_template"]
-    filename = template.replace(
-        "$Studio", __replace_invalid_file_chars(scene["studio"])
-    )
-    filename = filename.replace("$Title", __replace_invalid_file_chars(scene["title"]))
-    filename = filename.replace(
-        "$ReleaseDate", __replace_invalid_file_chars(scene["date"])
-    )
-    filename = filename.replace("$Resolution", __replace_invalid_file_chars(resolution))
-    filename = filename.replace(
-        "$MalePerformers", __replace_invalid_file_chars(male_performers)
-    )
-    filename = filename.replace(
-        "$FemalePerformers", __replace_invalid_file_chars(female_performers)
-    )
-    return SETTINGS["renamer_path"] + filename + ext
+        log.debug("Downloading image " + url + " to " + dest_filepath)
 
 
 def __rename_file(filepath, dest_filepath):
-    dir = os.path.dirname(filepath)
+    dir = os.path.dirname(dest_filepath)
     try:
         if not os.path.exists(dir) and DRY_RUN is False:
             os.makedirs(dir)
         try:
             if DRY_RUN is False:
                 os.rename(filepath, dest_filepath)
-            log.debug("Renamed: " + filepath + "\n   =>" + dest_filepath)
+                log.debug("Renamed: " + filepath + " => " + dest_filepath)
             return dest_filepath
-        except Exception:
-            log.error("Error renaming file: " + filepath + "\n   =>" + dest_filepath)
+        except Exception as err:
+            log.error(
+                "Error renaming file: "
+                + str(err)
+                + ". File "
+                + filepath
+                + " => "
+                + dest_filepath
+            )
             return False
-    except Exception:
-        log.error("Error creating directory: " + dir)
+    except Exception as d_err:
+        log.error("Error creating directory " + dir + ": " + str(d_err))
         return False
-
-
-def __replace_invalid_file_chars(filename):
-    safe = re.sub('[<>\\/\?\*"\|]', " ", filename)
-    safe = re.sub("[:]", "-", safe)
-    safe = re.sub("[&]", "and", safe)
-    return safe
 
 
 def __replace_file_ext(filepath, ext, suffix=""):
     path = os.path.splitext(filepath)
-    return path + suffix + "." + ext
+    return path[0] + suffix + "." + ext
 
 
 def __write_nfo(scene, filepath):
-    nfo_xml = build_nfo_xml(scene)
-    if DRY_RUN is False:
-        f = open(filepath, "w", encoding="utf-8-sig")
-        f.write(nfo_xml)
-        f.close()
-    log.debug("Updated NFO file: " + filepath)
+    try:
+        nfo_xml = build_nfo_xml(scene)
+        if DRY_RUN is False:
+            f = open(filepath, "w", encoding="utf-8-sig")
+            f.write(nfo_xml)
+            f.close()
+            log.info("Updated NFO file: " + filepath)
+    except Exception as err:
+        log.error("Error writing NFO: " + str(err))
 
 
 # if triggered via one of the plugin tasks in the UI
-if PLUGIN_ARGS:
+mode = PLUGIN_ARGS.get("mode", None)
+log.debug("mode: " + str(mode))
+if mode:
     log.debug("--Starting Plugin 'Renamer'--")
-    if "bulk" not in PLUGIN_ARGS:
-        if "enable" in PLUGIN_ARGS:
+    if "bulk" not in mode:
+        if "enable" in mode:
             log.info("Enabling Scene Update hook")
-            SETTINGS = update_setting("enable_hook", True)
-        elif "disable" in PLUGIN_ARGS:
+            update_setting(SETTINGS_FILEPATH, "enable_hook", "true")
+        elif "disable" in mode:
             log.info("Disabling Scene Update hook")
-            SETTINGS = update_setting("enable_hook", False)
-        elif "dryrun" in PLUGIN_ARGS:
+            update_setting(SETTINGS_FILEPATH, "enable_hook", "false")
+        elif "dryrun" in mode:
             if SETTINGS["dry_run"]:
                 log.info("Disable dryrun")
-                SETTINGS = update_setting("dry_run", False)
+                update_setting(SETTINGS_FILEPATH, "dry_run", "false")
             else:
                 log.info("Enable dryrun")
-                SETTINGS = update_setting("dry_run", True)
-        elif "renamer" in PLUGIN_ARGS:
+                update_setting(SETTINGS_FILEPATH, "dry_run", "true")
+        elif "renamer" in mode:
             if SETTINGS["enable_renamer"]:
                 log.info("Disable renamer")
-                SETTINGS = update_setting("enable_renamer", False)
+                update_setting(SETTINGS_FILEPATH, "enable_renamer", "false")
             else:
                 log.info("Enable renamer")
-                SETTINGS = update_setting("enable_renamer", True)
+                update_setting(SETTINGS_FILEPATH, "enable_renamer", "true")
 
         sys.exit(0)
 
@@ -336,9 +357,10 @@ except sqlite3.Error as error:
 
 # determine which controller function to run
 DRY_RUN = SETTINGS["dry_run"]
-if PLUGIN_ARGS:
+log.debug("DRY RUN: " + str(DRY_RUN))
+if mode:
     # if running Bulk task action
-    if "bulk" in PLUGIN_ARGS:
+    if "bulk" in mode:
         process_all()
 else:
     # if triggered via Scene Update hook
@@ -356,6 +378,7 @@ else:
 
 # commit db changes & cleanup
 if DRY_RUN is False:
+    log.debug("Committing database changes")
     sqliteConnection.commit()
 cursor.close()
 sqliteConnection.close()
