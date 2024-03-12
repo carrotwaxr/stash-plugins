@@ -35,7 +35,7 @@ def validate_actor_metadata_path(settings):
     if settings["enable_actor_images"]:
         if not os.path.exists(settings["actor_metadata_path"]):
             raise SystemError(
-                "actor_metadata_path is invalid or you don't have sufficient permissions to this location"
+                f"actor_metadata_path is invalid or you don't have sufficient permissions to this location: {settings['actor_metadata_path']}"
             )
 
 
@@ -93,7 +93,7 @@ def validate_renamer_path(settings):
                 os.makedirs(settings["renamer_path"])
                 if not os.path.exists(settings["renamer_path"]):
                     raise SystemError(
-                        f"Failed to create directory {settings["renamer_path"]}"
+                        f"Failed to create directory {settings['renamer_path']}"
                     )
 
         except Exception as err:

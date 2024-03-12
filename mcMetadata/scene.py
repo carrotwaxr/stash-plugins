@@ -6,12 +6,46 @@ from utils.files import download_image, rename_file, replace_file_ext
 from utils.nfo import build_nfo_xml
 from utils.replacer import get_new_path
 
+BATCH_SIZE = 100
 IMPOSSIBLE_PATH = "$%^&@"
+QUERY_WHERE_STASH_ID_NOT_NULL = {
+    "stash_id_endpoint": {
+        "endpoint": "",
+        "modifier": "NOT_NULL",
+        "stash_id": "",
+    }
+}
+
+
+def process_all_scenes(stash, settings, cursor, api_key):
+    count = stash.find_scenes(
+        f=QUERY_WHERE_STASH_ID_NOT_NULL,
+        filter={"per_page": 1},
+        get_count=True,
+    )[0]
+
+    log.debug(f"{str(count)} scenes to scan.")
+
+    for r in range(1, int(count / BATCH_SIZE) + 1):
+        start = r * BATCH_SIZE
+        end = start + BATCH_SIZE
+        if end > count:
+            end = count
+
+        log.debug(f"Processing {str(start)}-{str(end)}")
+
+        scenes = stash.find_scenes(
+            f=QUERY_WHERE_STASH_ID_NOT_NULL,
+            filter={"page": r, "per_page": BATCH_SIZE},
+        )
+
+        for scene in scenes:
+            process_scene(scene, stash, settings, cursor, api_key)
 
 
 def process_scene(scene, stash, settings, cursor, api_key):
     try:
-        log.debug(f"Processing Scene ID: {scene["id"]}")
+        log.debug(f"Processing Scene ID: {scene['id']}")
 
         scene = __hydrate_scene(scene, stash)
         # rename/move primary video file if settings configured for that
@@ -33,10 +67,10 @@ def process_scene(scene, stash, settings, cursor, api_key):
         # download any missing artwork images from stash into path
         poster_path = replace_file_ext(target_video_path, "jpg", "-poster")
         if not os.path.exists(poster_path):
-            screenshot_url = f"{scene["paths"]["screenshot"]}&apikey={api_key}"
+            screenshot_url = f"{scene['paths']['screenshot']}&apikey={api_key}"
             download_image(screenshot_url, poster_path, settings)
     except Exception as err:
-        log.error(f"Error processing Scene ID {scene["id"]}: {str(err)}")
+        log.error(f"Error processing Scene ID {scene['id']}: {str(err)}")
 
 
 def __hydrate_scene(scene, stash):
@@ -49,7 +83,7 @@ def __hydrate_scene(scene, stash):
         performers.append(performer)
     scene["performers"] = sorted(
         performers,
-        key=lambda performer: f"{str(performer.get("gender", "UNKNOWN"))}_{performer["name"]}",
+        key=lambda performer: f"{str(performer.get('gender', 'UNKNOWN'))}_{performer['name']}",
     )
 
     if scene["studio"]:
@@ -105,7 +139,7 @@ def __rename_video(scene, settings, cursor):
         __db_rename(scene["id"], video_path, video_renamed_path, settings, cursor)
     except Exception as err:
         log.error(
-            f"Error updating database for Scene ID {scene["id"]}. You can likely resolve this by running a scan on your library: {str(err)}"
+            f"Error updating database for Scene ID {scene['id']}. You can likely resolve this by running a scan on your library: {str(err)}"
         )
 
     # locate any existing metadata files, rename them as well

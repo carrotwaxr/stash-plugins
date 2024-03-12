@@ -177,10 +177,10 @@ def get_new_path(scene, basepath, template, budget):
                 filename = filename.replace(key, value)
                 remaining_budget = budget - len(filename)
     except ValueError as err:
-        log.error(f"Skipping renaming scene {scene["id"]}: {str(err)}")
+        log.error(f"Skipping renaming Scene ID {scene['id']}: {str(err)}")
         return False
     except Exception as err:
-        log.error(f"Unexpected error renaming scene {str(err)}")
+        log.error(f"Unexpected error renaming Scene ID {scene['id']}:{str(err)}")
         return False
 
     video_path = scene["files"][0]["path"]
