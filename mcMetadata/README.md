@@ -10,11 +10,7 @@ Therefore, why not delegate this responsibility to Stash? Enter mcMetadata. The 
     - Generates/updates `.nfo` file with the same name as the video file, in the same folder.
     - Generates performer images in your chosen media server's metadata folder.
 - Bulk Scene Updater: Runs the scene updater against every scene in your collection.
-- On Performer Create or Update:
-    - Generates performer images in your chosen media server's metadata folder.
-- On Performer Delete:
-    - Removes performer images from your chosen media server's metadata folder.
-- Bulk Performer Updater: Runs the performer updater against every performer in your collection.
+- Bulk Performer Updater: Copies all performer images that exist to your chosen media server's metadata folder.
 - Has a dry run mode where no files are actually touched.
 - All actions are configurable via the UI and the `settings.ini` file. See the Configuration section for all available settings.
 
@@ -37,7 +33,7 @@ All configuration values are stored in the `settings.ini` file in the plugin's r
 - `enable_hook`:
     - **Accepted**: `true` | `false`
     - **Required**: `true`
-    - **Description**: When `false` none of the Scene or Performer create/update/delete hooks will be enabled. This effectively means that the plugin will do nothing unless you run one of the Bulk actions via the Plugin Tasks UI.
+    - **Description**: When `false` the Scene update hook will be disabled. This effectively means that the plugin will do nothing unless you run one of the Bulk actions via the Plugin Tasks UI.
     - **How to Change**: Via the UI in Settings >> Tasks. Scroll down to the Plugin Tasks section and choose the "Enable" or "Disable".
 - `enable_renamer`:
     - **Accepted**: `true` | `false`
@@ -108,4 +104,3 @@ If you go to Settings >> Logs in Stash and change your Log Level to Debug, you s
 - Test with Emby, Jellyfin and maybe Plex?
 - Verify all modes, settings and replacer options.
 - Write unit tests.
-- Performer hooks
