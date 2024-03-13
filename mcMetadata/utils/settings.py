@@ -196,7 +196,7 @@ def read_settings(filepath):  # pragma: no cover
             else:
                 settings[key] = value
 
-        is_valid = validate_settings(parser["settings"])
+        is_valid = validate_settings(settings)
         if is_valid is False:
             sys.exit(1)
 

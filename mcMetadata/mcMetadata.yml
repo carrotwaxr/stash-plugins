@@ -1,7 +1,7 @@
 name: mcMetadata
 description: Generates metadata for use with other media servers like Emby and Jellyfin, and optionally organizes/renames your tagged scenes.
 url: https://github.com/carrotwaxr/stash-plugins/tree/main/mcMetadata
-version: 0.0.2
+version: 0.0.3
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
