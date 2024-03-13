@@ -1,5 +1,7 @@
 import os
 
+INDENTED_NEWLINE = "\n    "
+
 
 def build_nfo_xml(scene):
     ret = """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
@@ -15,10 +17,8 @@ def build_nfo_xml(scene):
     <premiered>{date}</premiered>
     <releasedate>{date}</releasedate>
     <year>{year}</year>
-    <studio>{studio}</studio>
-    {performers}
-    <genre>Adult</genre>
-    {tags}
+    <studio>{studio}</studio>{performers}
+    <genre>Adult</genre>{tags}
     <uniqueid type="stash">{id}</uniqueid>
 </movie>"""
 
@@ -47,12 +47,12 @@ def build_nfo_xml(scene):
     if scene["studio"] is not None:
         studio = scene["studio"]["name"]
 
-    performers = ""
+    performers = INDENTED_NEWLINE
     i = 0
 
     for p in scene["performers"]:
         if i != 0:
-            performers = performers + "\n    "
+            performers = performers + INDENTED_NEWLINE
         performers = (
             performers
             + """<actor>
@@ -63,14 +63,18 @@ def build_nfo_xml(scene):
     </actor>""".format(p["name"], p["name"], i)
         )
         i += 1
+    if performers == INDENTED_NEWLINE:
+        performers = ""
 
-    tags = ""
+    tags = INDENTED_NEWLINE
     iTwo = 0
     for t in scene["tags"]:
         if iTwo != 0:
-            tags = tags + "\n    "
+            tags = tags + INDENTED_NEWLINE
         tags = tags + """<tag>{}</tag>""".format(t["name"])
         iTwo += 1
+    if tags == INDENTED_NEWLINE:
+        tags = ""
 
     return ret.format(
         title=title,
