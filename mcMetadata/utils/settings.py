@@ -33,7 +33,7 @@ def __validate_boolean(name, value):
 
 def validate_actor_metadata_path(settings):
     if settings["enable_actor_images"]:
-        if not os.path.exists(settings["actor_metadata_path"]):
+        if not os.path.exists(settings["actor_metadata_path"]):  # pragma: no cover
             raise SystemError(
                 f"actor_metadata_path is invalid or you don't have sufficient permissions to this location: {settings['actor_metadata_path']}"
             )
@@ -86,7 +86,7 @@ def validate_renamer_filename_budget(settings):
             )
 
 
-def validate_renamer_path(settings):
+def validate_renamer_path(settings):  # pragma: no cover
     if settings["enable_renamer"]:
         try:
             if not os.path.exists(settings["renamer_path"]):
@@ -173,7 +173,7 @@ parser = configparser.ConfigParser()
 settings = {}
 
 
-def update_setting(filepath, key, value):
+def update_setting(filepath, key, value):  # pragma: no cover
     try:
         log.debug(f"Updating setting {key} to {str(value)}")
         parser.set("settings", key, value)
@@ -184,7 +184,7 @@ def update_setting(filepath, key, value):
         log.error(f"You don't have the permission to edit settings.ini ({err})")
 
 
-def read_settings(filepath):
+def read_settings(filepath):  # pragma: no cover
     log.debug(f"Reading settings file at {filepath}")
     try:
         parser.read(filepath)
@@ -196,7 +196,9 @@ def read_settings(filepath):
             else:
                 settings[key] = value
 
-        __validate_settings()
+        is_valid = validate_settings(parser["settings"])
+        if is_valid is False:
+            sys.exit(1)
 
         return settings
     except Exception as err:
@@ -204,32 +206,33 @@ def read_settings(filepath):
         sys.exit(1)
 
 
-def __validate_settings():
+def validate_settings(settings):
     log.debug("Validating settings")
     # check for existence of necessary fields in settings
     try:
         # required fields (will throw if not found)
         for key in REQUIRED_SETTINGS:
-            parser["settings"][key]
+            settings[key]
 
         # optional fields (only needed if enable_renamer is True)
-        if parser["settings"]["enable_renamer"]:
+        if settings["enable_renamer"]:
             for key in REQUIRED_SETTINGS_IF_RENAMER:
-                parser["settings"][key]
+                settings[key]
 
         # optional fields (only needed if enable_actor_images is True)
-        if parser["settings"]["enable_actor_images"]:
+        if settings["enable_actor_images"]:
             for key in REQUIRED_SETTINGS_IF_ACTORS:
-                parser["settings"][key]
+                settings[key]
     except KeyError as key:
         log.error(
             f"{str(key)} is not defined in settings.ini, but is needed for this script to proceed"
         )
-        sys.exit(1)
+        return False
 
     try:
         for key in SETTINGS_VALIDATORS.keys():
             SETTINGS_VALIDATORS[key](settings)
+        return True
     except Exception as err:
         log.error(str(err))
-        sys.exit(1)
+        return False

@@ -1,7 +1,7 @@
 name: mcMetadata
-description: Rename/move filename based on a template.
-url: https://github.com/carrotwaxr/stash-plugins
-version: 0.0.1
+description: Generates metadata for use with other media servers like Emby and Jellyfin, and optionally organizes/renames your tagged scenes.
+url: https://github.com/carrotwaxr/stash-plugins/tree/main/mcMetadata
+version: 0.0.2
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
