@@ -97,10 +97,3 @@ All configuration values are stored in the `settings.ini` file in the plugin's r
 
 ## Troubleshooting
 If you go to Settings >> Logs in Stash and change your Log Level to Debug, you should see a verbose output that can aid in troubleshooting or opening an issue here on Github.
-
-## Remaining To-Do
-- Improve logging, potentially using the toast notifications.
-- Add additional configuration settings based on user feedback.
-- Test with Emby, Jellyfin and maybe Plex?
-- Verify all modes, settings and replacer options.
-- Write unit tests.

@@ -75,6 +75,7 @@ def __replacer_release_year(scene):
 
 def __replacer_resolution(scene):
     height = scene["files"][0]["height"]
+
     if not height:
         raise ValueError("No file height value")
 
@@ -96,7 +97,7 @@ def __replacer_resolution(scene):
     if height < 4320:
         return "4K"
 
-    return "8k"
+    return "8K"
 
 
 def __replacer_stash_id(scene):
@@ -126,7 +127,12 @@ def __replacer_studios(scene):
             else:
                 cur_node = cur_node["parent_studio"]
         studios.reverse()
-        return os.path.sep.join(studios)
+
+        sep = os.path.sep
+        if sep == "\\":
+            sep = "\\\\"
+        result = sep.join(studios)
+        return result
     else:
         raise ValueError("No studio value")
 
@@ -146,36 +152,82 @@ def __replacer_title(scene):
         raise ValueError("No title value")
 
 
-replacers = {
-    "$Studio": __replacer_studio,
-    "$Studios": __replacer_studios,
-    "$StashID": __replacer_stash_id,
-    "$Title": __replacer_title,
-    "$ReleaseYear": __replacer_release_year,
-    "$ReleaseDate": __replacer_release_date,
-    "$Resolution": __replacer_resolution,
-    "$Quality": __replacer_quality,
+truncable_replacers = {
+    # order here matters. they are arranged in order of priority
     "$FemalePerformers": __replacer_female_performers,
     "$MalePerformers": __replacer_male_performers,
     "$Performers": __replacer_performers,
     "$Tags": __replacer_tags,
 }
+replacers = {
+    # these replacers are not truncable. they will throw an error if the filepath budget cannot be managed
+    "$StashID": __replacer_stash_id,
+    "$Studios": __replacer_studios,
+    "$Studio": __replacer_studio,
+    "$Title": __replacer_title,
+    "$ReleaseDate": __replacer_release_date,
+    "$ReleaseYear": __replacer_release_year,
+    "$Resolution": __replacer_resolution,
+    "$Quality": __replacer_quality,
+}
+# add truncable_replacers to replacers
+replacers.update(truncable_replacers)
 
-truncable_replacer_keys = []
+
+def __get_replacer_regex(key):
+    return r"\$" + key[1:] + r"(?=[^a-zA-Z]|$)"
 
 
 def get_new_path(scene, basepath, template, budget):
     try:
         log.debug("Determining what the renamed filepath would be")
-        filename = template
-        remaining_budget = budget - len(template)
+
+        video_path = scene["files"][0]["path"]
+        __, ext = os.path.splitext(video_path)
+        # subtract the file extension from our budget
+        budget -= len(ext)
+
+        if len(basepath) + len(template) > budget:
+            raise ValueError(
+                "Your renamer_path and renamer_path_template exceed your renamer_filename_budget"
+            )
+
+        replacer_values = {}
+        keys_len = 0
+        values_len = 0
+
         for key in replacers.keys():
-            if key in template:
-                value = replacers[key](scene)[:remaining_budget]
-                if remaining_budget < 4:
-                    value = ""
-                filename = filename.replace(key, value)
-                remaining_budget = budget - len(filename)
+            if re.search(__get_replacer_regex(key), template) is not None:
+                value = replacers[key](scene)
+                replacer_values[key] = value
+                keys_len += len(key)
+                values_len += len(value)
+
+        truncable_len = 0
+        for key in replacer_values.keys():
+            if key in truncable_replacers.keys():
+                truncable_len += len(replacer_values[key])
+
+        budget_remaining = (
+            budget - len(basepath) - ((len(template) - keys_len) + values_len)
+        )
+        if (budget_remaining + truncable_len) < 0:
+            raise ValueError(
+                "Filepath would exceed your renamer_filename_budget. If your system allows, consider raising the value. Windows systems can now have their filepath limitation increased, a quick search will yield instructions for doing this. If the value cannot be increased, consider adjusting your renamer_path_template or the Scene title if applicable."
+            )
+
+        filename = template
+
+        for key in replacer_values.keys():
+            value = replacer_values[key]
+
+            if key in truncable_replacers.keys():
+                trunced = value[:budget_remaining]
+                budget_remaining -= len(trunced)
+                value = trunced
+
+            filename = re.sub(__get_replacer_regex(key), value, filename)
+
     except ValueError as err:
         log.error(f"Skipping renaming Scene ID {scene['id']}: {str(err)}")
         return False
@@ -183,15 +235,22 @@ def get_new_path(scene, basepath, template, budget):
         log.error(f"Unexpected error renaming Scene ID {scene['id']}:{str(err)}")
         return False
 
-    video_path = scene["files"][0]["path"]
-    __, ext = os.path.splitext(video_path)
-    new_path = basepath + filename + ext
+    new_path = basepath + __trim_filename(filename) + ext
     log.debug(f"New Path: {new_path}")
     return new_path
 
 
+def __trim_filename(filename):
+    empty_brackets_removed = re.sub(r"\[\]", "", filename)
+    empty_parens_removed = re.sub(r"\(\)", "", empty_brackets_removed)
+    multiple_spaces_replaced = re.sub(r"\s{2,}", " ", empty_parens_removed)
+    multiple_hyphens_removed = re.sub(r"-{2,}", "-", multiple_spaces_replaced)
+
+    return multiple_hyphens_removed.strip()
+
+
 def __replace_invalid_file_chars(filename):
-    safe = re.sub('[<>\\/\?\*"\|]', " ", filename)
-    safe = re.sub("[:]", "-", safe)
-    safe = re.sub("[&]", "and", safe)
+    safe = re.sub(r'[<>\\/\?\*"\|]', " ", filename)
+    safe = re.sub(r"[:]", "-", safe)
+    safe = re.sub(r"[&]", "and", safe)
     return safe
