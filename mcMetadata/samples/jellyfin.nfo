@@ -1,0 +1,70 @@
+<!-- This is an example of the NFO file as it is modified by Jellyfin -->
+<!-- If your Jellyfin library is configured to be able to save metadata to NFO files -->
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<movie>
+  <name>Presley Hart fucking in the outdoors with her brown eyes</name>
+  <title>Presley Hart fucking in the outdoors with her brown eyes</title>
+  <originaltitle>Presley Hart fucking in the outdoors with her brown eyes</originaltitle>
+  <sorttitle>Presley Hart fucking in the outdoors with her brown eyes</sorttitle>
+  <criticrating>80</criticrating>
+  <rating>8</rating>
+  <userrating>8</userrating>
+  <plot>Presley Hart is all ready to ride her horse, but she's not at all dressed the part.  Her instructor, Alec, is in no way going to let he ride her horse without the proper attire.  That's fine with Presley, she didn't really want to learn to ride a horse, she was just taking lessons cause her rich daddy made her.  She would much rather ride other things, like Alec's big fat cock.  Since Presley is daddy's girl and she always get what she wants of course she gets to fuck Alec.</plot>
+  <premiered>2014-03-25</premiered>
+  <releasedate>2014-03-25</releasedate>
+  <year>2014</year>
+  <studio>Naughty Rich Girls</studio>
+  <actor>
+    <name>Presley Hart</name>
+    <role>Presley Hart</role>
+    <type>Actor</type>
+    <sortorder>0</sortorder>
+  </actor>
+  <actor>
+    <name>Alec Knight</name>
+    <role>Alec Knight</role>
+    <type>Actor</type>
+    <sortorder>1</sortorder>
+  </actor>
+  <genre>Adult</genre>
+  <tag>Country</tag>
+  <tag>Heels Stay On</tag>
+  <tag>Outdoors</tag>  
+  <uniqueid type="stash">13954</uniqueid>
+  <!-- Fields won't necessary appear in the order shown in this file, but these are the one's added by Jellyfin -->
+  <dateadded>2022-06-05 01:03:03</dateadded>
+  <lockdata>false</lockdata>
+  <runtime>29</runtime>
+  <stashid>13954</stashid>
+  <fileinfo>
+    <streamdetails>
+      <video>
+        <codec>h264</codec>
+        <micodec>h264</micodec>
+        <bitrate>5240314</bitrate>
+        <width>1280</width>
+        <height>720</height>
+        <aspect>16:9</aspect>
+        <aspectratio>16:9</aspectratio>
+        <framerate>30</framerate>
+        <language>eng</language>
+        <scantype>progressive</scantype>
+        <default>True</default>
+        <forced>False</forced>
+        <duration>28</duration>
+        <durationinseconds>1720</durationinseconds>
+      </video>
+      <audio>
+        <codec>aac</codec>
+        <micodec>aac</micodec>
+        <bitrate>112557</bitrate>
+        <language>eng</language>
+        <scantype>progressive</scantype>
+        <channels>2</channels>
+        <samplingrate>44100</samplingrate>
+        <default>True</default>
+        <forced>False</forced>
+      </audio>
+    </streamdetails>
+  </fileinfo>  
+</movie>
