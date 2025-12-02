@@ -27,17 +27,30 @@ Generate NFO metadata files for Jellyfin/Emby, organize/rename video files, and 
 
 [Documentation](plugins/mcMetadata/README.md)
 
-### Performer Image Search (v1.1.0)
+### Performer Image Search (v1.2.2)
 
 Search multiple image sources directly from performer pages and set images with one click.
 
 **Features:**
-- Search Babepedia, PornPics, FreeOnes, EliteBabes, Boobpedia, and Bing
+- Search Babepedia, PornPics, FreeOnes, EliteBabes, Boobpedia, JavDatabase, and Bing
 - Preview images before setting
 - Filter by aspect ratio (portrait, landscape, square)
 - Customizable search suffix
 
 [Documentation](plugins/performerImageSearch/README.md)
+
+### Missing Scenes (v1.0.0)
+
+Discover scenes from StashDB that you don't have in your local library.
+
+**Features:**
+- Find missing scenes for any performer or studio linked to StashDB
+- Visual grid with thumbnails, titles, dates, and performer info
+- Direct links to view scenes on StashDB
+- Multi-endpoint support (StashDB, FansDB, etc.)
+- Optional Whisparr integration for automated downloading
+
+[Documentation](plugins/missingScenes/README.md)
 
 ## Support
 
