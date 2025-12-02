@@ -1,6 +1,6 @@
 name: Performer Image Search
-description: Search multiple sources (Babepedia, PornPics, FreeOnes, EliteBabes, Boobpedia, Bing) for performer images and set them directly from the performer page
-version: 1.1.0
+description: Search multiple sources for performer images. Supports mainstream, JAV, male, and trans performers with configurable sources.
+version: 1.2.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer pages
@@ -20,6 +20,35 @@ settings:
     displayName: Default Layout
     description: Default aspect ratio filter (All, Portrait, Landscape, Square)
     type: STRING
+  # Source toggles - all enabled by default
+  enableBabepedia:
+    displayName: Enable Babepedia
+    description: Female performers only. Curated photos.
+    type: BOOLEAN
+  enablePornPics:
+    displayName: Enable PornPics
+    description: Mainstream performers. Has male performers.
+    type: BOOLEAN
+  enableFreeOnes:
+    displayName: Enable FreeOnes
+    description: Large database with male and trans performers.
+    type: BOOLEAN
+  enableEliteBabes:
+    displayName: Enable EliteBabes
+    description: Female performers only. High-quality photosets.
+    type: BOOLEAN
+  enableBoobpedia:
+    displayName: Enable Boobpedia
+    description: Female performers only. Wiki-style database.
+    type: BOOLEAN
+  enableJavDatabase:
+    displayName: Enable JavDatabase
+    description: Japanese adult video performers.
+    type: BOOLEAN
+  enableBing:
+    displayName: Enable Bing Images
+    description: Fallback search. Works for all performer types.
+    type: BOOLEAN
 
 # Python backend for image search (called via runPluginOperation from JS)
 exec:
