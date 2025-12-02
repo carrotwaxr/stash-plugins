@@ -132,8 +132,8 @@ def __get_actor_image_path(performer_name, settings):
         # Jellyfin: /metadata/People/J/John Doe/folder.jpg
         return os.path.join(base_path, first_letter, performer_name, "folder.jpg")
     elif media_server == "emby":
-        # Emby: /metadata/People/j/John Doe/folder.jpg (lowercase first letter)
-        return os.path.join(base_path, first_letter.lower(), performer_name, "folder.jpg")
+        # Emby: /metadata/People/John Doe/folder.jpg (no A-Z subfolders)
+        return os.path.join(base_path, performer_name, "folder.jpg")
     else:
         log.warning(f"Unknown media server type: {media_server}")
         return None
