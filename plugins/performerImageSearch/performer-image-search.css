@@ -264,10 +264,17 @@
   border-radius: 4px;
 }
 
+.pis-preview-dims {
+  color: #aaa;
+  font-size: 14px;
+  margin-top: 12px;
+  text-align: center;
+}
+
 .pis-preview-actions {
   display: flex;
   gap: 12px;
-  margin-top: 20px;
+  margin-top: 16px;
 }
 
 /* Scrollbar Styling */

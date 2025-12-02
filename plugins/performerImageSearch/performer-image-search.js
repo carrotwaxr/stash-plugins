@@ -355,6 +355,7 @@
       <div id="pis-preview-overlay" class="pis-preview-overlay" style="display: none;" onclick="window.pisClosePreview()">
         <div class="pis-preview-content" onclick="event.stopPropagation()">
           <img id="pis-preview-image" src="" alt="Preview" />
+          <div id="pis-preview-dims" class="pis-preview-dims"></div>
           <div class="pis-preview-actions">
             <button class="pis-btn pis-btn-primary" onclick="window.pisConfirmImage()">Set as Performer Image</button>
             <button class="pis-btn" onclick="window.pisClosePreview()">Cancel</button>
@@ -538,11 +539,6 @@
     resultsContainer.innerHTML = filteredWithIndex
       .map(
         ({ result, originalIndex }) => {
-          const dims = imageDimensions[originalIndex];
-          const dimStr = dims && dims.width && dims.height
-            ? `${dims.width}x${dims.height}`
-            : "";
-
           return `
         <div class="pis-result-item" onclick="window.pisShowPreview(${originalIndex})">
           <img
@@ -553,7 +549,7 @@
             onerror="this.parentElement.style.display='none'"
           />
           <div class="pis-result-info">
-            ${dimStr}
+            ${escapeHtml(result.source)}
           </div>
         </div>
       `;
@@ -573,8 +569,19 @@
 
     const overlay = document.getElementById("pis-preview-overlay");
     const img = document.getElementById("pis-preview-image");
+    const dimInfo = document.getElementById("pis-preview-dims");
 
     if (overlay && img) {
+      // Clear previous dimensions
+      if (dimInfo) dimInfo.textContent = "Loading...";
+
+      // Show dimensions once image loads
+      img.onload = function () {
+        if (dimInfo) {
+          dimInfo.textContent = `${img.naturalWidth} x ${img.naturalHeight} - ${result.source}`;
+        }
+      };
+
       // Try full-size first, fall back to thumbnail if it fails
       img.onerror = function () {
         if (img.src !== result.thumbnail) {
