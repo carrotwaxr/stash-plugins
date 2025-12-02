@@ -1,20 +1,29 @@
+"""Settings management for mcMetadata plugin."""
+
 import configparser
 import os
 import re
 import sys
 import stashapi.log as log
 
+# Required settings for all modes
 REQUIRED_SETTINGS = ["dry_run", "enable_actor_images", "enable_hook", "enable_renamer"]
+
+# Required if renamer is enabled
 REQUIRED_SETTINGS_IF_RENAMER = [
     "renamer_path",
     "renamer_ignore_files_in_path",
     "renamer_enable_mark_organized",
     "renamer_path_template",
 ]
+
+# Required if actor images are enabled
 REQUIRED_SETTINGS_IF_ACTORS = [
     "media_server",
     "actor_metadata_path",
 ]
+
+# Boolean settings (will be coerced from string)
 SETTINGS_BOOLEANS = [
     "dry_run",
     "enable_actor_images",
@@ -22,8 +31,12 @@ SETTINGS_BOOLEANS = [
     "enable_renamer",
     "renamer_ignore_files_in_path",
     "renamer_enable_mark_organized",
+    "nfo_skip_existing",
 ]
+
+# Valid values for specific settings
 VALID_MEDIA_SERVERS = ["emby", "jellyfin"]
+VALID_MULTI_FILE_MODES = ["all", "primary_only", "skip"]
 
 
 def __validate_boolean(name, value):
@@ -60,6 +73,15 @@ def validate_media_server(settings):
         if settings["media_server"] not in VALID_MEDIA_SERVERS:
             raise ValueError(
                 f"Valid media_server values are: {str(VALID_MEDIA_SERVERS)}"
+            )
+
+
+def validate_multi_file_mode(settings):
+    if settings["enable_renamer"]:
+        mode = settings.get("renamer_multi_file_mode", "all")
+        if mode not in VALID_MULTI_FILE_MODES:
+            raise ValueError(
+                f"Valid renamer_multi_file_mode values are: {str(VALID_MULTI_FILE_MODES)}"
             )
 
 
@@ -138,6 +160,7 @@ SETTINGS_VALIDATORS = {
     "renamer_ignore_files_in_path": validate_renamer_ignore_files_in_path,
     "renamer_enable_mark_organized": validate_renamer_enable_mark_organized,
     "renamer_filename_budget": validate_renamer_filename_budget,
+    "renamer_multi_file_mode": validate_multi_file_mode,
     "renamer_path": validate_renamer_path,
     "renamer_path_template": validate_renamer_path_template,
 }
