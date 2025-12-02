@@ -1,33 +1,68 @@
 name: mcMetadata
 description: Generates NFO metadata files for Jellyfin/Emby, organizes/renames video files using customizable templates, and exports performer images to media server folders.
 url: https://github.com/carrotwaxr/stash-plugins/tree/main/plugins/mcMetadata
-version: 1.0.0
+version: 1.1.0
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
 interface: raw
+
+settings:
+  dryRun:
+    displayName: Dry Run Mode
+    description: Preview changes without making them. Check logs to see what would happen.
+    type: BOOLEAN
+  enableRenamer:
+    displayName: Enable File Renamer
+    description: Move/rename video files based on the path template
+    type: BOOLEAN
+  renamerPath:
+    displayName: Renamer Base Path
+    description: Base directory for renamed files (must be in a Stash library)
+    type: STRING
+  renamerPathTemplate:
+    displayName: Renamer Path Template
+    description: "Template for renamed files. Variables: $Studio, $Title, $ReleaseDate, $ReleaseYear, $Performers, $FemalePerformers, $MalePerformers, $Resolution, $Quality, $StashID, $Tags"
+    type: STRING
+  renamerFilepathBudget:
+    displayName: Max Filepath Length
+    description: Maximum total path length (default 250, adjust for your OS)
+    type: NUMBER
+  renamerIgnoreFilesInPath:
+    displayName: Skip Files Already in Path
+    description: Don't rename files that are already in the renamer base path
+    type: BOOLEAN
+  renamerMarkOrganized:
+    displayName: Mark Scenes as Organized
+    description: Set the Organized flag on scenes after renaming
+    type: BOOLEAN
+  renamerMultiFileMode:
+    displayName: Multi-File Mode
+    description: "How to handle scenes with multiple files: all (process all), primary_only (first file only), skip (skip multi-file scenes)"
+    type: STRING
+  nfoSkipExisting:
+    displayName: Skip Existing NFO Files
+    description: Don't overwrite NFO files that already exist
+    type: BOOLEAN
+  enableActorImages:
+    displayName: Enable Actor Images
+    description: Copy performer images to media server metadata folder
+    type: BOOLEAN
+  mediaServer:
+    displayName: Media Server Type
+    description: "Target media server: jellyfin or emby"
+    type: STRING
+  actorMetadataPath:
+    displayName: Actor Metadata Path
+    description: Path to media server's People metadata folder (e.g., /config/data/metadata/People/)
+    type: STRING
+
 hooks:
   - name: hook_mcmetadata
     description: Organize/rename video files and create/update NFO metadata when you update a scene.
     triggeredBy:
       - Scene.Update.Post
 tasks:
-  - name: "Toggle Hook"
-    description: Enable/disable the Scene Update hook
-    defaultArgs:
-      mode: enable
-  - name: "Disable Hook"
-    description: Disable the Scene Update hook
-    defaultArgs:
-      mode: disable
-  - name: "Toggle Dry Run"
-    description: Enable/disable dry-run mode (preview changes without making them)
-    defaultArgs:
-      mode: dryrun
-  - name: "Toggle Renamer"
-    description: Enable/disable file renaming/organizing
-    defaultArgs:
-      mode: renamer
   - name: "Bulk Update Scenes"
     description: Process all scenes - rename files, generate NFOs, and copy performer images
     defaultArgs:
