@@ -4,7 +4,7 @@ mcMetadata - Stash Plugin for Media Center Metadata Generation
 Generates NFO files for Jellyfin/Emby, organizes video files according to
 configurable templates, and exports performer images to media server folders.
 
-Version: 1.1.0
+Version: 1.2.2
 """
 
 import json
@@ -46,6 +46,7 @@ def get_settings(stash_instance):
     return {
         "dry_run": plugin_config.get("dryRun", True),  # Default to safe mode
         "enable_hook": plugin_config.get("enableHook", False),  # Default off for safety
+        "require_stash_id": plugin_config.get("requireStashId", False),  # Default off - process all scenes
         "enable_renamer": plugin_config.get("enableRenamer", False),
         "renamer_path": plugin_config.get("renamerPath", ""),
         "renamer_path_template": plugin_config.get(
@@ -127,12 +128,16 @@ def main():
                 log.warning(f"Scene {scene_id} not found")
                 return
 
+            # Check if we require StashDB link (configurable, default OFF)
+            require_stash_id = SETTINGS.get("require_stash_id", False)
             stash_ids = scene.get("stash_ids", [])
-            if stash_ids:
-                log.info(f"Processing scene {scene_id}")
-                process_scene(scene, stash, SETTINGS, api_key)
-            else:
-                log.debug(f"Scene {scene_id} has no StashID, skipping")
+
+            if require_stash_id and not stash_ids:
+                log.debug(f"Scene {scene_id} has no StashID, skipping (requireStashId is enabled)")
+                return
+
+            log.info(f"Processing scene {scene_id}")
+            process_scene(scene, stash, SETTINGS, api_key)
 
         else:
             log.warning(f"Unknown mode: {mode}")
