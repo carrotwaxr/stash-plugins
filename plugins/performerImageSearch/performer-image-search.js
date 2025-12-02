@@ -362,7 +362,7 @@
           <img id="pis-preview-image" src="" alt="Preview" />
           <div id="pis-preview-dims" class="pis-preview-dims"></div>
           <div class="pis-preview-actions">
-            <button class="pis-btn pis-btn-primary" onclick="window.pisConfirmImage()">Set as Performer Image</button>
+            <button id="pis-confirm-btn" class="pis-btn pis-btn-primary" onclick="window.pisConfirmImage()">Set as Performer Image</button>
             <button class="pis-btn" onclick="window.pisClosePreview()">Cancel</button>
           </div>
         </div>
@@ -542,8 +542,8 @@
             src="${escapeHtml(result.thumbnail)}"
             alt="${escapeHtml(result.title)}"
             loading="lazy"
-            onload="window.pisImageLoaded(this, ${originalIndex})"
-            onerror="this.parentElement.style.display='none'"
+            onload="this.classList.add('pis-loaded'); window.pisImageLoaded(this, ${originalIndex})"
+            onerror="this.parentElement.classList.add('pis-error')"
           />
           <div class="pis-result-info">
             ${escapeHtml(result.source)}
@@ -608,11 +608,25 @@
   window.pisConfirmImage = async function () {
     if (!previewImage || !currentPerformerId) return;
 
+    const confirmBtn = document.getElementById("pis-confirm-btn");
+    const originalText = confirmBtn?.textContent;
+
+    // Show loading state on button
+    if (confirmBtn) {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = "Saving...";
+      confirmBtn.classList.add("pis-btn-loading");
+    }
+
     showStatus("Setting performer image...", "loading");
 
     try {
       await setPerformerImage(currentPerformerId, previewImage);
       showStatus("Image set successfully!", "success");
+
+      if (confirmBtn) {
+        confirmBtn.textContent = "Saved!";
+      }
 
       // Close modal after brief delay
       setTimeout(() => {
@@ -622,6 +636,12 @@
       }, 1000);
     } catch (e) {
       showStatus(`Failed to set image: ${e.message}`, "error");
+      // Restore button state on error
+      if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = originalText;
+        confirmBtn.classList.remove("pis-btn-loading");
+      }
     }
   };
 
