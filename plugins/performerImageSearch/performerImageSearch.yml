@@ -1,6 +1,6 @@
 name: Performer Image Search
 description: Search multiple sources for performer images. Supports mainstream, JAV, male, and trans performers with configurable sources.
-version: 1.2.1
+version: 1.2.2
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer pages
@@ -11,53 +11,46 @@ ui:
     - performer-image-search.css
 
 # Plugin settings configurable in Stash UI (Settings > Plugins)
+# Note: Stash doesn't support YAML defaults. Defaults are handled in JavaScript code.
+# All source toggles default to enabled (true) when not explicitly set.
 settings:
   defaultSearchSuffix:
     displayName: Default Search Suffix
-    description: Text appended to performer name when searching (e.g., "pornstar solo")
+    description: Text appended to performer name when searching (e.g., "pornstar solo"). Default is "pornstar".
     type: STRING
-    default: "pornstar"
   defaultLayout:
     displayName: Default Layout
-    description: Default aspect ratio filter (All, Portrait, Landscape, Square)
+    description: Default aspect ratio filter (All, Portrait, Landscape, Square). Default is "All".
     type: STRING
-    default: "All"
-  # Source toggles - all enabled by default
+  # Source toggles - all enabled by default (handled in JS code)
   enableBabepedia:
     displayName: Enable Babepedia
-    description: Female performers only. Curated photos.
+    description: Female performers only. Curated photos. Enabled by default.
     type: BOOLEAN
-    default: true
   enablePornPics:
     displayName: Enable PornPics
-    description: Mainstream performers. Has male performers.
+    description: Mainstream performers. Has male performers. Enabled by default.
     type: BOOLEAN
-    default: true
   enableFreeOnes:
     displayName: Enable FreeOnes
-    description: Large database with male and trans performers.
+    description: Large database with male and trans performers. Enabled by default.
     type: BOOLEAN
-    default: true
   enableEliteBabes:
     displayName: Enable EliteBabes
-    description: Female performers only. High-quality photosets.
+    description: Female performers only. High-quality photosets. Enabled by default.
     type: BOOLEAN
-    default: true
   enableBoobpedia:
     displayName: Enable Boobpedia
-    description: Female performers only. Wiki-style database.
+    description: Female performers only. Wiki-style database. Enabled by default.
     type: BOOLEAN
-    default: true
   enableJavDatabase:
     displayName: Enable JavDatabase
-    description: Japanese adult video performers.
+    description: Japanese adult video performers. Enabled by default.
     type: BOOLEAN
-    default: true
   enableBing:
     displayName: Enable Bing Images
-    description: Fallback search. Works for all performer types.
+    description: Fallback search. Works for all performer types. Enabled by default.
     type: BOOLEAN
-    default: true
 
 # Python backend for image search (called via runPluginOperation from JS)
 exec:

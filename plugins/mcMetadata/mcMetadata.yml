@@ -7,66 +7,56 @@ exec:
   - "{pluginDir}/mcMetadata.py"
 interface: raw
 
+# Note: Stash doesn't support YAML defaults. Defaults are handled in Python code.
 settings:
   dryRun:
     displayName: Dry Run Mode
-    description: Preview changes without making them. Check logs to see what would happen.
+    description: Preview changes without making them. Check logs to see what would happen. Default is ON.
     type: BOOLEAN
-    default: true
   enableHook:
     displayName: Enable Scene Update Hook
-    description: Process scenes automatically when you update them. Disable to only use bulk tasks.
+    description: Process scenes automatically when you update them. Disable to only use bulk tasks. Default is OFF.
     type: BOOLEAN
-    default: false
   enableRenamer:
     displayName: Enable File Renamer
-    description: Move/rename video files based on the path template
+    description: Move/rename video files based on the path template. Default is OFF.
     type: BOOLEAN
-    default: false
   renamerPath:
     displayName: Renamer Base Path
     description: Base directory for renamed files (must be in a Stash library)
     type: STRING
   renamerPathTemplate:
     displayName: Renamer Path Template
-    description: "Template for renamed files. Variables: $Studio, $Title, $ReleaseDate, $ReleaseYear, $Performers, $FemalePerformers, $MalePerformers, $Resolution, $Quality, $StashID, $Tags"
+    description: "Template for renamed files. Variables: $Studio, $Title, $ReleaseDate, $ReleaseYear, $Performers, $FemalePerformers, $MalePerformers, $Resolution, $Quality, $StashID, $Tags. Default: $Studio/$Title - $Performers $ReleaseDate [$Resolution]"
     type: STRING
-    default: "$Studio/$Title - $Performers $ReleaseDate [$Resolution]"
   renamerFilepathBudget:
     displayName: Max Filepath Length
-    description: Maximum total path length (default 250, adjust for your OS)
+    description: Maximum total path length. Default is 250.
     type: NUMBER
-    default: 250
   renamerIgnoreFilesInPath:
     displayName: Skip Files Already in Path
-    description: Don't rename files that are already in the renamer base path
+    description: Don't rename files that are already in the renamer base path. Default is OFF.
     type: BOOLEAN
-    default: false
   renamerMarkOrganized:
     displayName: Mark Scenes as Organized
-    description: Set the Organized flag on scenes after renaming
+    description: Set the Organized flag on scenes after renaming. Default is ON.
     type: BOOLEAN
-    default: true
   renamerMultiFileMode:
     displayName: Multi-File Mode
-    description: "How to handle scenes with multiple files: all (process all), primary_only (first file only), skip (skip multi-file scenes)"
+    description: "How to handle scenes with multiple files: all (process all), primary_only (first file only), skip (skip multi-file scenes). Default is 'all'."
     type: STRING
-    default: "all"
   nfoSkipExisting:
     displayName: Skip Existing NFO Files
-    description: Don't overwrite NFO files that already exist
+    description: Don't overwrite NFO files that already exist. Default is OFF.
     type: BOOLEAN
-    default: false
   enableActorImages:
     displayName: Enable Actor Images
-    description: Copy performer images to media server metadata folder
+    description: Copy performer images to media server metadata folder. Default is OFF.
     type: BOOLEAN
-    default: false
   mediaServer:
     displayName: Media Server Type
-    description: "Target media server: jellyfin or emby"
+    description: "Target media server: jellyfin or emby. Default is 'jellyfin'."
     type: STRING
-    default: "jellyfin"
   actorMetadataPath:
     displayName: Actor Metadata Path
     description: Path to media server's People metadata folder (e.g., /config/data/metadata/People/)
