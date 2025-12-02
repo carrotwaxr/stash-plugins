@@ -14,7 +14,7 @@ Add this repository as a plugin source in Stash:
 
 ## Available Plugins
 
-### mcMetadata (v1.2.0)
+### mcMetadata (v1.2.1)
 
 Generate NFO metadata files for Jellyfin/Emby, organize/rename video files, and export performer images.
 

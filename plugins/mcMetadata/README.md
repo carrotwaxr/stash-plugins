@@ -1,6 +1,6 @@
 # mcMetadata Plugin for [Stash](https://github.com/stashapp/stash)
 
-**Version**: 1.2.0
+**Version**: 1.2.1
 
 This plugin is for users who manage their collection with Stash but serve content via Jellyfin or Emby. Instead of relying on those media servers' scrapers, mcMetadata leverages your Stash database to generate `.nfo` metadata files and performer images that Jellyfin/Emby can use.
 
@@ -138,6 +138,10 @@ Common issues:
 - `stashapp-tools>=0.2.59` (installed automatically)
 
 ## Changelog
+
+### v1.2.1
+- Added explicit defaults to all settings in plugin YAML
+- Dry Run Mode now correctly defaults to ON for new installations
 
 ### v1.2.0
 - Fixed Emby actor folder structure (no A-Z subfolders)
