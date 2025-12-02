@@ -6,15 +6,7 @@
   // Default settings
   const DEFAULTS = {
     searchSuffix: "pornstar",
-    size: "Large",
     layout: "All",
-  };
-
-  // Size filter thresholds (based on shorter dimension)
-  const SIZE_THRESHOLDS = {
-    Large: 400,    // min(width, height) > 400
-    Medium: 200,   // min(width, height) between 200-400
-    Small: 0,      // min(width, height) < 200
   };
 
   // Aspect ratio thresholds
@@ -92,7 +84,6 @@
 
       return {
         searchSuffix: pluginConfig?.defaultSearchSuffix || DEFAULTS.searchSuffix,
-        size: pluginConfig?.defaultSize || DEFAULTS.size,
         layout: pluginConfig?.defaultLayout || DEFAULTS.layout,
       };
     } catch (e) {
@@ -148,13 +139,12 @@
   }
 
   /**
-   * Apply size and layout filters to results based on loaded dimensions
+   * Apply aspect ratio filter to results based on loaded dimensions
    */
   function applyFilters() {
-    const sizeFilter = document.getElementById("pis-size")?.value || "All";
     const layoutFilter = document.getElementById("pis-layout")?.value || "All";
 
-    if (sizeFilter === "All" && layoutFilter === "All") {
+    if (layoutFilter === "All") {
       filteredResults = [...allResults];
       return;
     }
@@ -168,28 +158,12 @@
       }
 
       const { width, height } = dims;
-      const minDim = Math.min(width, height);
       const ratio = width / height;
 
-      // Size filter (based on shorter dimension)
-      if (sizeFilter !== "All") {
-        if (sizeFilter === "Large" && minDim <= SIZE_THRESHOLDS.Large) {
-          return false;
-        } else if (sizeFilter === "Medium") {
-          if (minDim <= SIZE_THRESHOLDS.Medium || minDim > SIZE_THRESHOLDS.Large) {
-            return false;
-          }
-        } else if (sizeFilter === "Small" && minDim > SIZE_THRESHOLDS.Medium) {
-          return false;
-        }
-      }
-
       // Layout filter
-      if (layoutFilter !== "All") {
-        const [minRatio, maxRatio] = ASPECT_THRESHOLDS[layoutFilter] || [0, Infinity];
-        if (!(ratio >= minRatio && ratio < maxRatio)) {
-          return false;
-        }
+      const [minRatio, maxRatio] = ASPECT_THRESHOLDS[layoutFilter] || [0, Infinity];
+      if (!(ratio >= minRatio && ratio < maxRatio)) {
+        return false;
       }
 
       return true;
@@ -318,16 +292,6 @@
 
             <div class="pis-filter-row">
               <label>
-                Size:
-                <select id="pis-size" class="pis-select">
-                  <option value="Large" ${settings.size === "Large" ? "selected" : ""}>Large</option>
-                  <option value="Medium" ${settings.size === "Medium" ? "selected" : ""}>Medium</option>
-                  <option value="Small" ${settings.size === "Small" ? "selected" : ""}>Small</option>
-                  <option value="All" ${settings.size === "All" ? "selected" : ""}>All Sizes</option>
-                </select>
-              </label>
-
-              <label>
                 Aspect:
                 <select id="pis-layout" class="pis-select">
                   <option value="All" ${settings.layout === "All" ? "selected" : ""}>Any</option>
@@ -375,16 +339,8 @@
       searchInput.focus();
     }
 
-    // Add filter change handlers - apply filters client-side (instant!)
-    const sizeSelect = document.getElementById("pis-size");
+    // Add filter change handler - apply filters client-side (instant!)
     const layoutSelect = document.getElementById("pis-layout");
-    if (sizeSelect) sizeSelect.addEventListener("change", () => {
-      if (allResults.length > 0) {
-        applyFilters();
-        renderResults();
-        updateFilterStatus();
-      }
-    });
     if (layoutSelect) layoutSelect.addEventListener("change", () => {
       if (allResults.length > 0) {
         applyFilters();
