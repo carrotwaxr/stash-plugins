@@ -1,0 +1,48 @@
+name: Missing Scenes
+description: Discover scenes from StashDB that you don't have locally. View missing scenes for performers and studios, with optional Whisparr integration for automated downloading.
+version: 1.0.0
+url: https://github.com/carrotwaxr/stash-plugins
+
+# UI plugin - injects button and modal on performer/studio pages
+ui:
+  javascript:
+    - missing-scenes.js
+  css:
+    - missing-scenes.css
+
+# Plugin settings configurable in Stash UI (Settings > Plugins)
+# Note: Stash doesn't support YAML defaults. Defaults are handled in code.
+settings:
+  # Stash-box endpoint selection
+  stashBoxEndpoint:
+    displayName: Stash-Box Endpoint
+    description: Which stash-box to query for missing scenes. Leave empty to use the first configured endpoint (usually StashDB). Enter the full GraphQL URL (e.g., https://stashdb.org/graphql).
+    type: STRING
+
+  # Whisparr integration (optional)
+  whisparrUrl:
+    displayName: Whisparr URL
+    description: Optional. URL to your Whisparr instance (e.g., http://localhost:6969). Leave empty to disable Whisparr integration.
+    type: STRING
+  whisparrApiKey:
+    displayName: Whisparr API Key
+    description: Optional. API key for Whisparr (found in Settings > General > Security).
+    type: STRING
+  whisparrQualityProfile:
+    displayName: Whisparr Quality Profile ID
+    description: Optional. Quality profile ID to use when adding scenes (default is 1). Find IDs in Whisparr Settings > Profiles.
+    type: NUMBER
+  whisparrRootFolder:
+    displayName: Whisparr Root Folder
+    description: Optional. Root folder path for downloaded scenes (e.g., /data/videos). Must match a root folder configured in Whisparr.
+    type: STRING
+  whisparrSearchOnAdd:
+    displayName: Search on Add
+    description: Automatically search for scenes when adding to Whisparr. Enabled by default.
+    type: BOOLEAN
+
+# Python backend for StashDB queries (called via runPluginOperation from JS)
+exec:
+  - python
+  - "{pluginDir}/missing_scenes.py"
+interface: raw
