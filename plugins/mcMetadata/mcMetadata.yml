@@ -1,7 +1,7 @@
 name: mcMetadata
 description: Generates NFO metadata files for Jellyfin/Emby, organizes/renames video files using customizable templates, and exports performer images to media server folders.
 url: https://github.com/carrotwaxr/stash-plugins/tree/main/plugins/mcMetadata
-version: 1.2.0
+version: 1.2.1
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
@@ -12,14 +12,17 @@ settings:
     displayName: Dry Run Mode
     description: Preview changes without making them. Check logs to see what would happen.
     type: BOOLEAN
+    default: true
   enableHook:
     displayName: Enable Scene Update Hook
     description: Process scenes automatically when you update them. Disable to only use bulk tasks.
     type: BOOLEAN
+    default: false
   enableRenamer:
     displayName: Enable File Renamer
     description: Move/rename video files based on the path template
     type: BOOLEAN
+    default: false
   renamerPath:
     displayName: Renamer Base Path
     description: Base directory for renamed files (must be in a Stash library)
@@ -28,34 +31,42 @@ settings:
     displayName: Renamer Path Template
     description: "Template for renamed files. Variables: $Studio, $Title, $ReleaseDate, $ReleaseYear, $Performers, $FemalePerformers, $MalePerformers, $Resolution, $Quality, $StashID, $Tags"
     type: STRING
+    default: "$Studio/$Title - $Performers $ReleaseDate [$Resolution]"
   renamerFilepathBudget:
     displayName: Max Filepath Length
     description: Maximum total path length (default 250, adjust for your OS)
     type: NUMBER
+    default: 250
   renamerIgnoreFilesInPath:
     displayName: Skip Files Already in Path
     description: Don't rename files that are already in the renamer base path
     type: BOOLEAN
+    default: false
   renamerMarkOrganized:
     displayName: Mark Scenes as Organized
     description: Set the Organized flag on scenes after renaming
     type: BOOLEAN
+    default: true
   renamerMultiFileMode:
     displayName: Multi-File Mode
     description: "How to handle scenes with multiple files: all (process all), primary_only (first file only), skip (skip multi-file scenes)"
     type: STRING
+    default: "all"
   nfoSkipExisting:
     displayName: Skip Existing NFO Files
     description: Don't overwrite NFO files that already exist
     type: BOOLEAN
+    default: false
   enableActorImages:
     displayName: Enable Actor Images
     description: Copy performer images to media server metadata folder
     type: BOOLEAN
+    default: false
   mediaServer:
     displayName: Media Server Type
     description: "Target media server: jellyfin or emby"
     type: STRING
+    default: "jellyfin"
   actorMetadataPath:
     displayName: Actor Metadata Path
     description: Path to media server's People metadata folder (e.g., /config/data/metadata/People/)
