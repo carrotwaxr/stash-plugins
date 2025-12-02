@@ -2,14 +2,16 @@
 """
 Performer Image Search - Multi-Source Image Search Backend
 Searches multiple adult image sources and combines results.
+Supports mainstream, JAV, male, and trans performers.
 
-Sources (in order of priority):
-1. Babepedia - Adult performer database with curated photos
-2. PornPics - Extensive pornstar photo galleries (1280px images)
-3. FreeOnes - Large performer photo database
-4. EliteBabes - High-quality photosets (1200px images)
-5. Boobpedia - Wiki-style performer database
-6. Bing Images - Fallback with safe search off
+Sources (configurable in Settings > Plugins):
+1. Babepedia - Female performers, curated photos
+2. PornPics - Mainstream performers (incl. male)
+3. FreeOnes - Large database with male and trans performers
+4. EliteBabes - Female performers, high-quality photosets
+5. Boobpedia - Female performers, wiki-style
+6. JavDatabase - Japanese adult video performers
+7. Bing Images - Fallback for all performer types
 
 Uses only Python standard library - no pip dependencies.
 """
@@ -630,6 +632,134 @@ def search_boobpedia(name, max_results=50):
     return results
 
 
+def search_javdatabase(name, max_results=100, max_pages=5):
+    """
+    Search JavDatabase for JAV performer images.
+    JavDatabase has idol profiles with photos and movie covers.
+    URL format: https://www.javdatabase.com/idols/name-here/
+    Image format: https://www.javdatabase.com/idolimages/full/name.webp
+    """
+    results = []
+
+    try:
+        # JavDatabase uses lowercase hyphenated names
+        url_name = name.lower().replace(" ", "-")
+        base_url = f"https://www.javdatabase.com/idols/{urllib.parse.quote(url_name)}/"
+        log.LogDebug(f"[JavDatabase] Base URL: {base_url}")
+
+        seen = set()
+
+        # Try to get the main profile page and paginated gallery pages
+        pages_to_try = [base_url] + [f"{base_url}?ipage={i}" for i in range(2, max_pages + 1)]
+
+        for page_url in pages_to_try:
+            if len(results) >= max_results:
+                break
+
+            try:
+                log.LogDebug(f"[JavDatabase] Fetching: {page_url}")
+                req = urllib.request.Request(page_url, headers=HEADERS)
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    html = response.read().decode('utf-8', errors='ignore')
+
+                # Extract profile/idol images (webp format)
+                # Pattern: /idolimages/full/name.webp or /idolimages/thumb/name.webp
+                idol_pattern = r'(https://www\.javdatabase\.com/idolimages/(?:full|thumb)/[^"\'>\s]+\.webp)'
+                idol_matches = re.findall(idol_pattern, html)
+                log.LogDebug(f"[JavDatabase] Found {len(idol_matches)} idol image matches")
+
+                for img_url in idol_matches:
+                    if img_url in seen:
+                        continue
+                    seen.add(img_url)
+
+                    # Use thumb as thumbnail, full as image
+                    if '/thumb/' in img_url:
+                        thumb_url = img_url
+                        image_url = img_url.replace('/thumb/', '/full/')
+                    else:
+                        image_url = img_url
+                        thumb_url = img_url.replace('/full/', '/thumb/')
+
+                    results.append({
+                        "thumbnail": thumb_url,
+                        "image": image_url,
+                        "title": f"{name} - JavDatabase",
+                        "source": "JavDatabase",
+                        "width": 0,
+                        "height": 0,
+                    })
+
+                    if len(results) >= max_results:
+                        break
+
+                # Also extract movie cover thumbnails
+                # Pattern: /covers/thumb/prefix/codeps.webp
+                cover_pattern = r'(https://www\.javdatabase\.com/covers/thumb/[^"\'>\s]+\.webp)'
+                cover_matches = re.findall(cover_pattern, html)
+                log.LogDebug(f"[JavDatabase] Found {len(cover_matches)} cover matches")
+
+                for img_url in cover_matches[:20]:  # Limit covers per page
+                    if img_url in seen or len(results) >= max_results:
+                        continue
+                    seen.add(img_url)
+
+                    # Covers: thumb -> full by replacing path
+                    thumb_url = img_url
+                    image_url = img_url.replace('/covers/thumb/', '/covers/full/')
+
+                    results.append({
+                        "thumbnail": thumb_url,
+                        "image": image_url,
+                        "title": f"{name} - JavDatabase Cover",
+                        "source": "JavDatabase",
+                        "width": 0,
+                        "height": 0,
+                    })
+
+                # Extract vertical/promotional images
+                vertical_pattern = r'(https://www\.javdatabase\.com/vertical/[^"\'>\s]+\.jpg)'
+                vertical_matches = re.findall(vertical_pattern, html)
+                log.LogDebug(f"[JavDatabase] Found {len(vertical_matches)} vertical matches")
+
+                for img_url in vertical_matches[:10]:
+                    if img_url in seen or len(results) >= max_results:
+                        continue
+                    seen.add(img_url)
+
+                    results.append({
+                        "thumbnail": img_url,
+                        "image": img_url,
+                        "title": f"{name} - JavDatabase",
+                        "source": "JavDatabase",
+                        "width": 0,
+                        "height": 0,
+                    })
+
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    log.LogDebug(f"[JavDatabase] Page not found: {page_url}")
+                    break  # No more pages
+                else:
+                    log.LogDebug(f"[JavDatabase] HTTP {e.code} for {page_url}")
+                continue
+            except Exception as e:
+                log.LogDebug(f"[JavDatabase] Error fetching {page_url}: {e}")
+                continue
+
+        log.LogInfo(f"[JavDatabase] Found {len(results)} images for: {name}")
+
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            log.LogDebug(f"[JavDatabase] Performer not found: {name}")
+        else:
+            log.LogWarning(f"[JavDatabase] HTTP error {e.code}: {name}")
+    except Exception as e:
+        log.LogWarning(f"[JavDatabase] Error: {e}")
+
+    return results
+
+
 def search_bing_images(query, size="Large", layout="All", max_results=20):
     """
     Search Bing Images with safe search off.
@@ -753,6 +883,8 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
         results = search_elitebabes(performer_name, 100, 10)
     elif source == "boobpedia":
         results = search_boobpedia(performer_name, 50)
+    elif source == "javdatabase":
+        results = search_javdatabase(performer_name, 100, 5)
     elif source == "bing":
         # Use the full query (with suffix) for Bing
         results = search_bing_images(query, size_filter, layout_filter, 30)
