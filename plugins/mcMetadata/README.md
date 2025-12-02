@@ -1,99 +1,162 @@
 # mcMetadata Plugin for [Stash](https://github.com/stashapp/stash)
 
-This plugin is intended for those who are managing their collection with Stash but actually serve the content via another application like Emby or Jellyfin. If this describes your setup you probably already know that there's a few plugins for scraping/generating metadata for those media servers but of course even when those plugins are maintained and working they don't do half as good a job at scraping metadata as Stash does.
+**Version**: 1.2.0
 
-Therefore, why not delegate this responsibility to Stash? Enter mcMetadata. The plugin will use your Stash database to generate the `.nfo` files as well as the scene and performer images that these media servers can utilize.
+This plugin is for users who manage their collection with Stash but serve content via Jellyfin or Emby. Instead of relying on those media servers' scrapers, mcMetadata leverages your Stash database to generate `.nfo` metadata files and performer images that Jellyfin/Emby can use.
 
 ## Features
-- On Scene Update:
-    - Organizes/renames video file as well as any existing metadata files.
-    - Generates/updates `.nfo` file with the same name as the video file, in the same folder.
-    - Generates performer images in your chosen media server's metadata folder.
-- Bulk Scene Updater: Runs the scene updater against every scene in your collection.
-- Bulk Performer Updater: Copies all performer images that exist to your chosen media server's metadata folder.
-- Has a dry run mode where no files are actually touched.
-- All actions are configurable via the UI and the `settings.ini` file. See the Configuration section for all available settings.
+
+- **NFO Generation**: Creates `.nfo` files with scene metadata (title, performers, studio, tags, date, rating)
+- **File Organization**: Renames and moves video files based on customizable templates
+- **Performer Images**: Exports performer images to your media server's People metadata folder
+- **Dry Run Mode**: Preview all changes before committing them
+- **Bulk Operations**: Process your entire library or update scenes one at a time via hooks
 
 ## Installation
-Download (zip or git clone) into your Stash plugins directory. Reload plugins.
+
+### From Stash Plugin Index (Recommended)
+
+1. Go to **Settings → Plugins → Available Plugins**
+2. Add source: `https://carrotwaxr.github.io/stash-plugins/stable/index.yml`
+3. Find "mcMetadata" under "Carrot Waxxer" and click Install
+4. Reload plugins
+
+### Manual Installation
+
+1. Download or clone this repository to your Stash plugins directory
+2. Reload plugins in Stash
 
 ## Configuration
-All configuration values are stored in the `settings.ini` file in the plugin's root directory. You will need to customize this file manually before using the plugin. An explanation of each setting and what is does can be found below.
 
-- `dry_run`:
-    - **Accepted**: `true` | `false`
-    - **Required**: `true`
-    - **Description**: When `true` no files or database records are modified
-    - **How to Change**: Via the UI in Settings >> Tasks. Scroll down to the Plugin Tasks section and choose the "Toggle Dry Run" option. The Logs page using the Debug log level will show what the setting has been updated to.
-- `enable_actor_images`:
-    - **Accepted**: `true` | `false`
-    - **Required**: `true`
-    - **Description**: When `false` no performer images will be copied to the media server.
-    - **How to Change**: Manually in the `settings.ini` file.
-- `enable_hook`:
-    - **Accepted**: `true` | `false`
-    - **Required**: `true`
-    - **Description**: When `false` the Scene update hook will be disabled. This effectively means that the plugin will do nothing unless you run one of the Bulk actions via the Plugin Tasks UI.
-    - **How to Change**: Via the UI in Settings >> Tasks. Scroll down to the Plugin Tasks section and choose the "Enable" or "Disable".
-- `enable_renamer`:
-    - **Accepted**: `true` | `false`
-    - **Required**: `true`
-    - **Description**: When `false` no files will be organized/renamed.
-    - **How to Change**: Via the UI in Settings >> Tasks. Scroll down to the Plugin Tasks section and choose the "Toggle Renamer" option. The Logs page using the Debug log level will show what the setting has been updated to.
-- `actor_metadata_path`:
-    - **Accepted**: Any valid, already existing directory path.
-    - **Required**: `false` unless `enable_actor_images` is `true`
-    - **Description**: This should point to the "people" directory for your chosen media server application. You will likely need to map this path to Stash's Docker container for it to be available to Stash. For Emby, this path is `<embyConfigDir>/metadata/people/` and for Jellyfin it's `<jellyfinConfigDir>/data/metadata/People/`
-    - **How to Change**: Manually in the `settings.ini` file.
-    - **Example**: `/jellyfin/data/metadata/People/`
-- `media_server`:
-    - **Accepted**: `emby` | `jellyfin`
-    - **Required**: `false` unless `enable_actor_images` is `true`
-    - **Description**: Used by the performer updater to determine the filepath of the performer images.
-    - **How to Change**: Manually in the `settings.ini` file.
-- `renamer_enable_mark_organized`:
-    - **Accepted**: `true` | `false`
-    - **Required**: `false` unless `enable_renamer` is `true`
-    - **Description**: When `true` files that are organized/renamed are also marked as Organized in Stash.
-    - **How to Change**: Manually in the `settings.ini` file.
-- `renamer_filename_budget`:
-    - **Accepted**: Numbers `40-800`
-    - **Required**: `false` unless `enable_renamer` is `true`
-    - **Description**: Determines the maximum length of a filename for use when organizing/renaming files.
-    - **How to Change**: Manually in the `settings.ini` file.
-- `renamer_ignore_files_in_path`:
-    - **Accepted**: `true` | `false`
-    - **Required**: `false` unless `enable_renamer` is `true`
-    - **Description**: When `true` files already in `renamer_path` will not be organized/renamed.
-    - **How to Change**: Manually in the `settings.ini` file.
-- `renamer_path`:
-    - **Accepted**: Any valid directory path.
-    - **Required**: `false` unless `enable_renamer` is `true`
-    - **Description**: This should point to a directory where you would like organized/renamed scenes moved to. This will be used in combination with your `renamer_path_template` settings to determine what the scene's filepath should be.
-    - **How to Change**: Manually in the `settings.ini` file.
-    - **Example**: `/data/tagged/`
-- `renamer_path_template`:
-    - **Accepted**: A pattern using any combination of valid filename characters, path separators and replacers.
-    - **Required**: `false` unless `enable_renamer` is `true`
-    - **Description**: This should point to a directory where you would like organized/renamed scenes moved to. This will be used in combination with your `renamer_path_template` settings to determine what the scene's filepath should be.
-    - **How to Change**: Manually in the `settings.ini` file.
-    - **Example**: `$Studio/$Title - $FemalePerformers $MalePerformers $ReleaseDate [WEBDL-$Resolution]`
-    - **Replacers**:
-        - `$Studio`: replaced with the scene's Studio name. Illegal filename characters are replaced.
-        - `$Studios`: replaced with directories representing the scene's Studio hierarchy. Illegal filename characters are replaced.
-        - `$StashID`: replaced with the scene's Stash ID.
-        - `$Title`: replaced with the scene's Title. Illegal filename characters are replaced.
-        - `$ReleaseYear`: replaced with the year of the scene's Release Date.
-        - `$ReleaseDate`: replaced with the scene's Release Date.
-        - `$Resolution`: replaced with the scene's calculated Resolution. (480p, 720p, 1080p, 1440p, 4K, 8K)
-        - `$Quality`: replaced with the scene's calculated video Quality. (LOW, SD, HD, FHD, 2K, QHD, UHD, FUHD)
-        - `$FemalePerformers`: replaced with a space separated list of female scene performer names.
-        - `$MalePerformers`: replaced with a space separated list of male scene performer names.
-        - `$Performers`: replaced with a space separated list of all scene performer names.
-        - `$Tags`: replaced with a space separated list of all scene tags.
-    - **Uniqueness**: In order to ensure that filenames are reasonably unique, your `renamer_path_template` must:
-        - Contain `$StashID` or
-        - Contain (`$Studio` or `$Studios`), `$Title` and `$ReleaseDate`
+All settings are configured through Stash's UI at **Settings → Plugins → mcMetadata**.
+
+### General Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| **Dry Run Mode** | Boolean | On | Preview changes without making them. Check logs to see what would happen. |
+| **Enable Scene Update Hook** | Boolean | Off | Automatically process scenes when you update them. |
+
+### File Renamer Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| **Enable File Renamer** | Boolean | Off | Move/rename video files based on the path template |
+| **Renamer Base Path** | String | - | Base directory for renamed files (must be in a Stash library) |
+| **Renamer Path Template** | String | `$Studio/$Title - $Performers $ReleaseDate [$Resolution]` | Template for file paths. See variables below. |
+| **Max Filepath Length** | Number | 250 | Maximum total path length (adjust for your OS) |
+| **Skip Files Already in Path** | Boolean | Off | Don't rename files already in the renamer base path |
+| **Mark Scenes as Organized** | Boolean | On | Set the Organized flag after renaming |
+| **Multi-File Mode** | String | `all` | How to handle scenes with multiple files: `all`, `primary_only`, or `skip` |
+
+### NFO Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| **Skip Existing NFO Files** | Boolean | Off | Don't overwrite NFO files that already exist |
+
+### Actor Image Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| **Enable Actor Images** | Boolean | Off | Copy performer images to media server metadata folder |
+| **Media Server Type** | String | `jellyfin` | Target media server: `jellyfin` or `emby` |
+| **Actor Metadata Path** | String | - | Path to media server's People metadata folder |
+
+## Template Variables
+
+Use these variables in your **Renamer Path Template**:
+
+| Variable | Description |
+|----------|-------------|
+| `$Studio` | Scene's studio name |
+| `$Studios` | Full studio hierarchy as nested directories |
+| `$Title` | Scene title |
+| `$StashID` | Scene's Stash ID |
+| `$ReleaseDate` | Scene's release date (YYYY-MM-DD) |
+| `$ReleaseYear` | Year from release date |
+| `$Resolution` | Video resolution (480p, 720p, 1080p, 1440p, 4K, 8K) |
+| `$Quality` | Video quality (LOW, SD, HD, FHD, 2K, QHD, UHD, FUHD) |
+| `$Performers` | All performer names (space-separated) |
+| `$FemalePerformers` | Female performer names only |
+| `$MalePerformers` | Male performer names only |
+| `$Tags` | All scene tags (space-separated) |
+
+**Uniqueness Requirement**: Templates must contain either:
+- `$StashID`, OR
+- (`$Studio` or `$Studios`) AND `$Title` AND `$ReleaseDate`
+
+## Usage
+
+### Running Bulk Tasks
+
+1. Go to **Settings → Tasks → Plugin Tasks**
+2. Select:
+   - **Bulk Update Scenes**: Process all scenes with StashIDs
+   - **Bulk Update Performers**: Copy all performer images to media server
+
+### Using the Hook
+
+1. Enable **"Enable Scene Update Hook"** in plugin settings
+2. When you update a scene in Stash, the plugin will automatically:
+   - Rename/move the video file (if renamer enabled)
+   - Generate/update the NFO file
+   - Copy performer images (if enabled)
+
+### Recommended Workflow
+
+1. **First Run**: Enable Dry Run Mode, configure your settings, run "Bulk Update Scenes"
+2. **Check Logs**: Go to Settings → Logs (Debug level) to see what would happen
+3. **Execute**: Disable Dry Run Mode, run "Bulk Update Scenes" again
+4. **Ongoing**: Enable the hook for automatic updates on scene changes
+
+## Media Server Setup
+
+### Jellyfin
+
+- **Actor Metadata Path**: `<jellyfin-config>/data/metadata/People/`
+- **Folder Structure**: `People/J/Jane Doe/folder.jpg` (uses A-Z subfolders)
+
+### Emby
+
+- **Actor Metadata Path**: `<emby-config>/metadata/People/`
+- **Folder Structure**: `People/Jane Doe/folder.jpg` (no subfolders)
 
 ## Troubleshooting
-If you go to Settings >> Logs in Stash and change your Log Level to Debug, you should see a verbose output that can aid in troubleshooting or opening an issue here on Github.
+
+Enable debug logging at **Settings → Logs** and set Log Level to Debug. The plugin logs detailed information prefixed with `[DRY RUN]` when in dry run mode.
+
+Common issues:
+- **Files not moving**: Check that the destination path is within a Stash library
+- **NFO not parsing**: Ensure your media server is set to read local NFO files
+- **Performer images not showing**: Verify the actor metadata path is correct for your media server
+
+## Requirements
+
+- Stash v0.24.0 or later
+- Python 3.9+ (bundled with Stash)
+- `stashapp-tools>=0.2.59` (installed automatically)
+
+## Changelog
+
+### v1.2.0
+- Fixed Emby actor folder structure (no A-Z subfolders)
+- Fixed XML escaping for special characters in titles (ampersands, etc.)
+- Added comprehensive unit tests
+
+### v1.1.0
+- Migrated settings from `settings.ini` to Stash's native plugin settings UI
+- Added "Enable Scene Update Hook" setting
+- Removed toggle tasks (now controlled via settings UI)
+
+### v1.0.0
+- Replaced direct SQLite manipulation with GraphQL `moveFiles` mutation
+- Added multi-file scene handling (all/primary_only/skip modes)
+- Added `nfo_skip_existing` setting
+- Fixed pagination bug in bulk operations
+- Replaced Python 3.10+ syntax for broader compatibility
+- Improved error handling and progress reporting
+
+## License
+
+MIT License - See [LICENSE](LICENSE) file
