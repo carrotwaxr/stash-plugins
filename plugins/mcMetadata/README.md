@@ -1,6 +1,6 @@
 # mcMetadata Plugin for [Stash](https://github.com/stashapp/stash)
 
-**Version**: 1.2.1
+**Version**: 1.2.2
 
 This plugin is for users who manage their collection with Stash but serve content via Jellyfin or Emby. Instead of relying on those media servers' scrapers, mcMetadata leverages your Stash database to generate `.nfo` metadata files and performer images that Jellyfin/Emby can use.
 
@@ -36,6 +36,7 @@ All settings are configured through Stash's UI at **Settings → Plugins → mcM
 |---------|------|---------|-------------|
 | **Dry Run Mode** | Boolean | On | Preview changes without making them. Check logs to see what would happen. |
 | **Enable Scene Update Hook** | Boolean | Off | Automatically process scenes when you update them. |
+| **Require StashDB Link (Hook Only)** | Boolean | Off | Only process scenes linked to StashDB when using the hook. Enable this if you only want NFOs generated for curated StashDB content. |
 
 ### File Renamer Settings
 
@@ -138,6 +139,11 @@ Common issues:
 - `stashapp-tools>=0.2.59` (installed automatically)
 
 ## Changelog
+
+### v1.2.2
+- Added "Require StashDB Link" setting for hook processing (Issue #14)
+- NFO files now generated for locally edited scenes by default (not just StashDB-linked scenes)
+- Users who want curated-only content can enable the new setting
 
 ### v1.2.1
 - Added explicit defaults to all settings in plugin YAML

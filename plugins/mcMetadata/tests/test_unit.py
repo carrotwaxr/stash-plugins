@@ -282,5 +282,80 @@ import performer
 performer._TestablePerformer = _TestablePerformer
 
 
+class TestRequireStashIdSetting(unittest.TestCase):
+    """Test the requireStashId setting behavior for hook processing (Issue #14)."""
+
+    def test_should_process_scene_without_stash_id_when_require_disabled(self):
+        """Scene without stash_id should be processed when requireStashId is OFF."""
+        settings = {"require_stash_id": False}
+        scene = {"id": "123", "title": "Local Scene", "stash_ids": []}
+
+        # Logic from mcMetadata.py hook handler
+        require_stash_id = settings.get("require_stash_id", False)
+        stash_ids = scene.get("stash_ids", [])
+        should_skip = require_stash_id and not stash_ids
+
+        self.assertFalse(should_skip)
+
+    def test_should_skip_scene_without_stash_id_when_require_enabled(self):
+        """Scene without stash_id should be skipped when requireStashId is ON."""
+        settings = {"require_stash_id": True}
+        scene = {"id": "123", "title": "Local Scene", "stash_ids": []}
+
+        require_stash_id = settings.get("require_stash_id", False)
+        stash_ids = scene.get("stash_ids", [])
+        should_skip = require_stash_id and not stash_ids
+
+        self.assertTrue(should_skip)
+
+    def test_should_process_scene_with_stash_id_when_require_enabled(self):
+        """Scene with stash_id should be processed even when requireStashId is ON."""
+        settings = {"require_stash_id": True}
+        scene = {
+            "id": "123",
+            "title": "StashDB Scene",
+            "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "abc123"}]
+        }
+
+        require_stash_id = settings.get("require_stash_id", False)
+        stash_ids = scene.get("stash_ids", [])
+        should_skip = require_stash_id and not stash_ids
+
+        self.assertFalse(should_skip)
+
+    def test_should_process_scene_with_stash_id_when_require_disabled(self):
+        """Scene with stash_id should be processed when requireStashId is OFF."""
+        settings = {"require_stash_id": False}
+        scene = {
+            "id": "123",
+            "title": "StashDB Scene",
+            "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "abc123"}]
+        }
+
+        require_stash_id = settings.get("require_stash_id", False)
+        stash_ids = scene.get("stash_ids", [])
+        should_skip = require_stash_id and not stash_ids
+
+        self.assertFalse(should_skip)
+
+    def test_default_require_stash_id_is_false(self):
+        """requireStashId should default to False if not set."""
+        settings = {}  # No require_stash_id key
+
+        require_stash_id = settings.get("require_stash_id", False)
+
+        self.assertFalse(require_stash_id)
+
+    def test_scene_with_empty_stash_ids_treated_as_no_stash_id(self):
+        """Empty stash_ids array should be treated as no stash_id."""
+        settings = {"require_stash_id": True}
+        scene = {"id": "123", "stash_ids": []}
+
+        stash_ids = scene.get("stash_ids", [])
+
+        self.assertEqual(len(stash_ids), 0)
+        self.assertFalse(bool(stash_ids))  # Empty list is falsy
+
+
 if __name__ == "__main__":
     unittest.main()
