@@ -1,38 +1,38 @@
 name: mcMetadata
-description: Generates metadata for use with other media servers like Emby and Jellyfin, and optionally organizes/renames your tagged scenes.
-url: https://github.com/carrotwaxr/stash-plugins/tree/main/mcMetadata
-version: 0.0.3
+description: Generates NFO metadata files for Jellyfin/Emby, organizes/renames video files using customizable templates, and exports performer images to media server folders.
+url: https://github.com/carrotwaxr/stash-plugins/tree/main/plugins/mcMetadata
+version: 1.0.0
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
 interface: raw
 hooks:
   - name: hook_mcmetadata
-    description: Organize/rename video files and create/update metadata files when you update a scene.
+    description: Organize/rename video files and create/update NFO metadata when you update a scene.
     triggeredBy:
       - Scene.Update.Post
 tasks:
-  - name: "Disable"
-    description: Disable the on Scene Update hook
-    defaultArgs:
-      mode: disable
-  - name: "Enable"
-    description: Enable the on Scene Update hook
+  - name: "Toggle Hook"
+    description: Enable/disable the Scene Update hook
     defaultArgs:
       mode: enable
+  - name: "Disable Hook"
+    description: Disable the Scene Update hook
+    defaultArgs:
+      mode: disable
   - name: "Toggle Dry Run"
-    description: Enable/disable dry-run mode
+    description: Enable/disable dry-run mode (preview changes without making them)
     defaultArgs:
       mode: dryrun
   - name: "Toggle Renamer"
-    description: Enable/disable file renaming
+    description: Enable/disable file renaming/organizing
     defaultArgs:
       mode: renamer
-  - name: "Bulk Update"
-    description: Organize/rename video files and create/update metadata files for all scenes based on your config.
+  - name: "Bulk Update Scenes"
+    description: Process all scenes - rename files, generate NFOs, and copy performer images
     defaultArgs:
       mode: bulk
   - name: "Bulk Update Performers"
-    description: Copy all performer images to your chosen Media Center's people folder.
+    description: Copy all performer images to media server's People folder
     defaultArgs:
       mode: performers
