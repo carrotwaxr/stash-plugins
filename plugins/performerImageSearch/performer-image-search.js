@@ -7,7 +7,26 @@
   const DEFAULTS = {
     searchSuffix: "pornstar",
     layout: "All",
+    // Source toggles - all enabled by default
+    enableBabepedia: true,
+    enablePornPics: true,
+    enableFreeOnes: true,
+    enableEliteBabes: true,
+    enableBoobpedia: true,
+    enableJavDatabase: true,
+    enableBing: true,
   };
+
+  // All available sources (will be filtered by settings)
+  const ALL_SOURCES = [
+    { id: "babepedia", settingKey: "enableBabepedia" },
+    { id: "pornpics", settingKey: "enablePornPics" },
+    { id: "freeones", settingKey: "enableFreeOnes" },
+    { id: "elitebabes", settingKey: "enableEliteBabes" },
+    { id: "boobpedia", settingKey: "enableBoobpedia" },
+    { id: "javdatabase", settingKey: "enableJavDatabase" },
+    { id: "bing", settingKey: "enableBing" },
+  ];
 
   // Aspect ratio thresholds
   const ASPECT_THRESHOLDS = {
@@ -16,8 +35,8 @@
     Landscape: [1.1, Infinity],  // ratio > 1.1
   };
 
-  // Sources to search (in order of priority)
-  const SOURCES = ["babepedia", "pornpics", "freeones", "elitebabes", "boobpedia", "bing"];
+  // Active sources (filtered by settings, populated at runtime)
+  let SOURCES = [];
 
   // State
   let modalRoot = null;
@@ -82,12 +101,34 @@
       const data = await graphqlRequest(query);
       const pluginConfig = data?.configuration?.plugins?.[PLUGIN_ID];
 
-      return {
+      // Build settings object with defaults
+      const settings = {
         searchSuffix: pluginConfig?.defaultSearchSuffix || DEFAULTS.searchSuffix,
         layout: pluginConfig?.defaultLayout || DEFAULTS.layout,
       };
+
+      // Process source toggles
+      // Stash BOOLEAN settings: if not set, returns undefined (use default true)
+      // If explicitly set to false, returns false
+      for (const source of ALL_SOURCES) {
+        const configValue = pluginConfig?.[source.settingKey];
+        // Treat undefined/null as true (enabled by default)
+        // Only disable if explicitly set to false
+        settings[source.settingKey] = configValue !== false;
+      }
+
+      // Build active SOURCES array based on settings
+      SOURCES = ALL_SOURCES
+        .filter(source => settings[source.settingKey])
+        .map(source => source.id);
+
+      console.debug("[PerformerImageSearch] Active sources:", SOURCES);
+
+      return settings;
     } catch (e) {
       console.error("[PerformerImageSearch] Failed to get settings:", e);
+      // On error, enable all sources
+      SOURCES = ALL_SOURCES.map(source => source.id);
       return DEFAULTS;
     }
   }
