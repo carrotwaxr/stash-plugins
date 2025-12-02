@@ -1,7 +1,7 @@
 name: mcMetadata
 description: Generates NFO metadata files for Jellyfin/Emby, organizes/renames video files using customizable templates, and exports performer images to media server folders.
 url: https://github.com/carrotwaxr/stash-plugins/tree/main/plugins/mcMetadata
-version: 1.2.1
+version: 1.2.2
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
@@ -16,6 +16,10 @@ settings:
   enableHook:
     displayName: Enable Scene Update Hook
     description: Process scenes automatically when you update them. Disable to only use bulk tasks. Default is OFF.
+    type: BOOLEAN
+  requireStashId:
+    displayName: Require StashDB Link (Hook Only)
+    description: Only process scenes that are linked to StashDB when using the hook. Enable this to only generate NFOs for curated StashDB content. Default is OFF.
     type: BOOLEAN
   enableRenamer:
     displayName: Enable File Renamer
