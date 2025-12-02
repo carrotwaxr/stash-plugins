@@ -1,2 +1,6 @@
 **/htmlcov
 **/__pycache__
+**/.coverage
+**/.pytest_cache
+**/node_modules
+CLAUDE.md

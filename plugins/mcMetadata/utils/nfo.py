@@ -1,6 +1,23 @@
 import os
+from xml.sax.saxutils import escape
 
 INDENTED_NEWLINE = "\n    "
+
+
+def escape_xml(text):
+    """Escape special XML characters in text.
+
+    Handles: & < > " '
+
+    Args:
+        text: String to escape (can be None)
+
+    Returns:
+        str: Escaped string, or empty string if input is None
+    """
+    if text is None:
+        return ""
+    return escape(str(text), {'"': '&quot;', "'": '&apos;'})
 
 
 def build_nfo_xml(scene):
@@ -27,9 +44,9 @@ def build_nfo_xml(scene):
 
     title = ""
     if scene["title"] is not None and scene["title"] != "":
-        title = scene["title"]
+        title = escape_xml(scene["title"])
     else:
-        title = os.path.basename(os.path.normpath(scene["files"][0]["path"]))
+        title = escape_xml(os.path.basename(os.path.normpath(scene["files"][0]["path"])))
 
     custom_rating = ""
     rating = ""
@@ -45,7 +62,7 @@ def build_nfo_xml(scene):
 
     studio = ""
     if scene["studio"] is not None:
-        studio = scene["studio"]["name"]
+        studio = escape_xml(scene["studio"]["name"])
 
     performers = INDENTED_NEWLINE
     i = 0
@@ -53,6 +70,7 @@ def build_nfo_xml(scene):
     for p in scene["performers"]:
         if i != 0:
             performers = performers + INDENTED_NEWLINE
+        performer_name = escape_xml(p["name"])
         performers = (
             performers
             + """<actor>
@@ -60,7 +78,7 @@ def build_nfo_xml(scene):
         <role>{}</role>
         <order>{}</order>
         <type>Actor</type>
-    </actor>""".format(p["name"], p["name"], i)
+    </actor>""".format(performer_name, performer_name, i)
         )
         i += 1
     if performers == INDENTED_NEWLINE:
@@ -71,7 +89,7 @@ def build_nfo_xml(scene):
     for t in scene["tags"]:
         if iTwo != 0:
             tags = tags + INDENTED_NEWLINE
-        tags = tags + """<tag>{}</tag>""".format(t["name"])
+        tags = tags + """<tag>{}</tag>""".format(escape_xml(t["name"]))
         iTwo += 1
     if tags == INDENTED_NEWLINE:
         tags = ""
