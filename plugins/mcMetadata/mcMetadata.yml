@@ -12,6 +12,10 @@ settings:
     displayName: Dry Run Mode
     description: Preview changes without making them. Check logs to see what would happen.
     type: BOOLEAN
+  enableHook:
+    displayName: Enable Scene Update Hook
+    description: Process scenes automatically when you update them. Disable to only use bulk tasks.
+    type: BOOLEAN
   enableRenamer:
     displayName: Enable File Renamer
     description: Move/rename video files based on the path template

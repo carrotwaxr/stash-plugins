@@ -45,6 +45,7 @@ def get_settings(stash_instance):
     # with sensible defaults
     return {
         "dry_run": plugin_config.get("dryRun", True),  # Default to safe mode
+        "enable_hook": plugin_config.get("enableHook", False),  # Default off for safety
         "enable_renamer": plugin_config.get("enableRenamer", False),
         "renamer_path": plugin_config.get("renamerPath", ""),
         "renamer_path_template": plugin_config.get(
@@ -115,6 +116,10 @@ def main():
             log.info("Bulk performer update completed")
 
         elif mode == "Scene.Update.Post":
+            if not SETTINGS.get("enable_hook", False):
+                log.debug("Hook disabled, skipping")
+                return
+
             scene_id = PLUGIN_ARGS["hookContext"]["id"]
             scene = stash.find_scene(scene_id)
 
