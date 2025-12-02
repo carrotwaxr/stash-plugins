@@ -4,17 +4,15 @@ mcMetadata - Stash Plugin for Media Center Metadata Generation
 Generates NFO files for Jellyfin/Emby, organizes video files according to
 configurable templates, and exports performer images to media server folders.
 
-Version: 1.0.0
+Version: 1.1.0
 """
 
 import json
-import os
 import sys
 import stashapi.log as log
 from stashapi.stashapp import StashInterface
 from performer import process_all_performers
 from scene import process_all_scenes, process_scene
-from utils.settings import read_settings, update_setting
 
 # Parse JSON context passed from Stash
 json_input = json.loads(sys.stdin.read())
@@ -24,13 +22,48 @@ stash = StashInterface(json_input["server_connection"])
 
 # Plugin configuration
 PLUGIN_ARGS = json_input.get("args", {})
-SETTINGS_FILEPATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "settings.ini"
-)
-SETTINGS = read_settings(SETTINGS_FILEPATH)
+PLUGIN_ID = "mcMetadata"
 
-# Modes that modify settings (don't require API key)
-SETTINGS_MODES = ["disable", "dryrun", "enable", "renamer"]
+
+def get_settings(stash_instance):
+    """Load settings from Stash's plugin configuration.
+
+    Stash stores plugin settings in its database and provides them
+    via the configuration endpoint. This replaces the old ini file approach.
+
+    Returns:
+        dict: Settings dictionary with snake_case keys for internal use
+    """
+    try:
+        config = stash_instance.get_configuration()
+        plugin_config = config.get("plugins", {}).get(PLUGIN_ID, {})
+    except Exception as err:
+        log.error(f"Failed to get plugin configuration: {err}")
+        plugin_config = {}
+
+    # Map from Stash camelCase settings to internal snake_case
+    # with sensible defaults
+    return {
+        "dry_run": plugin_config.get("dryRun", True),  # Default to safe mode
+        "enable_renamer": plugin_config.get("enableRenamer", False),
+        "renamer_path": plugin_config.get("renamerPath", ""),
+        "renamer_path_template": plugin_config.get(
+            "renamerPathTemplate",
+            "$Studio/$Title - $Performers $ReleaseDate [$Resolution]"
+        ),
+        "renamer_filepath_budget": plugin_config.get("renamerFilepathBudget", 250),
+        "renamer_ignore_files_in_path": plugin_config.get("renamerIgnoreFilesInPath", False),
+        "renamer_enable_mark_organized": plugin_config.get("renamerMarkOrganized", True),
+        "renamer_multi_file_mode": plugin_config.get("renamerMultiFileMode", "all"),
+        "nfo_skip_existing": plugin_config.get("nfoSkipExisting", False),
+        "enable_actor_images": plugin_config.get("enableActorImages", False),
+        "media_server": plugin_config.get("mediaServer", "jellyfin"),
+        "actor_metadata_path": plugin_config.get("actorMetadataPath", ""),
+    }
+
+
+# Load settings from Stash
+SETTINGS = get_settings(stash)
 
 
 def get_plugin_mode():
@@ -51,42 +84,6 @@ def get_plugin_mode():
     return mode or hook_context["type"]
 
 
-def handle_settings_mode(mode):
-    """Handle settings toggle modes.
-
-    Args:
-        mode: The settings mode to handle
-
-    Returns:
-        bool: True if a settings mode was handled, False otherwise
-    """
-    if mode not in SETTINGS_MODES:
-        return False
-
-    if mode == "enable":
-        log.info("Enabling hooks")
-        update_setting(SETTINGS_FILEPATH, "enable_hook", "true")
-    elif mode == "disable":
-        log.info("Disabling hooks")
-        update_setting(SETTINGS_FILEPATH, "enable_hook", "false")
-    elif mode == "dryrun":
-        if SETTINGS["dry_run"]:
-            log.info("Disabling dry run mode")
-            update_setting(SETTINGS_FILEPATH, "dry_run", "false")
-        else:
-            log.info("Enabling dry run mode")
-            update_setting(SETTINGS_FILEPATH, "dry_run", "true")
-    elif mode == "renamer":
-        if SETTINGS["enable_renamer"]:
-            log.info("Disabling renamer")
-            update_setting(SETTINGS_FILEPATH, "enable_renamer", "false")
-        else:
-            log.info("Enabling renamer")
-            update_setting(SETTINGS_FILEPATH, "enable_renamer", "true")
-
-    return True
-
-
 def main():
     """Main entry point for the plugin."""
     try:
@@ -94,9 +91,9 @@ def main():
         log.debug(f"Plugin mode: {mode}")
         log.debug(f"Dry run: {SETTINGS['dry_run']}")
 
-        # Handle settings toggle modes (no API key needed)
-        if handle_settings_mode(mode):
-            return
+        # Log current settings for debugging
+        if SETTINGS["dry_run"]:
+            log.info("[DRY RUN] Mode enabled - no changes will be made")
 
         # Get API key for modes that need it
         try:
@@ -118,10 +115,6 @@ def main():
             log.info("Bulk performer update completed")
 
         elif mode == "Scene.Update.Post":
-            if not SETTINGS.get("enable_hook", False):
-                log.debug("Hook disabled, skipping")
-                return
-
             scene_id = PLUGIN_ARGS["hookContext"]["id"]
             scene = stash.find_scene(scene_id)
 
