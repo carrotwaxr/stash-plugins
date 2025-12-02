@@ -5,7 +5,7 @@
 
   // Default settings
   const DEFAULTS = {
-    searchSuffix: "pornstar nude",
+    searchSuffix: "pornstar",
     size: "Large",
     layout: "All",
   };
@@ -25,7 +25,7 @@
   };
 
   // Sources to search (in order of priority)
-  const SOURCES = ["babepedia", "pornpics", "freeones", "bing"];
+  const SOURCES = ["babepedia", "pornpics", "freeones", "elitebabes", "boobpedia", "bing"];
 
   // State
   let modalRoot = null;

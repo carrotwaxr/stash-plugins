@@ -5,9 +5,11 @@ Searches multiple adult image sources and combines results.
 
 Sources (in order of priority):
 1. Babepedia - Adult performer database with curated photos
-2. FreeOnes - Large performer photo database
-3. PornPics - Extensive pornstar photo galleries
-4. Bing Images - Fallback with safe search off
+2. PornPics - Extensive pornstar photo galleries (1280px images)
+3. FreeOnes - Large performer photo database
+4. EliteBabes - High-quality photosets (1200px images)
+5. Boobpedia - Wiki-style performer database
+6. Bing Images - Fallback with safe search off
 
 Uses only Python standard library - no pip dependencies.
 """
@@ -445,6 +447,181 @@ def search_pornpics(name, max_results=200, max_galleries=20):
     return results
 
 
+def search_elitebabes(name, max_results=100, max_galleries=10):
+    """
+    Search EliteBabes for performer images.
+    EliteBabes has high-quality photosets with multiple size options.
+    Images are available in 200/400/600/800/1200px sizes - we use 1200px for best quality.
+    """
+    results = []
+
+    try:
+        # EliteBabes uses hyphens and lowercase
+        url_name = name.lower().replace(" ", "-")
+        base_url = f"https://www.elitebabes.com/model/{urllib.parse.quote(url_name)}/"
+        log.LogDebug(f"[EliteBabes] Base URL: {base_url}")
+
+        seen_images = set()
+        gallery_urls = []
+
+        # First, get the model page
+        try:
+            log.LogDebug(f"[EliteBabes] Fetching model page: {base_url}")
+            req = urllib.request.Request(base_url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                html = response.read().decode('utf-8', errors='ignore')
+
+            # Extract gallery links - format: /gallery-name-12345/
+            gallery_pattern = r'href="(https://www\.elitebabes\.com/[^"]+/)"[^>]*class="[^"]*gallery[^"]*"'
+            gallery_matches = re.findall(gallery_pattern, html)
+
+            # Also try simpler pattern for gallery links
+            if not gallery_matches:
+                gallery_pattern2 = r'href="(https://www\.elitebabes\.com/[a-z0-9-]+-\d+/)"'
+                gallery_matches = re.findall(gallery_pattern2, html)
+
+            gallery_urls = list(set(gallery_matches))[:max_galleries]
+            log.LogDebug(f"[EliteBabes] Found {len(gallery_urls)} gallery links")
+
+        except Exception as e:
+            log.LogDebug(f"[EliteBabes] Failed to get model page: {e}")
+
+        # Fetch images from each gallery
+        log.LogDebug(f"[EliteBabes] Processing up to {min(len(gallery_urls), max_galleries)} galleries")
+        for i, gallery_url in enumerate(gallery_urls[:max_galleries]):
+            if len(results) >= max_results:
+                log.LogDebug(f"[EliteBabes] Reached max results ({max_results}), stopping")
+                break
+
+            try:
+                log.LogDebug(f"[EliteBabes] Fetching gallery {i+1}: {gallery_url}")
+                req = urllib.request.Request(gallery_url, headers=HEADERS)
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    html = response.read().decode('utf-8', errors='ignore')
+
+                # Extract image URLs - they have size parameter like /200/ /400/ /600/ /800/ /1200/
+                # Pattern: https://cdn.elitebabes.com/content/galleries/xxx/1200/001.jpg
+                pattern = r'(https://cdn\.elitebabes\.com/content/[^"\'>\s]+/(?:200|400|600|800|1200)/[^"\'>\s]+\.jpg)'
+                matches = re.findall(pattern, html)
+                log.LogDebug(f"[EliteBabes] Gallery {i+1}: Found {len(matches)} image URLs")
+
+                added_from_gallery = 0
+                for img_url in matches:
+                    # Normalize to 1200px version
+                    base_url_img = re.sub(r'/(?:200|400|600|800|1200)/', '/1200/', img_url)
+
+                    if base_url_img in seen_images:
+                        continue
+                    seen_images.add(base_url_img)
+
+                    # Use 400 as thumbnail, 1200 as full
+                    thumb_url = base_url_img.replace('/1200/', '/400/')
+                    image_url = base_url_img
+
+                    results.append({
+                        "thumbnail": thumb_url,
+                        "image": image_url,
+                        "title": f"{name} - EliteBabes",
+                        "source": "EliteBabes",
+                        "width": 0,
+                        "height": 0,
+                    })
+                    added_from_gallery += 1
+
+                    if len(results) >= max_results:
+                        break
+
+                log.LogDebug(f"[EliteBabes] Gallery {i+1}: Added {added_from_gallery} unique images")
+
+            except urllib.error.HTTPError as e:
+                log.LogDebug(f"[EliteBabes] Gallery {i+1}: HTTP {e.code}")
+                continue
+            except Exception as e:
+                log.LogDebug(f"[EliteBabes] Gallery {i+1}: Error - {e}")
+                continue
+
+        log.LogInfo(f"[EliteBabes] Found {len(results)} images for: {name}")
+
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            log.LogDebug(f"[EliteBabes] Performer not found: {name}")
+        else:
+            log.LogWarning(f"[EliteBabes] HTTP error {e.code}: {name}")
+    except Exception as e:
+        log.LogWarning(f"[EliteBabes] Error: {e}")
+
+    return results
+
+
+def search_boobpedia(name, max_results=50):
+    """
+    Search Boobpedia for performer images.
+    Boobpedia is a wiki-style site with performer photos.
+    Thumbnails need to be transformed to get full-size images.
+    """
+    results = []
+
+    try:
+        # Boobpedia uses underscores in URLs (wiki style)
+        url_name = name.replace(" ", "_")
+        base_url = f"https://www.boobpedia.com/boobs/{urllib.parse.quote(url_name)}"
+        log.LogDebug(f"[Boobpedia] Base URL: {base_url}")
+
+        seen = set()
+
+        try:
+            log.LogDebug(f"[Boobpedia] Fetching: {base_url}")
+            req = urllib.request.Request(base_url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                html = response.read().decode('utf-8', errors='ignore')
+
+            # Extract thumbnail image links
+            # Format: /thumb/d/db/Image.jpg/200px-Image.jpg
+            # Full: /boobs/d/db/Image.jpg
+            pattern = r'src="(https://www\.boobpedia\.com/boobs/thumb/[^"]+)"'
+            matches = re.findall(pattern, html)
+            log.LogDebug(f"[Boobpedia] Found {len(matches)} thumbnail matches")
+
+            for thumb_url in matches:
+                if thumb_url in seen or len(results) >= max_results:
+                    continue
+                seen.add(thumb_url)
+
+                # Transform thumbnail to full-size
+                # /boobs/thumb/d/db/Name.jpg/200px-Name.jpg -> /boobs/d/db/Name.jpg
+                # Remove /thumb/ and the trailing /NNNpx-filename.jpg part
+                match = re.match(r'(https://www\.boobpedia\.com/boobs/)thumb/([a-z0-9]/[a-z0-9]+/[^/]+\.(?:jpg|jpeg|png|gif))/\d+px-', thumb_url, re.IGNORECASE)
+                if match:
+                    image_url = match.group(1) + match.group(2)
+                else:
+                    # Fallback: just use thumbnail
+                    image_url = thumb_url
+
+                results.append({
+                    "thumbnail": thumb_url,
+                    "image": image_url,
+                    "title": f"{name} - Boobpedia",
+                    "source": "Boobpedia",
+                    "width": 0,
+                    "height": 0,
+                })
+
+            log.LogInfo(f"[Boobpedia] Found {len(results)} images for: {name}")
+
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                log.LogDebug(f"[Boobpedia] Performer not found: {name}")
+            else:
+                log.LogWarning(f"[Boobpedia] HTTP {e.code} for {base_url}")
+        except Exception as e:
+            log.LogDebug(f"[Boobpedia] Error fetching {base_url}: {e}")
+
+    except Exception as e:
+        log.LogWarning(f"[Boobpedia] Error: {e}")
+
+    return results
+
+
 def search_bing_images(query, size="Large", layout="All", max_results=20):
     """
     Search Bing Images with safe search off.
@@ -564,6 +741,10 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
         results = search_pornpics(performer_name, 200, 20)
     elif source == "freeones":
         results = search_freeones(performer_name, 200, 20)
+    elif source == "elitebabes":
+        results = search_elitebabes(performer_name, 100, 10)
+    elif source == "boobpedia":
+        results = search_boobpedia(performer_name, 50)
     elif source == "bing":
         # Use the full query (with suffix) for Bing
         results = search_bing_images(query, size_filter, layout_filter, 30)
