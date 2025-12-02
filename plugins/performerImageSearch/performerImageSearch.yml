@@ -1,0 +1,32 @@
+name: Performer Image Search
+description: Search multiple sources (Babepedia, PornPics, FreeOnes, Bing) for performer images and set them directly from the performer page
+version: 1.0.0
+url: https://github.com/carrotwaxr/stash-plugins
+
+# UI plugin - injects button and modal on performer pages
+ui:
+  javascript:
+    - performer-image-search.js
+  css:
+    - performer-image-search.css
+
+# Plugin settings configurable in Stash UI (Settings > Plugins)
+settings:
+  defaultSearchSuffix:
+    displayName: Default Search Suffix
+    description: Text appended to performer name when searching (e.g., "pornstar solo")
+    type: STRING
+  defaultSize:
+    displayName: Default Image Size
+    description: Default size filter (Large, Medium, Small, All)
+    type: STRING
+  defaultLayout:
+    displayName: Default Layout
+    description: Default aspect ratio filter (All, Portrait, Landscape, Square)
+    type: STRING
+
+# Python backend for image search (called via runPluginOperation from JS)
+exec:
+  - python
+  - "{pluginDir}/image_search.py"
+interface: raw
