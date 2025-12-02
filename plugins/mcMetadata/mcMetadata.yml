@@ -1,7 +1,7 @@
 name: mcMetadata
 description: Generates NFO metadata files for Jellyfin/Emby, organizes/renames video files using customizable templates, and exports performer images to media server folders.
 url: https://github.com/carrotwaxr/stash-plugins/tree/main/plugins/mcMetadata
-version: 1.1.0
+version: 1.2.0
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
