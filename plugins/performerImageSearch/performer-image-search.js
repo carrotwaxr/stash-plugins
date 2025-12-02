@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const PLUGIN_ID = "performer-image-search";
+  const PLUGIN_ID = "performerImageSearch";
 
   // Default settings
   const DEFAULTS = {
