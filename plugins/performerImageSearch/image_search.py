@@ -451,7 +451,8 @@ def search_elitebabes(name, max_results=100, max_galleries=10):
     """
     Search EliteBabes for performer images.
     EliteBabes has high-quality photosets with multiple size options.
-    Images are available in 200/400/600/800/1200px sizes - we use 1200px for best quality.
+    URL format: https://cdn.elitebabes.com/content/XXXXXX/filename_w400.jpg
+    Sizes: _w200, _w400, _w600, _w800, or no suffix for full size (~400KB).
     """
     results = []
 
@@ -499,24 +500,24 @@ def search_elitebabes(name, max_results=100, max_galleries=10):
                 with urllib.request.urlopen(req, timeout=10) as response:
                     html = response.read().decode('utf-8', errors='ignore')
 
-                # Extract image URLs - they have size parameter like /200/ /400/ /600/ /800/ /1200/
-                # Pattern: https://cdn.elitebabes.com/content/galleries/xxx/1200/001.jpg
-                pattern = r'(https://cdn\.elitebabes\.com/content/[^"\'>\s]+/(?:200|400|600|800|1200)/[^"\'>\s]+\.jpg)'
+                # Extract image URLs - format: cdn.elitebabes.com/content/XXXXXX/filename_wNNN.jpg
+                pattern = r'(https://cdn\.elitebabes\.com/content/[^"\'>\s]+_w(?:200|400|600|800)\.jpg)'
                 matches = re.findall(pattern, html)
                 log.LogDebug(f"[EliteBabes] Gallery {i+1}: Found {len(matches)} image URLs")
 
                 added_from_gallery = 0
                 for img_url in matches:
-                    # Normalize to 1200px version
-                    base_url_img = re.sub(r'/(?:200|400|600|800|1200)/', '/1200/', img_url)
+                    # Normalize to base (remove size suffix for full-size)
+                    # _w400.jpg -> .jpg (full size)
+                    base_img = re.sub(r'_w\d+\.jpg$', '.jpg', img_url)
 
-                    if base_url_img in seen_images:
+                    if base_img in seen_images:
                         continue
-                    seen_images.add(base_url_img)
+                    seen_images.add(base_img)
 
-                    # Use 400 as thumbnail, 1200 as full
-                    thumb_url = base_url_img.replace('/1200/', '/400/')
-                    image_url = base_url_img
+                    # Use _w400 as thumbnail, no suffix for full size
+                    thumb_url = base_img.replace('.jpg', '_w400.jpg')
+                    image_url = base_img  # Full size has no suffix
 
                     results.append({
                         "thumbnail": thumb_url,
@@ -556,8 +557,9 @@ def search_elitebabes(name, max_results=100, max_galleries=10):
 def search_boobpedia(name, max_results=50):
     """
     Search Boobpedia for performer images.
-    Boobpedia is a wiki-style site with performer photos.
-    Thumbnails need to be transformed to get full-size images.
+    Boobpedia is a MediaWiki-style site with performer photos.
+    Thumbnails are relative paths: /wiki/images/thumb/X/XX/Filename.jpg/NNNpx-Filename.jpg
+    Full size: /wiki/images/X/XX/Filename.jpg
     """
     results = []
 
@@ -575,27 +577,33 @@ def search_boobpedia(name, max_results=50):
             with urllib.request.urlopen(req, timeout=10) as response:
                 html = response.read().decode('utf-8', errors='ignore')
 
-            # Extract thumbnail image links
-            # Format: /thumb/d/db/Image.jpg/200px-Image.jpg
-            # Full: /boobs/d/db/Image.jpg
-            pattern = r'src="(https://www\.boobpedia\.com/boobs/thumb/[^"]+)"'
+            # Extract thumbnail image links (relative paths)
+            # Format: /wiki/images/thumb/X/XX/Filename.jpg/NNNpx-Filename.jpg
+            # We want content images, not icons (which have small sizes like 16px, 18px)
+            pattern = r'src="(/wiki/images/thumb/[^"]+)"'
             matches = re.findall(pattern, html)
             log.LogDebug(f"[Boobpedia] Found {len(matches)} thumbnail matches")
 
-            for thumb_url in matches:
-                if thumb_url in seen or len(results) >= max_results:
+            for thumb_path in matches:
+                # Skip small icons (16px, 18px, 70px are usually icons or tiny thumbs)
+                if re.search(r'/(?:16|18|20)px-', thumb_path):
                     continue
-                seen.add(thumb_url)
+
+                if thumb_path in seen or len(results) >= max_results:
+                    continue
+                seen.add(thumb_path)
 
                 # Transform thumbnail to full-size
-                # /boobs/thumb/d/db/Name.jpg/200px-Name.jpg -> /boobs/d/db/Name.jpg
-                # Remove /thumb/ and the trailing /NNNpx-filename.jpg part
-                match = re.match(r'(https://www\.boobpedia\.com/boobs/)thumb/([a-z0-9]/[a-z0-9]+/[^/]+\.(?:jpg|jpeg|png|gif))/\d+px-', thumb_url, re.IGNORECASE)
+                # /wiki/images/thumb/X/XX/Filename.jpg/NNNpx-Filename.jpg -> /wiki/images/X/XX/Filename.jpg
+                match = re.match(r'(/wiki/images/)thumb/([a-z0-9]/[a-z0-9]+/[^/]+\.(?:jpg|jpeg|png|gif))/\d+px-', thumb_path, re.IGNORECASE)
                 if match:
-                    image_url = match.group(1) + match.group(2)
+                    full_path = match.group(1) + match.group(2)
                 else:
-                    # Fallback: just use thumbnail
-                    image_url = thumb_url
+                    # Fallback: just use thumbnail path
+                    full_path = thumb_path
+
+                thumb_url = f"https://www.boobpedia.com{thumb_path}"
+                image_url = f"https://www.boobpedia.com{full_path}"
 
                 results.append({
                     "thumbnail": thumb_url,
