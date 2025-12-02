@@ -1,6 +1,6 @@
 name: Performer Image Search
-description: Search multiple sources (Babepedia, PornPics, FreeOnes, Bing) for performer images and set them directly from the performer page
-version: 1.0.1
+description: Search multiple sources (Babepedia, PornPics, FreeOnes, EliteBabes, Boobpedia, Bing) for performer images and set them directly from the performer page
+version: 1.1.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer pages
