@@ -455,9 +455,12 @@ def whisparr_request(whisparr_url, api_key, endpoint, method="GET", payload=None
     log.LogDebug(f"[Whisparr] Starting {method} request to {endpoint}...")
     try:
         with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as response:
-            result = json.loads(response.read().decode("utf-8"))
+            body = response.read().decode("utf-8")
             log.LogDebug(f"[Whisparr] {method} {endpoint} completed successfully")
-            return result
+            # DELETE requests return empty body on success
+            if not body or body.strip() == "":
+                return None
+            return json.loads(body)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") if e.fp else ""
         log.LogError(f"Whisparr HTTP error {e.code}: {e.reason} - {body}")
