@@ -4,13 +4,14 @@ mcMetadata - Stash Plugin for Media Center Metadata Generation
 Generates NFO files for Jellyfin/Emby, organizes video files according to
 configurable templates, and exports performer images to media server folders.
 
-Version: 1.2.2
+Version: 1.2.3
 """
 
 import json
 import sys
-import stashapi.log as log
 from stashapi.stashapp import StashInterface
+from utils.logger import init_file_logger, close_file_logger
+import utils.logger as log
 from performer import process_all_performers
 from scene import process_all_scenes, process_scene
 
@@ -45,6 +46,7 @@ def get_settings(stash_instance):
     # with sensible defaults
     return {
         "dry_run": plugin_config.get("dryRun", True),  # Default to safe mode
+        "log_file_path": plugin_config.get("logFilePath", ""),  # Optional file logging
         "enable_hook": plugin_config.get("enableHook", False),  # Default off for safety
         "require_stash_id": plugin_config.get("requireStashId", False),  # Default off - process all scenes
         "enable_renamer": plugin_config.get("enableRenamer", False),
@@ -90,6 +92,11 @@ def main():
     """Main entry point for the plugin."""
     try:
         mode = get_plugin_mode()
+
+        # Initialize file logging if configured
+        if SETTINGS.get("log_file_path"):
+            init_file_logger(SETTINGS["log_file_path"])
+
         log.debug(f"Plugin mode: {mode}")
         log.debug(f"Dry run: {SETTINGS['dry_run']}")
 
@@ -145,6 +152,9 @@ def main():
     except Exception as err:
         log.error(f"Plugin error: {err}")
         sys.exit(1)
+    finally:
+        # Always close file logger to ensure log is written
+        close_file_logger()
 
 
 if __name__ == "__main__":

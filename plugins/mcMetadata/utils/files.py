@@ -1,6 +1,6 @@
 import os
 import urllib.request
-import stashapi.log as log
+import utils.logger as log
 
 
 def download_image(url, dest_filepath, settings):  # pragma: no cover

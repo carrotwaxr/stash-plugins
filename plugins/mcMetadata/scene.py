@@ -1,5 +1,5 @@
 import os
-import stashapi.log as log
+import utils.logger as log
 from performer import process_performer
 from utils.files import download_image, rename_file, replace_file_ext
 from utils.nfo import build_nfo_xml
