@@ -1228,21 +1228,13 @@ def task_scan_for_new_scenes(plugin_settings):
     log.LogInfo(f"Triggering scan on path: {scan_path}")
 
     try:
-        # First, get the user's default scan settings
+        # First, get the user's scan settings from UI taskDefaults
+        # Note: configuration.defaults.scan is different from the UI settings
+        # The actual user-configured scan defaults are in configuration.ui.taskDefaults.scan
         config_result = stash_graphql("""
             query Configuration {
                 configuration {
-                    defaults {
-                        scan {
-                            scanGenerateCovers
-                            scanGeneratePreviews
-                            scanGenerateImagePreviews
-                            scanGenerateSprites
-                            scanGeneratePhashes
-                            scanGenerateThumbnails
-                            scanGenerateClipPreviews
-                        }
-                    }
+                    ui
                 }
             }
         """)
@@ -1251,17 +1243,25 @@ def task_scan_for_new_scenes(plugin_settings):
         scan_input = {"paths": [scan_path]}
 
         if config_result and "configuration" in config_result:
-            defaults = config_result["configuration"].get("defaults", {}).get("scan", {})
-            if defaults:
-                # Map the default settings to scan input fields
-                scan_input["scanGenerateCovers"] = defaults.get("scanGenerateCovers", True)
-                scan_input["scanGeneratePreviews"] = defaults.get("scanGeneratePreviews", False)
-                scan_input["scanGenerateImagePreviews"] = defaults.get("scanGenerateImagePreviews", False)
-                scan_input["scanGenerateSprites"] = defaults.get("scanGenerateSprites", True)
-                scan_input["scanGeneratePhashes"] = defaults.get("scanGeneratePhashes", True)
-                scan_input["scanGenerateThumbnails"] = defaults.get("scanGenerateThumbnails", False)
-                scan_input["scanGenerateClipPreviews"] = defaults.get("scanGenerateClipPreviews", False)
-                log.LogDebug(f"Using user's scan defaults: {defaults}")
+            ui_config = config_result["configuration"].get("ui", {})
+            # ui is a JSON Map, parse it if it's a string
+            if isinstance(ui_config, str):
+                import json as json_module
+                ui_config = json_module.loads(ui_config)
+
+            task_defaults = ui_config.get("taskDefaults", {})
+            scan_defaults = task_defaults.get("scan", {})
+
+            if scan_defaults:
+                # Map the UI task defaults to scan input fields
+                scan_input["scanGenerateCovers"] = scan_defaults.get("scanGenerateCovers", True)
+                scan_input["scanGeneratePreviews"] = scan_defaults.get("scanGeneratePreviews", False)
+                scan_input["scanGenerateImagePreviews"] = scan_defaults.get("scanGenerateImagePreviews", False)
+                scan_input["scanGenerateSprites"] = scan_defaults.get("scanGenerateSprites", True)
+                scan_input["scanGeneratePhashes"] = scan_defaults.get("scanGeneratePhashes", True)
+                scan_input["scanGenerateThumbnails"] = scan_defaults.get("scanGenerateThumbnails", False)
+                scan_input["scanGenerateClipPreviews"] = scan_defaults.get("scanGenerateClipPreviews", False)
+                log.LogInfo(f"Using user's scan defaults: covers={scan_input['scanGenerateCovers']}, previews={scan_input['scanGeneratePreviews']}, sprites={scan_input['scanGenerateSprites']}")
 
         result = stash_graphql("""
             mutation MetadataScan($input: ScanMetadataInput!) {
