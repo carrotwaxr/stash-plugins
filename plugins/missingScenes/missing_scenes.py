@@ -637,6 +637,142 @@ def whisparr_get_existing_stash_ids(whisparr_url, api_key):
         return stash_ids
 
 
+def whisparr_get_queue(whisparr_url, api_key):
+    """Get the current download queue from Whisparr.
+
+    Returns:
+        List of queue items with download status
+    """
+    try:
+        endpoint = "queue?pageSize=1000"
+        result = whisparr_request(whisparr_url, api_key, endpoint)
+        records = result.get("records", []) if result else []
+        log.LogInfo(f"Found {len(records)} items in Whisparr queue")
+        return records
+    except Exception as e:
+        log.LogWarning(f"Error fetching Whisparr queue: {e}")
+        return []
+
+
+def whisparr_get_status_map(whisparr_url, api_key):
+    """Build a map of StashDB IDs to their Whisparr status.
+
+    Combines data from both the movie database and download queue to
+    determine the current status of each scene.
+
+    Status values:
+        - "downloading": Actively downloading (with progress %)
+        - "queued": In queue, waiting to start
+        - "stalled": In queue but stalled/warning
+        - "waiting": In Whisparr, no file, not in queue (needs search)
+        - "downloaded": Has file
+
+    Returns:
+        Dict mapping stash_id -> {
+            "status": str,
+            "progress": float (0-100, only for downloading),
+            "eta": str (only for downloading/queued),
+            "error": str (only for stalled),
+            "whisparr_id": int
+        }
+    """
+    status_map = {}
+
+    try:
+        # Get all scenes in Whisparr
+        scenes = whisparr_get_all_scenes(whisparr_url, api_key)
+
+        # Build a map of whisparr movie ID -> stash_id for queue lookups
+        whisparr_id_to_stash_id = {}
+
+        for scene in scenes:
+            # Whisparr stores the StashDB ID in stashId field directly (UUID format)
+            stash_id = scene.get("stashId", "")
+
+            if not stash_id:
+                continue
+
+            whisparr_id = scene.get("id")
+            has_file = scene.get("hasFile", False)
+
+            whisparr_id_to_stash_id[whisparr_id] = stash_id
+
+            # Initial status based on hasFile
+            if has_file:
+                status_map[stash_id] = {
+                    "status": "downloaded",
+                    "whisparr_id": whisparr_id
+                }
+            else:
+                # In Whisparr but no file - will check queue next
+                status_map[stash_id] = {
+                    "status": "waiting",  # Default, may be updated by queue check
+                    "whisparr_id": whisparr_id
+                }
+
+        # Get queue and update statuses for items being downloaded
+        queue = whisparr_get_queue(whisparr_url, api_key)
+
+        for item in queue:
+            movie_id = item.get("movieId")
+            stash_id = whisparr_id_to_stash_id.get(movie_id)
+
+            if not stash_id:
+                continue
+
+            # Determine status from queue item
+            queue_status = item.get("status", "").lower()
+            tracked_state = item.get("trackedDownloadState", "").lower()
+            error_message = item.get("errorMessage", "")
+
+            # Calculate progress
+            size = item.get("size", 0)
+            size_left = item.get("sizeleft", 0)
+            progress = 0
+            if size > 0:
+                progress = round(((size - size_left) / size) * 100, 1)
+
+            eta = item.get("timeleft")
+
+            # Determine the status
+            if queue_status == "warning" or "stalled" in error_message.lower():
+                status_map[stash_id] = {
+                    "status": "stalled",
+                    "progress": progress,
+                    "eta": eta,
+                    "error": error_message,
+                    "whisparr_id": movie_id
+                }
+            elif queue_status == "downloading" or tracked_state == "downloading":
+                status_map[stash_id] = {
+                    "status": "downloading",
+                    "progress": progress,
+                    "eta": eta,
+                    "whisparr_id": movie_id
+                }
+            elif queue_status == "queued":
+                status_map[stash_id] = {
+                    "status": "queued",
+                    "eta": eta,
+                    "whisparr_id": movie_id
+                }
+            else:
+                # Some other queue state - mark as queued with progress info
+                status_map[stash_id] = {
+                    "status": "queued",
+                    "progress": progress,
+                    "eta": eta,
+                    "whisparr_id": movie_id
+                }
+
+        log.LogInfo(f"Built status map for {len(status_map)} Whisparr scenes")
+        return status_map
+
+    except Exception as e:
+        log.LogWarning(f"Error building Whisparr status map: {e}")
+        return status_map
+
+
 # ============================================================================
 # Main Operations
 # ============================================================================
@@ -730,8 +866,8 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
     # Get all local scene stash_ids
     local_stash_ids = get_local_scene_stash_ids(stashdb_url)
 
-    # Also check Whisparr if configured
-    whisparr_stash_ids = set()
+    # Also check Whisparr if configured - get full status map
+    whisparr_status_map = {}
     whisparr_configured = False
     whisparr_url = plugin_settings.get("whisparrUrl", "")
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
@@ -739,9 +875,9 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
     if whisparr_url and whisparr_api_key:
         whisparr_configured = True
         try:
-            whisparr_stash_ids = whisparr_get_existing_stash_ids(whisparr_url, whisparr_api_key)
+            whisparr_status_map = whisparr_get_status_map(whisparr_url, whisparr_api_key)
         except Exception as e:
-            log.LogWarning(f"Could not fetch Whisparr scenes: {e}")
+            log.LogWarning(f"Could not fetch Whisparr status: {e}")
 
     # Find missing scenes
     missing_scenes = []
@@ -751,8 +887,14 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
             # Format the scene data
             formatted = format_scene(scene, scene_stash_id)
 
-            # Mark if it's in Whisparr
-            formatted["in_whisparr"] = scene_stash_id in whisparr_stash_ids
+            # Add Whisparr status (detailed object or null if not in Whisparr)
+            if scene_stash_id in whisparr_status_map:
+                formatted["whisparr_status"] = whisparr_status_map[scene_stash_id]
+            else:
+                formatted["whisparr_status"] = None
+
+            # Keep in_whisparr for backwards compatibility
+            formatted["in_whisparr"] = scene_stash_id in whisparr_status_map
 
             missing_scenes.append(formatted)
 
