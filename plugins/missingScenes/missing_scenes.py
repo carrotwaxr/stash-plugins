@@ -579,38 +579,24 @@ def whisparr_trigger_search(whisparr_url, api_key, movie_id):
 
 
 def whisparr_get_all_scenes(whisparr_url, api_key):
-    """Get all scenes from Whisparr with pagination.
+    """Get all scenes from Whisparr.
 
-    Uses the movie endpoint with pagination (same as Stasharr).
+    The /api/v3/movie endpoint returns all movies in a single request.
+    No pagination is needed or supported.
 
     Returns:
         List of all scenes in Whisparr
     """
-    all_scenes = []
-    page = 1
-    page_size = 100
-
     try:
-        while True:
-            endpoint = f"movie?page={page}&pageSize={page_size}"
-            scenes = whisparr_request(whisparr_url, api_key, endpoint)
-
-            if not scenes:
-                break
-
-            all_scenes.extend(scenes)
-
-            if len(scenes) < page_size:
-                break
-
-            page += 1
-
-        log.LogInfo(f"Found {len(all_scenes)} scenes in Whisparr")
-        return all_scenes
+        scenes = whisparr_request(whisparr_url, api_key, "movie")
+        if not scenes:
+            scenes = []
+        log.LogInfo(f"Found {len(scenes)} scenes in Whisparr")
+        return scenes
 
     except Exception as e:
         log.LogWarning(f"Error fetching Whisparr scenes: {e}")
-        return all_scenes
+        return []
 
 
 def whisparr_get_existing_stash_ids(whisparr_url, api_key):
