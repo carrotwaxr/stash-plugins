@@ -384,7 +384,40 @@
       const whisparrBtn = document.createElement("button");
       whisparrBtn.className = "ms-btn ms-btn-small ms-btn-whisparr";
 
-      if (scene.in_whisparr) {
+      if (scene.in_whisparr && scene.whisparr_status) {
+        // Show detailed status based on whisparr_status object
+        const status = scene.whisparr_status.status;
+        const progress = scene.whisparr_status.progress;
+
+        switch (status) {
+          case "downloaded":
+            whisparrBtn.textContent = "Downloaded";
+            whisparrBtn.classList.add("ms-btn-success");
+            break;
+          case "downloading":
+            whisparrBtn.textContent = progress ? `Downloading ${progress}%` : "Downloading...";
+            whisparrBtn.classList.add("ms-btn-downloading");
+            break;
+          case "queued":
+            whisparrBtn.textContent = "Queued";
+            whisparrBtn.classList.add("ms-btn-queued");
+            break;
+          case "stalled":
+            whisparrBtn.textContent = progress ? `Stalled ${progress}%` : "Stalled";
+            whisparrBtn.classList.add("ms-btn-stalled");
+            whisparrBtn.title = scene.whisparr_status.error || "Download stalled";
+            break;
+          case "waiting":
+            whisparrBtn.textContent = "Waiting";
+            whisparrBtn.classList.add("ms-btn-waiting");
+            break;
+          default:
+            whisparrBtn.textContent = "In Whisparr";
+        }
+        whisparrBtn.disabled = true;
+        whisparrBtn.classList.add("ms-btn-disabled");
+      } else if (scene.in_whisparr) {
+        // Fallback for backwards compatibility
         whisparrBtn.textContent = "In Whisparr";
         whisparrBtn.disabled = true;
         whisparrBtn.classList.add("ms-btn-disabled");

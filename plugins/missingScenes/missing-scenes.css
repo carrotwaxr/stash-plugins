@@ -336,6 +336,37 @@
   border-color: #dc3545 !important;
 }
 
+/* Whisparr Status Styles */
+.ms-btn-downloading {
+  background: #0d6efd !important;
+  border-color: #0d6efd !important;
+  animation: ms-pulse 1.5s ease-in-out infinite;
+}
+
+.ms-btn-queued {
+  background: #6c757d !important;
+  border-color: #6c757d !important;
+}
+
+.ms-btn-stalled {
+  background: #fd7e14 !important;
+  border-color: #fd7e14 !important;
+}
+
+.ms-btn-waiting {
+  background: #20c997 !important;
+  border-color: #20c997 !important;
+}
+
+@keyframes ms-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
 .ms-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;

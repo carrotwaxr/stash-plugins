@@ -1215,7 +1215,10 @@ def handle_scene_update_hook(scene_input, plugin_settings):
 
 
 def task_scan_for_new_scenes(plugin_settings):
-    """Task: Trigger a Stash scan on the configured scan path."""
+    """Task: Trigger a Stash scan on the configured scan path.
+
+    Uses the user's default scan settings from Stash configuration.
+    """
     scan_path = plugin_settings.get("scanPath", "").strip()
 
     if not scan_path:
@@ -1225,11 +1228,46 @@ def task_scan_for_new_scenes(plugin_settings):
     log.LogInfo(f"Triggering scan on path: {scan_path}")
 
     try:
+        # First, get the user's default scan settings
+        config_result = stash_graphql("""
+            query Configuration {
+                configuration {
+                    defaults {
+                        scan {
+                            scanGenerateCovers
+                            scanGeneratePreviews
+                            scanGenerateImagePreviews
+                            scanGenerateSprites
+                            scanGeneratePhashes
+                            scanGenerateThumbnails
+                            scanGenerateClipPreviews
+                        }
+                    }
+                }
+            }
+        """)
+
+        # Build scan input with user's defaults
+        scan_input = {"paths": [scan_path]}
+
+        if config_result and "configuration" in config_result:
+            defaults = config_result["configuration"].get("defaults", {}).get("scan", {})
+            if defaults:
+                # Map the default settings to scan input fields
+                scan_input["scanGenerateCovers"] = defaults.get("scanGenerateCovers", True)
+                scan_input["scanGeneratePreviews"] = defaults.get("scanGeneratePreviews", False)
+                scan_input["scanGenerateImagePreviews"] = defaults.get("scanGenerateImagePreviews", False)
+                scan_input["scanGenerateSprites"] = defaults.get("scanGenerateSprites", True)
+                scan_input["scanGeneratePhashes"] = defaults.get("scanGeneratePhashes", True)
+                scan_input["scanGenerateThumbnails"] = defaults.get("scanGenerateThumbnails", False)
+                scan_input["scanGenerateClipPreviews"] = defaults.get("scanGenerateClipPreviews", False)
+                log.LogDebug(f"Using user's scan defaults: {defaults}")
+
         result = stash_graphql("""
             mutation MetadataScan($input: ScanMetadataInput!) {
                 metadataScan(input: $input)
             }
-        """, {"input": {"paths": [scan_path]}})
+        """, {"input": scan_input})
 
         if result:
             log.LogInfo(f"Scan started for {scan_path}")
