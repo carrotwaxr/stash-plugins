@@ -1,7 +1,7 @@
 name: mcMetadata
 description: Generates NFO metadata files for Jellyfin/Emby, organizes/renames video files using customizable templates, and exports performer images to media server folders.
 url: https://github.com/carrotwaxr/stash-plugins/tree/main/plugins/mcMetadata
-version: 1.2.2
+version: 1.2.3
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
@@ -13,6 +13,10 @@ settings:
     displayName: Dry Run Mode
     description: Preview changes without making them. Check logs to see what would happen. Default is ON.
     type: BOOLEAN
+  logFilePath:
+    displayName: Log File Path
+    description: Path to write detailed log file during dry run. Leave empty to disable file logging. Example /data/mcMetadata.log
+    type: STRING
   enableHook:
     displayName: Enable Scene Update Hook
     description: Process scenes automatically when you update them. Disable to only use bulk tasks. Default is OFF.

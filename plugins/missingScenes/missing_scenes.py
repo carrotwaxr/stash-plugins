@@ -434,7 +434,7 @@ def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, max_pages
 
 
 # ============================================================================
-# Whisparr API
+# Whisparr API (v3 - Compatible with Stasharr approach)
 # ============================================================================
 
 def whisparr_request(whisparr_url, api_key, endpoint, method="GET", payload=None):
@@ -464,27 +464,77 @@ def whisparr_request(whisparr_url, api_key, endpoint, method="GET", payload=None
         raise
 
 
-def whisparr_lookup_scene(whisparr_url, api_key, stash_id):
-    """Lookup a scene in Whisparr by its StashDB ID."""
+def whisparr_get_scene_by_stash_id(whisparr_url, api_key, stash_id):
+    """Check if a scene exists in Whisparr by its StashDB ID.
+
+    Uses the movie?stashId= endpoint (same as Stasharr).
+
+    Args:
+        whisparr_url: Whisparr base URL
+        api_key: Whisparr API key
+        stash_id: StashDB scene ID (UUID)
+
+    Returns:
+        Scene dict if found, None otherwise
+    """
     try:
-        # Use the lookup endpoint to search by stash ID
+        endpoint = f"movie?stashId={urllib.parse.quote(stash_id)}"
+        result = whisparr_request(whisparr_url, api_key, endpoint)
+        if result and len(result) > 0:
+            return result[0]
+        return None
+    except Exception as e:
+        log.LogWarning(f"Whisparr scene lookup failed for {stash_id}: {e}")
+        return None
+
+
+def whisparr_lookup_scene(whisparr_url, api_key, stash_id):
+    """Lookup a scene in TPDB via Whisparr by its StashDB ID.
+
+    Uses the lookup/scene?term=stash: endpoint to search TPDB for the scene.
+    This is used to get scene metadata before adding to Whisparr.
+
+    Args:
+        whisparr_url: Whisparr base URL
+        api_key: Whisparr API key
+        stash_id: StashDB scene ID (UUID)
+
+    Returns:
+        Scene data from TPDB lookup, or None if not found
+    """
+    try:
         endpoint = f"lookup/scene?term=stash:{urllib.parse.quote(stash_id)}"
         result = whisparr_request(whisparr_url, api_key, endpoint)
         if result and len(result) > 0:
-            return result[0].get("movie")
+            # The lookup returns a wrapper with 'movie' field
+            return result[0].get("movie") if isinstance(result[0], dict) else result[0]
         return None
     except Exception as e:
-        log.LogWarning(f"Whisparr lookup failed for {stash_id}: {e}")
+        log.LogWarning(f"Whisparr TPDB lookup failed for {stash_id}: {e}")
         return None
 
 
-def whisparr_add_scene(whisparr_url, api_key, scene_data, quality_profile_id, root_folder, search_on_add=True):
-    """Add a scene to Whisparr."""
+def whisparr_add_scene(whisparr_url, api_key, scene_data, quality_profile_id, root_folder, search_on_add=False):
+    """Add a scene to Whisparr.
+
+    Uses the movie endpoint (POST) to add a scene.
+
+    Args:
+        whisparr_url: Whisparr base URL
+        api_key: Whisparr API key
+        scene_data: Scene data from whisparr_lookup_scene()
+        quality_profile_id: Quality profile ID to use
+        root_folder: Root folder path for downloads
+        search_on_add: Whether to trigger a search after adding
+
+    Returns:
+        Added scene data, or None on failure
+    """
     payload = {
-        "foreignId": f"stash:{scene_data['stash_id']}",
-        "title": scene_data.get("title", "Unknown"),
-        "rootFolderPath": root_folder,
+        "foreignId": scene_data.get("foreignId"),
+        "title": scene_data.get("title"),
         "qualityProfileId": quality_profile_id,
+        "rootFolderPath": root_folder,
         "monitored": True,
         "tags": [],
         "addOptions": {
@@ -501,46 +551,90 @@ def whisparr_add_scene(whisparr_url, api_key, scene_data, quality_profile_id, ro
         raise
 
 
-def whisparr_get_existing_stash_ids(whisparr_url, api_key):
-    """Get all StashDB IDs already in Whisparr."""
-    stash_ids = set()
+def whisparr_trigger_search(whisparr_url, api_key, movie_id):
+    """Trigger a search for a specific scene in Whisparr.
+
+    Args:
+        whisparr_url: Whisparr base URL
+        api_key: Whisparr API key
+        movie_id: Whisparr movie/scene ID
+
+    Returns:
+        Command response, or None on failure
+    """
+    try:
+        payload = {
+            "name": "MoviesSearch",
+            "movieIds": [movie_id]
+        }
+        result = whisparr_request(whisparr_url, api_key, "command", "POST", payload)
+        log.LogInfo(f"Triggered search for movie {movie_id}")
+        return result
+    except Exception as e:
+        log.LogError(f"Failed to trigger search for movie {movie_id}: {e}")
+        return None
+
+
+def whisparr_get_all_scenes(whisparr_url, api_key):
+    """Get all scenes from Whisparr with pagination.
+
+    Uses the movie endpoint with pagination (same as Stasharr).
+
+    Returns:
+        List of all scenes in Whisparr
+    """
+    all_scenes = []
     page = 1
-    per_page = 100
+    page_size = 100
 
-    while True:
-        try:
-            endpoint = f"movie?page={page}&pageSize={per_page}"
-            result = whisparr_request(whisparr_url, api_key, endpoint)
-
-            if not result:
-                break
-
-            # Handle both list response and paginated response
-            if isinstance(result, list):
-                scenes = result
-            else:
-                scenes = result.get("records", result)
+    try:
+        while True:
+            endpoint = f"movie?page={page}&pageSize={page_size}"
+            scenes = whisparr_request(whisparr_url, api_key, endpoint)
 
             if not scenes:
                 break
 
-            for scene in scenes:
-                foreign_id = scene.get("foreignId", "")
-                if foreign_id.startswith("stash:"):
-                    stash_ids.add(foreign_id.replace("stash:", ""))
+            all_scenes.extend(scenes)
 
-            # If we got fewer results than requested, we're done
-            if len(scenes) < per_page:
+            if len(scenes) < page_size:
                 break
 
             page += 1
 
-        except Exception as e:
-            log.LogWarning(f"Error fetching Whisparr scenes page {page}: {e}")
-            break
+        log.LogInfo(f"Found {len(all_scenes)} scenes in Whisparr")
+        return all_scenes
 
-    log.LogInfo(f"Found {len(stash_ids)} scenes in Whisparr")
-    return stash_ids
+    except Exception as e:
+        log.LogWarning(f"Error fetching Whisparr scenes: {e}")
+        return all_scenes
+
+
+def whisparr_get_existing_stash_ids(whisparr_url, api_key):
+    """Get all StashDB IDs for scenes already in Whisparr.
+
+    Scenes in Whisparr have a foreignId field formatted as "stash:{uuid}".
+
+    Returns:
+        Set of StashDB scene IDs
+    """
+    stash_ids = set()
+
+    try:
+        scenes = whisparr_get_all_scenes(whisparr_url, api_key)
+
+        for scene in scenes:
+            foreign_id = scene.get("foreignId", "")
+            if foreign_id and foreign_id.startswith("stash:"):
+                stash_id = foreign_id.replace("stash:", "")
+                stash_ids.add(stash_id)
+
+        log.LogInfo(f"Found {len(stash_ids)} scenes with StashDB IDs in Whisparr")
+        return stash_ids
+
+    except Exception as e:
+        log.LogWarning(f"Error fetching Whisparr scenes: {e}")
+        return stash_ids
 
 
 # ============================================================================
@@ -737,13 +831,26 @@ def format_scene(scene, stash_id):
     }
 
 
-def add_to_whisparr(stash_id, title, plugin_settings):
-    """Add a scene to Whisparr by its StashDB ID."""
+def add_to_whisparr(stash_id, title, plugin_settings, studio_name=None):
+    """Add a scene to Whisparr by its StashDB ID.
+
+    Uses the same approach as Stasharr:
+    1. Check if scene already exists (movie?stashId=X)
+    2. Lookup scene in TPDB (lookup/scene?term=stash:X)
+    3. Add scene to Whisparr (POST movie)
+    4. Optionally trigger search
+
+    Args:
+        stash_id: StashDB scene ID (UUID)
+        title: Scene title (for logging/error messages)
+        plugin_settings: Plugin configuration from Stash
+        studio_name: Optional studio name (not used in movie-mode API)
+    """
     whisparr_url = plugin_settings.get("whisparrUrl", "")
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
-    quality_profile = int(plugin_settings.get("whisparrQualityProfile") or 1)
+    quality_profile = int(plugin_settings.get("whisparrQualityProfile") or 1)  # Default to first profile
     root_folder = plugin_settings.get("whisparrRootFolder", "")
-    search_on_add = plugin_settings.get("whisparrSearchOnAdd", True)
+    search_on_add = plugin_settings.get("whisparrSearchOnAdd", False)  # Default to False for manual control
 
     if not whisparr_url or not whisparr_api_key:
         return {"error": "Whisparr is not configured. Please set URL and API key in plugin settings."}
@@ -752,29 +859,62 @@ def add_to_whisparr(stash_id, title, plugin_settings):
         return {"error": "Whisparr root folder is not configured. Please set it in plugin settings."}
 
     try:
-        # First lookup the scene to get full details
-        scene = whisparr_lookup_scene(whisparr_url, whisparr_api_key, stash_id)
+        # Step 1: Check if scene already exists in Whisparr
+        existing_scene = whisparr_get_scene_by_stash_id(whisparr_url, whisparr_api_key, stash_id)
+        if existing_scene:
+            has_file = existing_scene.get("hasFile", False)
+            if has_file:
+                return {
+                    "success": True,
+                    "message": f"Scene '{title}' already exists in Whisparr with file.",
+                    "already_exists": True
+                }
+            else:
+                # Scene exists but no file - maybe trigger search?
+                if search_on_add:
+                    whisparr_trigger_search(whisparr_url, whisparr_api_key, existing_scene["id"])
+                    return {
+                        "success": True,
+                        "message": f"Scene '{title}' already in Whisparr. Triggered search.",
+                        "already_exists": True
+                    }
+                return {
+                    "success": True,
+                    "message": f"Scene '{title}' already in Whisparr (no file yet). Use Whisparr to search.",
+                    "already_exists": True
+                }
 
-        if not scene:
-            return {"error": f"Scene not found in Whisparr lookup. It may not be available for download yet."}
+        # Step 2: Lookup scene in TPDB via Whisparr
+        scene_data = whisparr_lookup_scene(whisparr_url, whisparr_api_key, stash_id)
+        if not scene_data:
+            return {
+                "error": f"Scene '{title}' not found in TPDB/Whisparr lookup. "
+                         "It may not be indexed in ThePornDB yet, or the StashDB ID "
+                         "doesn't have a matching TPDB entry. Try searching manually in Whisparr."
+            }
 
-        # Add the scene
-        result = whisparr_add_scene(
+        # Step 3: Add scene to Whisparr
+        added_scene = whisparr_add_scene(
             whisparr_url,
             whisparr_api_key,
-            {"stash_id": stash_id, "title": title},
+            scene_data,
             quality_profile,
             root_folder,
-            search_on_add
+            search_on_add=search_on_add
         )
 
+        if not added_scene:
+            return {"error": f"Failed to add scene '{title}' to Whisparr."}
+
+        search_msg = " and triggered search" if search_on_add else ""
         return {
             "success": True,
-            "message": f"Added '{title}' to Whisparr",
-            "scene": result
+            "message": f"Added '{title}' to Whisparr{search_msg}.",
+            "scene": added_scene
         }
 
     except Exception as e:
+        log.LogError(f"Error adding scene to Whisparr: {e}")
         return {"error": str(e)}
 
 

@@ -4,7 +4,7 @@ import configparser
 import os
 import re
 import sys
-import stashapi.log as log
+import utils.logger as log
 
 # Required settings for all modes
 REQUIRED_SETTINGS = ["dry_run", "enable_actor_images", "enable_hook", "enable_renamer"]
