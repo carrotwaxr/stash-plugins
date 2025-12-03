@@ -43,7 +43,12 @@ Configure in **Settings → Plugins → Missing Scenes**:
 When Whisparr is configured:
 - Each missing scene shows an "Add to Whisparr" button
 - "Add All to Whisparr" button appears to bulk-add all missing scenes
-- Scenes already in Whisparr are marked and disabled
+- **Status Tracking**: Scenes show detailed status from Whisparr:
+  - **Downloaded**: Already downloaded and available
+  - **Downloading**: Currently downloading with progress percentage
+  - **Queued**: Waiting to start downloading
+  - **Stalled**: Download stalled (with error message)
+  - **Waiting**: In Whisparr but not yet searching
 
 **Note**: Whisparr v3 API is supported. The plugin uses `stash:{scene_id}` as the foreign ID format.
 
