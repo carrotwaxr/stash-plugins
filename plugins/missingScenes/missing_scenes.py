@@ -452,9 +452,12 @@ def whisparr_request(whisparr_url, api_key, endpoint, method="GET", payload=None
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
 
+    log.LogDebug(f"[Whisparr] Starting {method} request to {endpoint}...")
     try:
         with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as response:
-            return json.loads(response.read().decode("utf-8"))
+            result = json.loads(response.read().decode("utf-8"))
+            log.LogDebug(f"[Whisparr] {method} {endpoint} completed successfully")
+            return result
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") if e.fp else ""
         log.LogError(f"Whisparr HTTP error {e.code}: {e.reason} - {body}")
@@ -680,7 +683,9 @@ def whisparr_get_status_map(whisparr_url, api_key):
 
     try:
         # Get all scenes in Whisparr
+        log.LogDebug(f"[Whisparr] Fetching all scenes from {whisparr_url}...")
         scenes = whisparr_get_all_scenes(whisparr_url, api_key)
+        log.LogDebug(f"[Whisparr] Got {len(scenes)} scenes")
 
         # Build a map of whisparr movie ID -> stash_id for queue lookups
         whisparr_id_to_stash_id = {}
@@ -711,7 +716,9 @@ def whisparr_get_status_map(whisparr_url, api_key):
                 }
 
         # Get queue and update statuses for items being downloaded
+        log.LogDebug("[Whisparr] Fetching queue...")
         queue = whisparr_get_queue(whisparr_url, api_key)
+        log.LogDebug(f"[Whisparr] Got {len(queue)} queue items")
 
         for item in queue:
             movie_id = item.get("movieId")
@@ -864,7 +871,9 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
         }
 
     # Get all local scene stash_ids
+    log.LogDebug("[find_missing] Getting local scene stash_ids...")
     local_stash_ids = get_local_scene_stash_ids(stashdb_url)
+    log.LogDebug(f"[find_missing] Got {len(local_stash_ids)} local scene IDs")
 
     # Also check Whisparr if configured - get full status map
     whisparr_status_map = {}
@@ -874,10 +883,14 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
 
     if whisparr_url and whisparr_api_key:
         whisparr_configured = True
+        log.LogDebug(f"[find_missing] Whisparr configured at {whisparr_url}, fetching status map...")
         try:
             whisparr_status_map = whisparr_get_status_map(whisparr_url, whisparr_api_key)
+            log.LogDebug(f"[find_missing] Got Whisparr status map with {len(whisparr_status_map)} entries")
         except Exception as e:
             log.LogWarning(f"Could not fetch Whisparr status: {e}")
+    else:
+        log.LogDebug("[find_missing] Whisparr not configured, skipping")
 
     # Find missing scenes
     missing_scenes = []
