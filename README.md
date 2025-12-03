@@ -39,7 +39,7 @@ Search multiple image sources directly from performer pages and set images with 
 
 [Documentation](plugins/performerImageSearch/README.md)
 
-### Missing Scenes (v1.0.0)
+### Missing Scenes (v1.1.0)
 
 Discover scenes from StashDB that you don't have in your local library.
 
@@ -48,7 +48,7 @@ Discover scenes from StashDB that you don't have in your local library.
 - Visual grid with thumbnails, titles, dates, and performer info
 - Direct links to view scenes on StashDB
 - Multi-endpoint support (StashDB, FansDB, etc.)
-- Optional Whisparr integration for automated downloading
+- Whisparr integration with real-time status tracking (downloading, queued, stalled, etc.)
 
 [Documentation](plugins/missingScenes/README.md)
 
