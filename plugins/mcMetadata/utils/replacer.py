@@ -1,6 +1,6 @@
 import os
 import re
-import stashapi.log as log
+import utils.logger as log
 
 
 def __replacer_female_performers(scene):
