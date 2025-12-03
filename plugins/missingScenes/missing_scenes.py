@@ -1076,6 +1076,13 @@ def whisparr_delete_scene(whisparr_url, api_key, movie_id, delete_files=False):
         whisparr_request(whisparr_url, api_key, endpoint, method="DELETE")
         log.LogInfo(f"Deleted scene {movie_id} from Whisparr")
         return True
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # Scene already deleted - that's fine
+            log.LogInfo(f"Scene {movie_id} already removed from Whisparr (404)")
+            return True
+        log.LogError(f"Failed to delete scene {movie_id} from Whisparr: {e}")
+        raise
     except Exception as e:
         log.LogError(f"Failed to delete scene {movie_id} from Whisparr: {e}")
         raise
