@@ -1,6 +1,6 @@
 name: Missing Scenes
-description: Discover scenes from StashDB that you don't have locally. View missing scenes for performers and studios, with optional Whisparr integration for automated downloading.
-version: 1.1.0
+description: Discover scenes from StashDB that you don't have locally. View missing scenes for performers and studios, with optional Whisparr integration for automated downloading and cleanup.
+version: 1.2.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer/studio pages
@@ -40,6 +40,38 @@ settings:
     displayName: Search on Add
     description: Automatically search for scenes when adding to Whisparr. Enabled by default.
     type: BOOLEAN
+
+  # Automation settings
+  enableAutoCleanup:
+    displayName: Auto-cleanup Whisparr
+    description: Automatically remove scenes from Whisparr when they get tagged in Stash (receive a StashDB ID). Requires Whisparr to be configured.
+    type: BOOLEAN
+  unmonitorOnly:
+    displayName: Unmonitor Instead of Delete
+    description: When auto-cleanup is enabled, unmonitor scenes in Whisparr instead of deleting them. This keeps the scene in Whisparr but prevents re-downloading.
+    type: BOOLEAN
+  scanPath:
+    displayName: Scan Path for New Scenes
+    description: Path to scan for new downloaded scenes (e.g., /data/unsorted). Used by the "Scan for New Scenes" task.
+    type: STRING
+
+# Tasks that can be run manually or scheduled
+tasks:
+  - name: Scan for New Scenes
+    description: Trigger a Stash scan on the configured scan path to discover newly downloaded scenes.
+    defaultArgs:
+      mode: scan
+  - name: Cleanup Whisparr
+    description: Remove scenes from Whisparr that are now tagged in Stash. Prevents duplicate downloads.
+    defaultArgs:
+      mode: cleanup
+
+# Hook to automatically cleanup Whisparr when a scene is tagged
+hooks:
+  - name: Whisparr Auto-Cleanup
+    description: Remove scene from Whisparr when it receives a StashDB ID (gets tagged)
+    triggeredBy:
+      - Scene.Update.Post
 
 # Python backend for StashDB queries (called via runPluginOperation from JS)
 exec:

@@ -1,6 +1,6 @@
 # Missing Scenes
 
-Discover scenes from StashDB (or other stash-box instances) that you don't have in your local Stash library.
+Discover scenes from StashDB (or other stash-box instances) that you don't have in your local Stash library. View missing scenes for performers and studios, with optional Whisparr integration for automated downloading and cleanup.
 
 ## Features
 
@@ -9,6 +9,8 @@ Discover scenes from StashDB (or other stash-box instances) that you don't have 
 - **Direct StashDB Links**: Click any scene to view it on StashDB
 - **Multi-Endpoint Support**: Works with StashDB, FansDB, or any configured stash-box endpoint
 - **Whisparr Integration** (Optional): Add missing scenes directly to Whisparr for automated downloading
+- **Auto-Cleanup** (Optional): Automatically remove scenes from Whisparr when they get tagged in Stash
+- **Scan Task**: Trigger Stash scans for newly downloaded scenes
 
 ## Requirements
 
@@ -37,6 +39,9 @@ Configure in **Settings → Plugins → Missing Scenes**:
 | **Quality Profile ID** | Whisparr quality profile ID (default: 1). |
 | **Root Folder** | Whisparr root folder path for downloaded scenes. |
 | **Search on Add** | Automatically search for scenes when adding to Whisparr. |
+| **Auto-cleanup Whisparr** | Automatically remove scenes from Whisparr when they get tagged in Stash (receive a StashDB ID). |
+| **Unmonitor Instead of Delete** | When auto-cleanup is enabled, unmonitor scenes instead of deleting them. |
+| **Scan Path** | Path to scan for new downloaded scenes (e.g., `/data/unsorted`). Used by the "Scan for New Scenes" task. |
 
 ## Whisparr Integration
 
@@ -51,6 +56,41 @@ When Whisparr is configured:
   - **Waiting**: In Whisparr but not yet searching
 
 **Note**: Whisparr v3 API is supported. The plugin uses `stash:{scene_id}` as the foreign ID format.
+
+## Automation Features
+
+### Auto-Cleanup Hook
+
+When **Auto-cleanup Whisparr** is enabled, the plugin automatically removes scenes from Whisparr when they get tagged in Stash with a StashDB ID. This happens via the `Scene.Update.Post` hook.
+
+**How it works:**
+1. You download a scene via Whisparr
+2. The scene gets imported into Stash
+3. You tag the scene with its StashDB ID (manually or via the Tagger)
+4. The hook detects the scene now has a stash_id and removes it from Whisparr
+
+**Options:**
+- **Delete**: Completely removes the scene from Whisparr (default)
+- **Unmonitor**: Keeps the scene in Whisparr but marks it as unmonitored (prevents re-downloading)
+
+### Tasks
+
+Two tasks are available in **Settings → Tasks → Plugin Tasks**:
+
+| Task | Description |
+|------|-------------|
+| **Scan for New Scenes** | Triggers a Stash metadata scan on the configured scan path. Use this after Whisparr downloads new scenes to import them into Stash. |
+| **Cleanup Whisparr** | Batch removes all scenes from Whisparr that are now tagged in Stash. Useful for initial cleanup or periodic maintenance. |
+
+### Recommended Workflow
+
+1. **Configure Whisparr** in plugin settings (URL, API key, root folder)
+2. **Set the scan path** to where Whisparr downloads scenes (e.g., `/data/unsorted`)
+3. **Enable Auto-cleanup** to automatically remove scenes from Whisparr when tagged
+4. **Add missing scenes** to Whisparr from performer/studio pages
+5. **Run "Scan for New Scenes"** periodically (or set up a scheduled task) to import downloads
+6. **Tag imported scenes** with StashDB IDs using the Tagger
+7. Scenes are automatically cleaned up from Whisparr
 
 ## How It Works
 
