@@ -11,7 +11,7 @@ Sources (configurable in Settings > Plugins):
 4. EliteBabes - Female performers, high-quality photosets
 5. Boobpedia - Female performers, wiki-style
 6. JavDatabase - Japanese adult video performers
-7. Bing Images - Fallback for all performer types
+7. DuckDuckGo Images - General image search fallback (SafeSearch off)
 
 Uses only Python standard library - no pip dependencies.
 """
@@ -760,104 +760,216 @@ def search_javdatabase(name, max_results=100, max_pages=5):
     return results
 
 
-def search_bing_images(query, size="Large", layout="All", max_results=20):
+def search_duckduckgo_images(query, size="Large", layout="All", max_results=50):
     """
-    Search Bing Images with safe search off.
+    Search DuckDuckGo Images with safe search off.
     Used as a fallback when performer-specific sites don't have results.
+    DDG requires a two-step process: get vqd token, then query /i.js
     """
     results = []
 
-    # Size filter mapping
-    size_map = {"Large": "large", "Medium": "medium", "Small": "small", "All": ""}
-    layout_map = {"Portrait": "tall", "Landscape": "wide", "Square": "square", "All": ""}
-
-    size_param = size_map.get(size, "")
-    layout_param = layout_map.get(layout, "")
-
-    # Build filter string
-    filters = []
-    if size_param:
-        filters.append(f"filterui:imagesize-{size_param}")
-    if layout_param:
-        filters.append(f"filterui:aspect-{layout_param}")
-    filters.append("filterui:photo-photo")
-
-    filter_str = "+".join(filters)
-    log.LogDebug(f"[Bing] Query: {query}, filters: {filter_str}")
+    log.LogDebug(f"[DuckDuckGo] Query: {query}, size: {size}, layout: {layout}")
 
     try:
-        params = {
-            "q": query,
-            "first": "1",
-            "count": str(max_results),
-            "qft": filter_str,
-            "form": "IRFLTR",
-            "safeSearch": "Off",
-        }
-
-        url = "https://www.bing.com/images/async?" + urllib.parse.urlencode(params)
-        log.LogDebug(f"[Bing] Fetching: {url[:100]}...")
-
+        # DDG requires specific headers to avoid 403
         headers = {
-            **HEADERS,
-            "Referer": "https://www.bing.com/images/search?" + urllib.parse.urlencode({"q": query}),
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "identity",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
         }
 
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as response:
+        # Step 1: Get the vqd token from the HTML search page
+        search_params = urllib.parse.urlencode({
+            "q": query,
+            "t": "h_",
+            "iar": "images",
+            "iax": "images",
+            "ia": "images",
+        })
+        search_url = f"https://duckduckgo.com/?{search_params}"
+
+        log.LogDebug(f"[DuckDuckGo] Getting vqd token...")
+        req = urllib.request.Request(search_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
             html = response.read().decode('utf-8', errors='ignore')
-            log.LogDebug(f"[Bing] Received {len(html)} bytes")
 
-        # Parse image data from Bing's response
-        pattern = r'"murl":"([^"]+)".*?"turl":"([^"]+)".*?"t":"([^"]*)"'
-        matches = re.findall(pattern, html)
-        log.LogDebug(f"[Bing] Primary pattern found {len(matches)} matches")
+        # Extract vqd token - multiple patterns
+        vqd = None
+        vqd_patterns = [
+            r'vqd="([^"]+)"',
+            r"vqd='([^']+)'",
+            r'vqd=([0-9a-zA-Z_-]+)',
+            r'"vqd":"([^"]+)"',
+        ]
+        for pattern in vqd_patterns:
+            match = re.search(pattern, html)
+            if match:
+                vqd = match.group(1)
+                break
 
-        for match in matches[:max_results]:
-            image_url = match[0].replace("\\u0026", "&")
-            thumb_url = match[1].replace("\\u0026", "&")
-            title = unescape(match[2].replace("\\u0026", "&"))
+        if not vqd:
+            log.LogWarning("[DuckDuckGo] Could not extract vqd token, trying HTML scraping")
+            # Fallback: scrape images directly from HTML
+            img_pattern = r'"image":"(https?://[^"]+)"'
+            thumb_pattern = r'"thumbnail":"(https?://[^"]+)"'
+
+            images_found = re.findall(img_pattern, html)
+            thumbs_found = re.findall(thumb_pattern, html)
+
+            for i, img_url in enumerate(images_found[:max_results]):
+                thumb_url = thumbs_found[i] if i < len(thumbs_found) else img_url
+                img_url = img_url.replace("\\u002F", "/").replace("\\/", "/")
+                thumb_url = thumb_url.replace("\\u002F", "/").replace("\\/", "/")
+
+                results.append({
+                    "thumbnail": thumb_url,
+                    "image": img_url,
+                    "title": query,
+                    "source": "DuckDuckGo",
+                    "width": 0,
+                    "height": 0,
+                })
+
+            if results:
+                log.LogInfo(f"[DuckDuckGo] Found {len(results)} images via HTML scraping")
+                return results
+            return results
+
+        log.LogDebug(f"[DuckDuckGo] Got vqd token: {vqd[:20]}...")
+
+        # Step 2: Query the image API
+        size_map = {"Large": "Large", "Medium": "Medium", "Small": "Small", "All": ""}
+        layout_map = {"Portrait": "Tall", "Landscape": "Wide", "Square": "Square", "All": ""}
+
+        filters = []
+        if size_map.get(size):
+            filters.append(f"size:{size_map[size]}")
+        if layout_map.get(layout):
+            filters.append(f"aspectratio:{layout_map[layout]}")
+        filter_str = ",".join(filters) if filters else ""
+
+        image_params = {
+            "l": "us-en",
+            "o": "json",
+            "q": query,
+            "vqd": vqd,
+            "f": filter_str + ",,,",
+            "p": "-1",  # SafeSearch off (-1 = off, 1 = moderate)
+            "s": "0",
+        }
+
+        api_url = "https://duckduckgo.com/i.js?" + urllib.parse.urlencode(image_params)
+        log.LogDebug(f"[DuckDuckGo] Fetching images from API...")
+
+        # Update headers for API request
+        api_headers = {
+            **headers,
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": search_url,
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        req = urllib.request.Request(api_url, headers=api_headers)
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = response.read().decode('utf-8', errors='ignore')
+
+        # Parse JSON response
+        try:
+            json_data = json.loads(data)
+            images = json_data.get("results", [])
+            log.LogDebug(f"[DuckDuckGo] Got {len(images)} results from API")
+        except json.JSONDecodeError:
+            log.LogDebug("[DuckDuckGo] JSON parse failed, trying regex extraction")
+            pattern = r'"image"\s*:\s*"([^"]+)"'
+            thumb_pat = r'"thumbnail"\s*:\s*"([^"]+)"'
+            title_pat = r'"title"\s*:\s*"([^"]*)"'
+
+            img_matches = re.findall(pattern, data)
+            thumb_matches = re.findall(thumb_pat, data)
+            title_matches = re.findall(title_pat, data)
+
+            images = []
+            for i, img in enumerate(img_matches):
+                images.append({
+                    "image": img,
+                    "thumbnail": thumb_matches[i] if i < len(thumb_matches) else img,
+                    "title": title_matches[i] if i < len(title_matches) else "",
+                })
+            log.LogDebug(f"[DuckDuckGo] Regex found {len(images)} images")
+
+        for img in images[:max_results]:
+            img_url = img.get("image", "")
+            thumb_url = img.get("thumbnail", "")
+            title = img.get("title", "")
+
+            if not img_url:
+                continue
+
+            # Unescape URLs
+            img_url = img_url.replace("\\u0026", "&").replace("\\/", "/").replace("\\u002F", "/")
+            thumb_url = thumb_url.replace("\\u0026", "&").replace("\\/", "/").replace("\\u002F", "/")
+
+            width = img.get("width", 0)
+            height = img.get("height", 0)
 
             results.append({
-                "thumbnail": thumb_url,
-                "image": image_url,
-                "title": title,
-                "source": "Bing",
-                "width": 0,
-                "height": 0,
+                "thumbnail": thumb_url or img_url,
+                "image": img_url,
+                "title": unescape(title) if title else query,
+                "source": "DuckDuckGo",
+                "width": width,
+                "height": height,
             })
 
-        # Fallback pattern if first didn't work
-        if not results:
-            log.LogDebug("[Bing] Primary pattern failed, trying fallback pattern")
-            pattern2 = r'class="iusc"[^>]*m="([^"]+)"'
-            matches2 = re.findall(pattern2, html)
-
-            for match in matches2[:max_results]:
-                try:
-                    data = match.replace("&quot;", '"').replace("&amp;", "&")
-                    murl_match = re.search(r'"murl":"([^"]+)"', data)
-                    turl_match = re.search(r'"turl":"([^"]+)"', data)
-                    title_match = re.search(r'"t":"([^"]*)"', data)
-
-                    if murl_match and turl_match:
-                        results.append({
-                            "thumbnail": turl_match.group(1),
-                            "image": murl_match.group(1),
-                            "title": unescape(title_match.group(1)) if title_match else "",
-                            "source": "Bing",
-                            "width": 0,
-                            "height": 0,
-                        })
-                except:
-                    continue
-
-        log.LogInfo(f"[Bing] Found {len(results)} images for query: {query}")
+        log.LogInfo(f"[DuckDuckGo] Found {len(results)} images for query: {query}")
 
     except Exception as e:
-        log.LogWarning(f"[Bing] Error: {e}")
+        log.LogWarning(f"[DuckDuckGo] Error: {e}")
+        import traceback
+        log.LogDebug(f"[DuckDuckGo] Traceback: {traceback.format_exc()}")
 
     return results
+
+
+def _is_small_image_url(img_url, min_size=300):
+    """
+    Check if an image URL indicates a small/thumbnail image.
+    Returns True if the image should be skipped.
+    """
+    lower_url = img_url.lower()
+
+    # Skip common thumbnail/icon patterns
+    if '_tn.' in lower_url or '/tn/' in lower_url:
+        return True
+    if 'favico' in lower_url or 'icon' in lower_url or 'logo' in lower_url:
+        return True
+    if '/thumb/' in lower_url or '_thumb' in lower_url:
+        return True
+    # Skip UI elements, tiles, backgrounds
+    if 'tile_' in lower_url or 'bg_' in lower_url or 'bg__' in lower_url:
+        return True
+    if 'ageconfirm' in lower_url or 'placeholder' in lower_url:
+        return True
+
+    # Check for dimension patterns in URL (e.g., 32x32, 57x57, 200x300)
+    size_match = re.search(r'(\d+)x(\d+)', img_url)
+    if size_match:
+        w, h = int(size_match.group(1)), int(size_match.group(2))
+        if w < min_size or h < min_size:
+            return True
+
+    # Check for small dimension in path (e.g., /460/, /200/)
+    dim_match = re.search(r'/(\d{2,3})/', img_url)
+    if dim_match:
+        dim = int(dim_match.group(1))
+        if dim < min_size:
+            return True
+
+    return False
 
 
 def search_single_source(source, name, query, size_filter="All", layout_filter="All"):
@@ -885,9 +997,13 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
         results = search_boobpedia(performer_name, 50)
     elif source == "javdatabase":
         results = search_javdatabase(performer_name, 100, 5)
+    elif source == "duckduckgo":
+        # Use the full query (with suffix) for DuckDuckGo
+        results = search_duckduckgo_images(query, size_filter, layout_filter, 50)
     elif source == "bing":
-        # Use the full query (with suffix) for Bing
-        results = search_bing_images(query, size_filter, layout_filter, 30)
+        # Legacy - kept for backwards compatibility but DuckDuckGo preferred
+        log.LogDebug("[Bing] Redirecting to DuckDuckGo (Bing deprecated)")
+        results = search_duckduckgo_images(query, size_filter, layout_filter, 50)
     else:
         log.LogWarning(f"Unknown source: {source}")
 
@@ -913,7 +1029,7 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
 def search_all_sources(name, query, size_filter="All", layout_filter="All"):
     """
     Search all sources and combine results.
-    Prioritizes adult-specific sites, falls back to Bing.
+    Prioritizes adult-specific sites, falls back to DuckDuckGo.
     Returns ALL results at once (no pagination) since sources are finite.
     Note: This is kept for backwards compatibility, but per-source searching
     is now preferred for streaming results to the client.
@@ -938,11 +1054,11 @@ def search_all_sources(name, query, size_filter="All", layout_filter="All"):
     freeones_results = search_freeones(performer_name, 200, 20)
     all_results.extend(freeones_results)
 
-    # 4. Bing as fallback if we didn't find much from adult sites
+    # 4. DuckDuckGo as fallback if we didn't find much from adult sites
     if len(all_results) < 20:
-        # Use the full query (with suffix) for Bing, pass filters to Bing API
-        bing_results = search_bing_images(query, size_filter, layout_filter, 30)
-        all_results.extend(bing_results)
+        # Use the full query (with suffix) for DuckDuckGo, pass filters
+        ddg_results = search_duckduckgo_images(query, size_filter, layout_filter, 50)
+        all_results.extend(ddg_results)
 
     # Deduplicate by image URL
     seen_urls = set()
