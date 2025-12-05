@@ -251,7 +251,7 @@ def get_local_scene_stash_ids(endpoint):
 # StashDB API
 # ============================================================================
 
-def query_stashdb_performer_scenes(stashdb_url, api_key, performer_stash_id, max_pages=10):
+def query_stashdb_performer_scenes(stashdb_url, api_key, performer_stash_id, max_pages=50):
     """Query StashDB for all scenes featuring a performer using paginated queryScenes."""
     # First get the performer name for logging
     name_query = """
@@ -349,7 +349,7 @@ def query_stashdb_performer_scenes(stashdb_url, api_key, performer_stash_id, max
     return all_scenes
 
 
-def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, max_pages=10):
+def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, max_pages=50):
     """Query StashDB for all scenes from a studio."""
     query = """
     query QueryScenes($input: SceneQueryInput!) {
@@ -406,7 +406,7 @@ def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, max_pages
                 },
                 "page": page,
                 "per_page": per_page,
-                "sort": "TRENDING",  # Use TRENDING for popularity-based sorting
+                "sort": "DATE",  # Use DATE to get all scenes (TRENDING only returns subset)
                 "direction": "DESC"
             }
         }
@@ -901,9 +901,6 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
             missing_scenes.append(formatted)
 
     # Sort by release date (newest first)
-    # Note: For studio queries, StashDB returns results sorted by TRENDING (popularity),
-    # but we re-sort by date here for consistency. For performer queries, scenes come
-    # back unsorted from StashDB's findPerformer endpoint.
     missing_scenes.sort(key=lambda s: s.get("release_date") or "", reverse=True)
 
     log.LogInfo(f"Found {len(missing_scenes)} missing scenes out of {len(stashdb_scenes)} total")
