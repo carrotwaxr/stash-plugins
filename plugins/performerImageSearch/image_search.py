@@ -916,6 +916,11 @@ def search_duckduckgo_images(query, size="Large", layout="All", max_results=50):
             width = img.get("width", 0)
             height = img.get("height", 0)
 
+            # Skip small images (< 300px on shorter dimension)
+            if width > 0 and height > 0:
+                if min(width, height) < 300:
+                    continue
+
             results.append({
                 "thumbnail": thumb_url or img_url,
                 "image": img_url,

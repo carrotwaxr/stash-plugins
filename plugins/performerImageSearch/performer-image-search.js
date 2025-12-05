@@ -14,7 +14,7 @@
     enableEliteBabes: true,
     enableBoobpedia: true,
     enableJavDatabase: true,
-    enableBing: true,
+    enableDuckDuckGo: true,
   };
 
   // All available sources (will be filtered by settings)
@@ -25,7 +25,7 @@
     { id: "elitebabes", settingKey: "enableEliteBabes" },
     { id: "boobpedia", settingKey: "enableBoobpedia" },
     { id: "javdatabase", settingKey: "enableJavDatabase" },
-    { id: "bing", settingKey: "enableBing" },
+    { id: "duckduckgo", settingKey: "enableDuckDuckGo" },
   ];
 
   // Aspect ratio thresholds
