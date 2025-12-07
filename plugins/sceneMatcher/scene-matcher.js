@@ -258,6 +258,10 @@
   function getMatchDescription(scene) {
     const parts = [];
 
+    if (scene.matches_title) {
+      parts.push("Title");
+    }
+
     if (scene.matches_studio) {
       parts.push("Studio");
     }
@@ -439,7 +443,6 @@
 
     // Find the search input in the scene's row
     const searchInput = currentSceneElement.querySelector('input.text-input, input[type="text"]');
-    const searchButton = currentSceneElement.querySelector('button:not(.sm-match-button)');
 
     if (!searchInput) {
       console.error("[SceneMatcher] Could not find search input");
@@ -447,16 +450,22 @@
       return;
     }
 
-    // Set the UUID as the search query
-    searchInput.value = scene.stash_id;
+    // Set the value using React-compatible method
+    // React tracks input values via the native value setter, so we need to
+    // use Object.getOwnPropertyDescriptor to get the native setter
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value"
+    ).set;
 
-    // Trigger input event so React picks up the change
+    // Call the native setter with the input element as context
+    nativeInputValueSetter.call(searchInput, scene.stash_id);
+
+    // Dispatch input event - this is what React listens to for controlled inputs
     const inputEvent = new Event("input", { bubbles: true });
     searchInput.dispatchEvent(inputEvent);
 
-    // Also trigger change event
-    const changeEvent = new Event("change", { bubbles: true });
-    searchInput.dispatchEvent(changeEvent);
+    console.log("[SceneMatcher] Set search value to:", scene.stash_id);
 
     // Find and click the Search button
     // Look for button with "Search" text or the OperationButton
@@ -478,7 +487,7 @@
 
     if (!foundSearchBtn) {
       // Try pressing Enter on the input
-      const enterEvent = new KeyboardEvent("keypress", {
+      const enterEvent = new KeyboardEvent("keydown", {
         key: "Enter",
         code: "Enter",
         keyCode: 13,

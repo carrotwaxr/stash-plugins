@@ -155,6 +155,10 @@ def get_local_scene(scene_id):
         findScene(id: $id) {
             id
             title
+            files {
+                path
+                basename
+            }
             stash_ids {
                 endpoint
                 stash_id
@@ -466,12 +470,102 @@ def format_scene(scene, stash_id):
     }
 
 
-def score_scene(scene, performer_stash_ids, studio_stash_id):
+def normalize_title(title):
+    """Normalize a title for comparison."""
+    if not title:
+        return ""
+    # Lowercase, remove common punctuation, collapse whitespace
+    import re
+    normalized = title.lower()
+    normalized = re.sub(r'[^\w\s]', ' ', normalized)
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized
+
+
+def longest_common_substring(s1, s2):
+    """Find the longest common substring between two strings."""
+    if not s1 or not s2:
+        return ""
+
+    m, n = len(s1), len(s2)
+    # Use a more memory-efficient approach for longer strings
+    if m > n:
+        s1, s2 = s2, s1
+        m, n = n, m
+
+    # Track the longest match
+    longest = 0
+    longest_end = 0
+
+    # Previous and current row of the DP table
+    prev = [0] * (n + 1)
+    curr = [0] * (n + 1)
+
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if s1[i - 1] == s2[j - 1]:
+                curr[j] = prev[j - 1] + 1
+                if curr[j] > longest:
+                    longest = curr[j]
+                    longest_end = j
+            else:
+                curr[j] = 0
+        prev, curr = curr, prev
+
+    return s2[longest_end - longest:longest_end]
+
+
+def title_similarity(title1, title2):
+    """
+    Calculate similarity between two titles based on longest common substring.
+    Returns a score from 0 to 1.
+    """
+    if not title1 or not title2:
+        return 0.0
+
+    norm1 = normalize_title(title1)
+    norm2 = normalize_title(title2)
+
+    if not norm1 or not norm2:
+        return 0.0
+
+    # Exact match
+    if norm1 == norm2:
+        return 1.0
+
+    # Find longest common substring
+    lcs = longest_common_substring(norm1, norm2)
+    lcs_len = len(lcs)
+
+    if lcs_len < 4:  # Ignore very short matches (likely coincidental)
+        return 0.0
+
+    # Score based on how much of the shorter string is covered by the LCS
+    shorter_len = min(len(norm1), len(norm2))
+    coverage = lcs_len / shorter_len
+
+    return coverage
+
+
+def score_scene(scene, performer_stash_ids, studio_stash_id, local_title=None):
     """
     Calculate relevance score for a scene.
+    +10 for exact title match, +5 for partial title match
     +3 for matching studio, +2 per matching performer.
     """
     score = 0
+    title_match = False
+
+    # Check title match (highest priority)
+    if local_title:
+        stashdb_title = scene.get("title", "")
+        similarity = title_similarity(local_title, stashdb_title)
+        if similarity >= 0.9:
+            score += 10
+            title_match = True
+        elif similarity >= 0.5:
+            score += 5
+            title_match = True
 
     # Check studio match
     if studio_stash_id and scene.get("studio"):
@@ -488,7 +582,7 @@ def score_scene(scene, performer_stash_ids, studio_stash_id):
     matching_performers = performer_stash_ids & scene_performer_ids
     score += len(matching_performers) * 2
 
-    return score, len(matching_performers)
+    return score, len(matching_performers), title_match
 
 
 def find_matching_scenes(scene_id, plugin_settings):
@@ -595,16 +689,29 @@ def find_matching_scenes(scene_id, plugin_settings):
     log.LogDebug("Fetching local scene stash_ids...")
     local_stash_ids = get_local_scene_stash_ids(stashdb_url)
 
+    # Get local title and filename for matching
+    local_title = scene.get("title") or ""
+    local_filename = ""
+    files = scene.get("files", [])
+    if files:
+        # Use basename without extension
+        basename = files[0].get("basename", "")
+        if basename:
+            # Remove extension
+            local_filename = basename.rsplit(".", 1)[0] if "." in basename else basename
+
     # Score and format results
     results = []
     for stashdb_scene_id, stashdb_scene in all_scenes.items():
-        score, matching_performer_count = score_scene(
-            stashdb_scene, performer_stash_ids, studio_stash_id
+        score, matching_performer_count, title_match = score_scene(
+            stashdb_scene, performer_stash_ids, studio_stash_id,
+            local_title=local_title or local_filename  # Use title if available, else filename
         )
 
         formatted = format_scene(stashdb_scene, stashdb_scene_id)
         formatted["score"] = score
         formatted["matching_performers"] = matching_performer_count
+        formatted["matches_title"] = title_match
         formatted["matches_studio"] = (
             studio_stash_id is not None and
             stashdb_scene.get("studio", {}).get("id") == studio_stash_id
