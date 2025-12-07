@@ -245,7 +245,7 @@ def get_local_scene_stash_ids(endpoint):
 # Title Cleaning
 # ============================================================================
 
-# Common tags to strip from filenames
+# Common tags to strip from filenames (applied AFTER separator conversion)
 STRIP_PATTERNS = [
     # Resolutions
     r'\b(2160p|1080p|720p|480p|4k|uhd)\b',
@@ -255,8 +255,6 @@ STRIP_PATTERNS = [
     r'\b(web|webrip|web-dl|bluray|bdrip|dvdrip|hdtv)\b',
     # Adult-specific
     r'\b(xxx|porn|sex)\b',
-    # Release groups (at end of string, after dash or in brackets)
-    r'[-\[]?\b[a-z]{2,8}\b\]?$',
     # File size patterns
     r'\b\d+(\.\d+)?\s*(gb|mb)\b',
     # Date patterns that aren't scene dates
@@ -277,10 +275,15 @@ def clean_title(title):
     # Remove file extension if present
     cleaned = re.sub(r'\.[a-zA-Z0-9]{2,4}$', '', cleaned)
 
+    # Strip release groups BEFORE converting separators (they often use - or [])
+    # e.g., "-RARBG", "[YTS]", "-FGT"
+    cleaned = re.sub(r'[-]\s*[a-z]{2,8}\s*$', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\[[a-z]{2,8}\]\s*$', '', cleaned, flags=re.IGNORECASE)
+
     # Replace dots, underscores, and dashes with spaces
     cleaned = re.sub(r'[._-]+', ' ', cleaned)
 
-    # Apply strip patterns (case insensitive)
+    # Apply remaining strip patterns (case insensitive)
     for pattern in STRIP_PATTERNS:
         cleaned = re.sub(pattern, ' ', cleaned, flags=re.IGNORECASE)
 
@@ -937,24 +940,32 @@ def get_scene_context(scene_id, plugin_settings):
         if stash_id.get("endpoint") == stashdb_url:
             return None, {"error": "Scene already has a StashDB ID. No matching needed."}
 
-    # Extract performer and studio stash_ids for this endpoint
+    # Extract performer stash_ids and names
+    # performer_stash_ids: only performers linked to this endpoint (for filter queries)
+    # performer_names: ALL performer names (for text search)
     performer_stash_ids = set()
     performer_names = []
     for performer in scene.get("performers", []):
+        # Always add name for text search
+        if performer.get("name"):
+            performer_names.append(performer.get("name"))
+        # Check if linked to this endpoint
         for stash_id in performer.get("stash_ids", []):
             if stash_id.get("endpoint") == stashdb_url:
                 performer_stash_ids.add(stash_id.get("stash_id"))
-                performer_names.append(performer.get("name"))
                 break
 
+    # Extract studio stash_id and name
+    # studio_name: always use studio name for text search
+    # studio_stash_id: only if linked to this endpoint (for filter queries)
     studio_stash_id = None
     studio_name = None
     studio = scene.get("studio")
     if studio:
+        studio_name = studio.get("name")  # Always use name for text search
         for stash_id in studio.get("stash_ids", []):
             if stash_id.get("endpoint") == stashdb_url:
                 studio_stash_id = stash_id.get("stash_id")
-                studio_name = studio.get("name")
                 break
 
     # Get file info
