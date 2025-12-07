@@ -130,6 +130,10 @@
   background: #198754;
 }
 
+.sm-attr-tag.sm-attr-title {
+  background: #fd7e14;
+}
+
 /* Modal Body - Results Grid */
 .sm-modal-body {
   flex: 1;

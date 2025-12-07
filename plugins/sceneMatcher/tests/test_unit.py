@@ -11,7 +11,49 @@ import unittest
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scene_matcher import score_scene, format_scene
+from scene_matcher import score_scene, format_scene, title_similarity, normalize_title
+
+
+class TestTitleSimilarity(unittest.TestCase):
+    """Tests for title matching functions."""
+
+    def test_exact_match(self):
+        """Exact title match returns 1.0."""
+        self.assertEqual(title_similarity("Scene Title", "Scene Title"), 1.0)
+
+    def test_case_insensitive(self):
+        """Title matching is case insensitive."""
+        self.assertEqual(title_similarity("Scene Title", "scene title"), 1.0)
+
+    def test_punctuation_ignored(self):
+        """Punctuation is ignored in matching."""
+        self.assertEqual(title_similarity("Scene: Title!", "Scene Title"), 1.0)
+
+    def test_partial_match(self):
+        """Partial title match returns proportional score."""
+        sim = title_similarity("My Scene Title Here", "Scene Title")
+        self.assertGreater(sim, 0.5)
+
+    def test_no_match(self):
+        """Completely different titles return 0."""
+        sim = title_similarity("ABCD", "WXYZ")
+        self.assertEqual(sim, 0.0)
+
+    def test_short_common_substring_ignored(self):
+        """Very short common substrings are ignored."""
+        # "the" is only 3 chars, should be ignored
+        sim = title_similarity("The", "Other")
+        self.assertEqual(sim, 0.0)
+
+    def test_empty_title(self):
+        """Empty titles return 0."""
+        self.assertEqual(title_similarity("", "Title"), 0.0)
+        self.assertEqual(title_similarity("Title", ""), 0.0)
+
+    def test_none_title(self):
+        """None titles return 0."""
+        self.assertEqual(title_similarity(None, "Title"), 0.0)
+        self.assertEqual(title_similarity("Title", None), 0.0)
 
 
 class TestScoreScene(unittest.TestCase):
@@ -29,10 +71,11 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-999"}  # No match
         studio_id = "studio-xyz"  # No match
 
-        score, matching_performers = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 0)
         self.assertEqual(matching_performers, 0)
+        self.assertFalse(title_match)
 
     def test_studio_match_only(self):
         """Scene matching only studio scores 3."""
@@ -45,7 +88,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-999"}  # No match
         studio_id = "studio-abc"  # Match
 
-        score, matching_performers = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 3)
         self.assertEqual(matching_performers, 0)
@@ -62,7 +105,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123"}  # One match
         studio_id = None
 
-        score, matching_performers = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 2)
         self.assertEqual(matching_performers, 1)
@@ -80,7 +123,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123", "perf-456"}  # Two matches
         studio_id = None
 
-        score, matching_performers = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 4)  # 2 * 2
         self.assertEqual(matching_performers, 2)
@@ -97,7 +140,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123", "perf-456"}  # Two matches
         studio_id = "studio-abc"  # Match
 
-        score, matching_performers = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 7)  # 3 (studio) + 4 (2 performers)
         self.assertEqual(matching_performers, 2)
@@ -111,10 +154,11 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123"}
         studio_id = "studio-abc"
 
-        score, matching_performers = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 3)
         self.assertEqual(matching_performers, 0)
+        self.assertFalse(title_match)
 
     def test_no_studio(self):
         """Scene with no studio only scores performers."""
@@ -127,10 +171,11 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123"}
         studio_id = "studio-abc"
 
-        score, matching_performers = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 2)
         self.assertEqual(matching_performers, 1)
+        self.assertFalse(title_match)
 
     def test_missing_performer_id(self):
         """Performers without IDs are skipped."""
@@ -145,10 +190,53 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123"}
         studio_id = None
 
-        score, matching_performers = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 2)
         self.assertEqual(matching_performers, 1)
+        self.assertFalse(title_match)
+
+    def test_exact_title_match(self):
+        """Exact title match adds 10 points."""
+        scene = {
+            "title": "Scene Title",
+            "studio": None,
+            "performers": []
+        }
+
+        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Scene Title")
+
+        self.assertEqual(score, 10)
+        self.assertEqual(matching_performers, 0)
+        self.assertTrue(title_match)
+
+    def test_partial_title_match(self):
+        """Partial title match (50-90% coverage) adds 5 points."""
+        # "scene abc" vs "scene xyz" - LCS is "scene " (6 chars)
+        # Coverage = 6/9 = 67%, which is >= 50% but < 90%
+        scene = {
+            "title": "Scene XYZ",
+            "studio": None,
+            "performers": []
+        }
+
+        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Scene ABC")
+
+        self.assertEqual(score, 5)  # Partial match (50-90%)
+        self.assertTrue(title_match)
+
+    def test_title_match_combined_with_studio(self):
+        """Title match combines with studio match."""
+        scene = {
+            "title": "Scene Title",
+            "studio": {"id": "studio-abc"},
+            "performers": []
+        }
+
+        score, matching_performers, title_match = score_scene(scene, set(), "studio-abc", local_title="Scene Title")
+
+        self.assertEqual(score, 13)  # 10 (title) + 3 (studio)
+        self.assertTrue(title_match)
 
 
 class TestFormatScene(unittest.TestCase):
@@ -399,10 +487,11 @@ class TestEdgeCases(unittest.TestCase):
             "performers": [{"performer": {"id": "perf-123"}}]
         }
 
-        score, matching_performers = score_scene(scene, set(), "studio-abc")
+        score, matching_performers, title_match = score_scene(scene, set(), "studio-abc")
 
         self.assertEqual(score, 3)  # Just studio
         self.assertEqual(matching_performers, 0)
+        self.assertFalse(title_match)
 
     def test_score_with_none_studio_id(self):
         """Scoring works when studio_id is None."""
@@ -411,10 +500,11 @@ class TestEdgeCases(unittest.TestCase):
             "performers": [{"performer": {"id": "perf-123"}}]
         }
 
-        score, matching_performers = score_scene(scene, {"perf-123"}, None)
+        score, matching_performers, title_match = score_scene(scene, {"perf-123"}, None)
 
         self.assertEqual(score, 2)  # Just performer
         self.assertEqual(matching_performers, 1)
+        self.assertFalse(title_match)
 
     def test_format_scene_handles_missing_keys(self):
         """format_scene handles scenes with missing optional keys."""
