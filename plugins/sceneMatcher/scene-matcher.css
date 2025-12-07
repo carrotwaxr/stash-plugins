@@ -1,0 +1,484 @@
+/* Scene Matcher Plugin Styles */
+
+/* Match Button - Inline with Tagger search controls */
+.sm-match-button {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+}
+
+.sm-match-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Modal Backdrop */
+.sm-modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+/* Modal Container */
+.sm-modal {
+  background: #1a1a1a;
+  border-radius: 8px;
+  width: 100%;
+  max-width: 1200px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  border: 1px solid #333;
+}
+
+/* Modal Header */
+.sm-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #333;
+}
+
+.sm-modal-header h3 {
+  margin: 0;
+  font-size: 18px;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: calc(100% - 40px);
+}
+
+.sm-close-btn {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 28px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  transition: color 0.2s;
+  flex-shrink: 0;
+}
+
+.sm-close-btn:hover {
+  color: #fff;
+}
+
+/* Stats Bar - Shows what we're searching by */
+.sm-stats-bar {
+  display: flex;
+  gap: 24px;
+  padding: 12px 20px;
+  background: #222;
+  border-bottom: 1px solid #333;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.sm-stat {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sm-stat-label {
+  color: #888;
+  font-size: 13px;
+}
+
+.sm-stat-value {
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sm-stat-highlight .sm-stat-value {
+  color: #ffc107;
+  font-size: 16px;
+}
+
+.sm-search-attrs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sm-attr-tag {
+  background: #0d6efd;
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.sm-attr-tag.sm-attr-studio {
+  background: #6f42c1;
+}
+
+.sm-attr-tag.sm-attr-performer {
+  background: #198754;
+}
+
+/* Modal Body - Results Grid */
+.sm-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  min-height: 300px;
+}
+
+.sm-results-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+/* Placeholder States */
+.sm-placeholder {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: #888;
+  padding: 60px 20px;
+  font-size: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.sm-placeholder.sm-success {
+  color: #198754;
+}
+
+.sm-placeholder.sm-error {
+  color: #dc3545;
+}
+
+.sm-success-icon {
+  font-size: 48px;
+  color: #198754;
+}
+
+.sm-error-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #dc3545;
+  color: #fff;
+  font-size: 32px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Spinner */
+.sm-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid #333;
+  border-top-color: #0d6efd;
+  border-radius: 50%;
+  animation: sm-spin 1s linear infinite;
+}
+
+@keyframes sm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Scene Card */
+.sm-scene-card {
+  background: #2a2a2a;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+  display: flex;
+  flex-direction: column;
+  border: 2px solid transparent;
+}
+
+.sm-scene-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.4);
+  border-color: #0d6efd;
+}
+
+.sm-scene-card.sm-in-stash {
+  opacity: 0.7;
+}
+
+.sm-scene-card.sm-in-stash:hover {
+  opacity: 1;
+}
+
+/* Scene Thumbnail */
+.sm-scene-thumb {
+  position: relative;
+  width: 100%;
+  padding-top: 56.25%; /* 16:9 aspect ratio */
+  background: #1a1a1a;
+  overflow: hidden;
+}
+
+.sm-scene-thumb img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.3s ease-in;
+}
+
+.sm-scene-thumb img.sm-loaded {
+  opacity: 1;
+}
+
+.sm-scene-thumb.sm-no-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sm-no-image-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 32px;
+  color: #444;
+}
+
+/* Badges Container - Positioned on thumbnail */
+.sm-badges {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  pointer-events: none;
+}
+
+.sm-badge {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.sm-badge-score {
+  background: rgba(13, 110, 253, 0.9);
+  color: #fff;
+}
+
+.sm-badge-score.sm-high-score {
+  background: rgba(25, 135, 84, 0.9);
+}
+
+.sm-badge-in-stash {
+  background: rgba(108, 117, 125, 0.9);
+  color: #fff;
+}
+
+/* Scene Info */
+.sm-scene-info {
+  padding: 12px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sm-scene-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sm-scene-meta {
+  font-size: 12px;
+  color: #888;
+}
+
+.sm-scene-performers {
+  font-size: 12px;
+  color: #aaa;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Match Details */
+.sm-match-details {
+  font-size: 11px;
+  color: #0d6efd;
+  margin-top: 4px;
+}
+
+/* Scene Actions */
+.sm-scene-actions {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px 12px;
+  border-top: 1px solid #333;
+}
+
+/* Buttons */
+.sm-btn {
+  padding: 8px 16px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sm-btn:hover {
+  background: #3a3a3a;
+  border-color: #555;
+  color: #fff;
+  text-decoration: none;
+}
+
+.sm-btn-small {
+  padding: 6px 12px;
+  font-size: 12px;
+  flex: 1;
+}
+
+.sm-btn-primary {
+  background: #0d6efd;
+  border-color: #0d6efd;
+}
+
+.sm-btn-primary:hover {
+  background: #0b5ed7;
+  border-color: #0a58ca;
+}
+
+.sm-btn-select {
+  background: #198754;
+  border-color: #198754;
+  width: 100%;
+}
+
+.sm-btn-select:hover {
+  background: #157347;
+  border-color: #146c43;
+}
+
+.sm-btn-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: #333 !important;
+  border-color: #333 !important;
+}
+
+/* Modal Footer */
+.sm-modal-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 20px;
+  border-top: 1px solid #333;
+}
+
+.sm-footer-actions {
+  display: flex;
+  gap: 12px;
+}
+
+/* Status Messages */
+.sm-status {
+  font-size: 13px;
+  color: #888;
+}
+
+.sm-status-loading {
+  color: #0d6efd;
+}
+
+.sm-status-success {
+  color: #198754;
+}
+
+.sm-status-error {
+  color: #dc3545;
+}
+
+/* Scrollbar Styling */
+.sm-modal-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.sm-modal-body::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+.sm-modal-body::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 4px;
+}
+
+.sm-modal-body::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Responsive Adjustments */
+@media (max-width: 768px) {
+  .sm-modal {
+    max-width: 100%;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+
+  .sm-results-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sm-stats-bar {
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .sm-modal-footer {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .sm-scene-actions {
+    flex-direction: column;
+  }
+
+  .sm-btn-small {
+    width: 100%;
+  }
+}

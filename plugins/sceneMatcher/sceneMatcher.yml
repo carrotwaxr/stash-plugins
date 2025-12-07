@@ -1,0 +1,24 @@
+name: Scene Matcher
+description: Find StashDB matches for untagged scenes using known performer and studio associations. Adds a "Match" button to the Tagger UI that searches by linked attributes.
+version: 1.0.0
+url: https://github.com/carrotwaxr/stash-plugins
+
+# UI plugin - injects button and modal on Tagger pages
+ui:
+  javascript:
+    - scene-matcher.js
+  css:
+    - scene-matcher.css
+
+# Plugin settings configurable in Stash UI (Settings > Plugins)
+settings:
+  stashBoxEndpoint:
+    displayName: Stash-Box Endpoint
+    description: Which stash-box to query for scene matches. Leave empty to use the first configured endpoint (usually StashDB). Enter the full GraphQL URL (e.g., https://stashdb.org/graphql).
+    type: STRING
+
+# Python backend for StashDB queries (called via runPluginOperation from JS)
+exec:
+  - python
+  - "{pluginDir}/scene_matcher.py"
+interface: raw

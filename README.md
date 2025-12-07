@@ -54,6 +54,18 @@ Discover scenes from StashDB that you don't have in your local library, with opt
 
 [Documentation](plugins/missingScenes/README.md)
 
+### Scene Matcher (v1.0.0)
+
+Find StashDB matches for untagged scenes using known performer and studio associations. Adds a "Match" button to the Tagger UI.
+
+**Features:**
+- Search StashDB for scenes by linked performers and/or studio
+- Results scored by relevance (matching performers + studio)
+- Unowned scenes prioritized over scenes already in your library
+- Seamless handoff to Stash's native Tagger for saving
+
+[Documentation](plugins/sceneMatcher/README.md)
+
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/carrotwaxr/stash-plugins/issues)
