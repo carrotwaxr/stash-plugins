@@ -11,6 +11,10 @@
   let isLoading = false;
   let stashdbUrl = "";
 
+  // Cache for local stash_ids (persists across modal opens in the same session)
+  let cachedLocalStashIds = null;
+  let cacheEndpoint = null;
+
   /**
    * Get the GraphQL endpoint URL
    */
@@ -87,10 +91,27 @@
    * Find matching scenes for a local scene
    */
   async function findMatchingScenes(sceneId) {
-    return runPluginOperation({
+    const args = {
       operation: "find_matches",
       scene_id: sceneId,
-    });
+    };
+
+    // Pass cached stash_ids if we have them for this endpoint
+    if (cachedLocalStashIds && cacheEndpoint) {
+      args.cached_local_stash_ids = cachedLocalStashIds;
+      args.cache_endpoint = cacheEndpoint;
+    }
+
+    const result = await runPluginOperation(args);
+
+    // Cache the stash_ids from the response for future calls
+    if (result.output && result.output.local_stash_ids && result.output.stashdb_url) {
+      cachedLocalStashIds = result.output.local_stash_ids;
+      cacheEndpoint = result.output.stashdb_url;
+      console.log(`[SceneMatcher] Cached ${cachedLocalStashIds.length} local stash_ids for ${cacheEndpoint}`);
+    }
+
+    return result;
   }
 
   /**
