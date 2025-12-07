@@ -482,42 +482,102 @@ def normalize_title(title):
     return normalized
 
 
-def longest_common_substring(s1, s2):
-    """Find the longest common substring between two strings."""
+def tokenize(text):
+    """Split normalized text into tokens (words)."""
+    if not text:
+        return []
+    return text.split()
+
+
+def levenshtein_ratio(s1, s2):
+    """
+    Calculate similarity ratio between two strings using Levenshtein distance.
+    Returns a score from 0 to 1, where 1 is an exact match.
+    """
+    if not s1 and not s2:
+        return 1.0
     if not s1 or not s2:
-        return ""
+        return 0.0
+    if s1 == s2:
+        return 1.0
 
-    m, n = len(s1), len(s2)
-    # Use a more memory-efficient approach for longer strings
-    if m > n:
-        s1, s2 = s2, s1
-        m, n = n, m
+    len1, len2 = len(s1), len(s2)
 
-    # Track the longest match
-    longest = 0
-    longest_end = 0
+    # Create distance matrix with space optimization (only need 2 rows)
+    prev = list(range(len2 + 1))
+    curr = [0] * (len2 + 1)
 
-    # Previous and current row of the DP table
-    prev = [0] * (n + 1)
-    curr = [0] * (n + 1)
-
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
+    for i in range(1, len1 + 1):
+        curr[0] = i
+        for j in range(1, len2 + 1):
             if s1[i - 1] == s2[j - 1]:
-                curr[j] = prev[j - 1] + 1
-                if curr[j] > longest:
-                    longest = curr[j]
-                    longest_end = j
+                curr[j] = prev[j - 1]
             else:
-                curr[j] = 0
+                curr[j] = 1 + min(prev[j], curr[j - 1], prev[j - 1])
         prev, curr = curr, prev
 
-    return s2[longest_end - longest:longest_end]
+    distance = prev[len2]
+    max_len = max(len1, len2)
+    return 1.0 - (distance / max_len)
+
+
+def token_similarity(tokens1, tokens2, fuzzy_threshold=0.75):
+    """
+    Calculate similarity between two token lists using fuzzy token matching.
+
+    For each token in the shorter list, finds the best matching token in the
+    longer list. Tokens with similarity >= fuzzy_threshold are considered matches.
+
+    Returns a score from 0 to 1.
+    """
+    if not tokens1 and not tokens2:
+        return 1.0
+    if not tokens1 or not tokens2:
+        return 0.0
+
+    # Work with the shorter list as the reference
+    if len(tokens1) > len(tokens2):
+        tokens1, tokens2 = tokens2, tokens1
+
+    total_score = 0.0
+    used_indices = set()
+
+    for token1 in tokens1:
+        best_score = 0.0
+        best_idx = -1
+
+        for idx, token2 in enumerate(tokens2):
+            if idx in used_indices:
+                continue
+
+            # Calculate fuzzy similarity between tokens
+            score = levenshtein_ratio(token1, token2)
+
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        # Only count matches above threshold
+        if best_score >= fuzzy_threshold:
+            total_score += best_score
+            if best_idx >= 0:
+                used_indices.add(best_idx)
+
+    # Score is average of best matches, penalized by unmatched tokens
+    # Denominator is max of token counts to penalize missing words
+    max_tokens = max(len(tokens1), len(tokens2))
+    return total_score / max_tokens
 
 
 def title_similarity(title1, title2):
     """
-    Calculate similarity between two titles based on longest common substring.
+    Calculate similarity between two titles using token-based fuzzy matching.
+
+    Handles:
+    - Word reordering ("Summer Beach" vs "Beach Summer")
+    - Typos ("Adventrue" vs "Adventure")
+    - Extra/missing words (partial matches still score)
+
     Returns a score from 0 to 1.
     """
     if not title1 or not title2:
@@ -533,18 +593,14 @@ def title_similarity(title1, title2):
     if norm1 == norm2:
         return 1.0
 
-    # Find longest common substring
-    lcs = longest_common_substring(norm1, norm2)
-    lcs_len = len(lcs)
+    # Tokenize and compare
+    tokens1 = tokenize(norm1)
+    tokens2 = tokenize(norm2)
 
-    if lcs_len < 4:  # Ignore very short matches (likely coincidental)
+    if not tokens1 or not tokens2:
         return 0.0
 
-    # Score based on how much of the shorter string is covered by the LCS
-    shorter_len = min(len(norm1), len(norm2))
-    coverage = lcs_len / shorter_len
-
-    return coverage
+    return token_similarity(tokens1, tokens2)
 
 
 def score_scene(scene, performer_stash_ids, studio_stash_id, local_title=None):

@@ -11,7 +11,83 @@ import unittest
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scene_matcher import score_scene, format_scene, title_similarity, normalize_title
+from scene_matcher import (
+    score_scene, format_scene, title_similarity, normalize_title,
+    levenshtein_ratio, tokenize, token_similarity
+)
+
+
+class TestLevenshteinRatio(unittest.TestCase):
+    """Tests for the levenshtein_ratio function."""
+
+    def test_exact_match(self):
+        """Identical strings return 1.0."""
+        self.assertEqual(levenshtein_ratio("test", "test"), 1.0)
+
+    def test_one_char_diff(self):
+        """One character difference."""
+        ratio = levenshtein_ratio("beach", "reach")
+        self.assertAlmostEqual(ratio, 0.8, places=2)
+
+    def test_typo(self):
+        """Common typo (transposition)."""
+        ratio = levenshtein_ratio("adventure", "adventrue")
+        self.assertGreater(ratio, 0.75)
+
+    def test_empty_strings(self):
+        """Empty string handling."""
+        self.assertEqual(levenshtein_ratio("", ""), 1.0)
+        self.assertEqual(levenshtein_ratio("", "test"), 0.0)
+        self.assertEqual(levenshtein_ratio("test", ""), 0.0)
+
+    def test_completely_different(self):
+        """Completely different strings."""
+        ratio = levenshtein_ratio("abc", "xyz")
+        self.assertEqual(ratio, 0.0)
+
+
+class TestTokenize(unittest.TestCase):
+    """Tests for tokenize function."""
+
+    def test_simple_split(self):
+        """Splits on whitespace."""
+        self.assertEqual(tokenize("hello world"), ["hello", "world"])
+
+    def test_empty_string(self):
+        """Empty string returns empty list."""
+        self.assertEqual(tokenize(""), [])
+
+    def test_none(self):
+        """None returns empty list."""
+        self.assertEqual(tokenize(None), [])
+
+
+class TestTokenSimilarity(unittest.TestCase):
+    """Tests for token_similarity function."""
+
+    def test_exact_match(self):
+        """Identical token lists return 1.0."""
+        self.assertEqual(token_similarity(["a", "b"], ["a", "b"]), 1.0)
+
+    def test_reordered(self):
+        """Reordered tokens still match."""
+        self.assertEqual(token_similarity(["a", "b", "c"], ["c", "b", "a"]), 1.0)
+
+    def test_fuzzy_token_match(self):
+        """Fuzzy matching handles typos."""
+        # "adventrue" should match "adventure"
+        sim = token_similarity(["beach", "adventrue"], ["beach", "adventure"])
+        self.assertGreater(sim, 0.8)
+
+    def test_extra_tokens_penalized(self):
+        """Extra tokens reduce the score."""
+        sim = token_similarity(["adventure"], ["the", "big", "adventure"])
+        self.assertLess(sim, 0.5)
+
+    def test_empty_lists(self):
+        """Empty lists handling."""
+        self.assertEqual(token_similarity([], []), 1.0)
+        self.assertEqual(token_similarity([], ["a"]), 0.0)
 
 
 class TestTitleSimilarity(unittest.TestCase):
@@ -29,20 +105,24 @@ class TestTitleSimilarity(unittest.TestCase):
         """Punctuation is ignored in matching."""
         self.assertEqual(title_similarity("Scene: Title!", "Scene Title"), 1.0)
 
+    def test_word_reordering(self):
+        """Word reordering is handled."""
+        sim = title_similarity("Summer Beach Adventure", "Beach Adventure Summer")
+        self.assertEqual(sim, 1.0)
+
+    def test_typo_handling(self):
+        """Typos are handled with fuzzy matching."""
+        sim = title_similarity("Beach Adventure", "Beach Adventrue")
+        self.assertGreater(sim, 0.8)
+
     def test_partial_match(self):
         """Partial title match returns proportional score."""
-        sim = title_similarity("My Scene Title Here", "Scene Title")
+        sim = title_similarity("Summer Days", "Hot Summer Days")
         self.assertGreater(sim, 0.5)
 
     def test_no_match(self):
         """Completely different titles return 0."""
         sim = title_similarity("ABCD", "WXYZ")
-        self.assertEqual(sim, 0.0)
-
-    def test_short_common_substring_ignored(self):
-        """Very short common substrings are ignored."""
-        # "the" is only 3 chars, should be ignored
-        sim = title_similarity("The", "Other")
         self.assertEqual(sim, 0.0)
 
     def test_empty_title(self):
@@ -211,18 +291,43 @@ class TestScoreScene(unittest.TestCase):
         self.assertTrue(title_match)
 
     def test_partial_title_match(self):
-        """Partial title match (50-90% coverage) adds 5 points."""
-        # "scene abc" vs "scene xyz" - LCS is "scene " (6 chars)
-        # Coverage = 6/9 = 67%, which is >= 50% but < 90%
+        """Partial title match (50-90% similarity) adds 5 points."""
+        # "Summer Days" vs "Hot Summer Days" - 2/3 tokens match = 67%
         scene = {
-            "title": "Scene XYZ",
+            "title": "Hot Summer Days",
             "studio": None,
             "performers": []
         }
 
-        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Scene ABC")
+        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Summer Days")
 
         self.assertEqual(score, 5)  # Partial match (50-90%)
+        self.assertTrue(title_match)
+
+    def test_title_with_typo(self):
+        """Title with typo still matches via fuzzy matching."""
+        scene = {
+            "title": "Beach Adventure",
+            "studio": None,
+            "performers": []
+        }
+
+        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Beach Adventrue")
+
+        self.assertEqual(score, 5)  # >50% match due to typo
+        self.assertTrue(title_match)
+
+    def test_reordered_title(self):
+        """Reordered words still match."""
+        scene = {
+            "title": "Beach Adventure Summer",
+            "studio": None,
+            "performers": []
+        }
+
+        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Summer Beach Adventure")
+
+        self.assertEqual(score, 10)  # Exact match (word order doesn't matter)
         self.assertTrue(title_match)
 
     def test_title_match_combined_with_studio(self):
