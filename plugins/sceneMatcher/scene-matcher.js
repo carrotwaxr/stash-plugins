@@ -106,9 +106,10 @@
     const result = await runPluginOperation(args);
 
     // Cache the stash_ids from the response for future calls
-    if (result.output && result.output.local_stash_ids && result.output.stashdb_url) {
-      cachedLocalStashIds = result.output.local_stash_ids;
-      cacheEndpoint = result.output.stashdb_url;
+    // Note: Stash auto-unwraps the "output" field from PluginOutput structure
+    if (result.local_stash_ids && result.stashdb_url) {
+      cachedLocalStashIds = result.local_stash_ids;
+      cacheEndpoint = result.stashdb_url;
       console.log(`[SceneMatcher] Cached ${cachedLocalStashIds.length} local stash_ids for ${cacheEndpoint}`);
     }
 
@@ -134,9 +135,9 @@
     const result = await runPluginOperation(args);
 
     // Cache the stash_ids from the response for future calls
-    if (result.output && result.output.local_stash_ids && result.output.stashdb_url) {
-      cachedLocalStashIds = result.output.local_stash_ids;
-      cacheEndpoint = result.output.stashdb_url;
+    if (result.local_stash_ids && result.stashdb_url) {
+      cachedLocalStashIds = result.local_stash_ids;
+      cacheEndpoint = result.stashdb_url;
     }
 
     return result;
@@ -682,22 +683,23 @@
 
     try {
       // Phase 1: Fast text searches
+      // Note: Stash auto-unwraps the "output" field, so we access result directly
       console.log("[SceneMatcher] Starting Phase 1 (fast text search)...");
       const phase1Result = await findMatchesFast(sceneId);
 
-      matchResults = phase1Result.output?.results || [];
-      stashdbUrl = phase1Result.output?.stashdb_url || "https://stashdb.org";
+      matchResults = phase1Result.results || [];
+      stashdbUrl = phase1Result.stashdb_url || "https://stashdb.org";
 
       // Update modal header with scene title
       const header = document.querySelector(".sm-modal-header h3");
-      if (header && phase1Result.output?.scene_title) {
-        header.textContent = `Scene Matcher - ${phase1Result.output.scene_title}`;
-        header.title = phase1Result.output.scene_title;
+      if (header && phase1Result.scene_title) {
+        header.textContent = `Scene Matcher - ${phase1Result.scene_title}`;
+        header.title = phase1Result.scene_title;
       }
 
       // Show Phase 1 results immediately
-      const hasMore = phase1Result.output?.has_more;
-      updateStats(phase1Result.output || {}, hasMore);
+      const hasMore = phase1Result.has_more;
+      updateStats(phase1Result, hasMore);
       renderResults();
 
       if (matchResults.length > 0) {
@@ -718,7 +720,7 @@
           const excludeIds = matchResults.map((r) => r.stash_id);
           const phase2Result = await findMatchesThorough(sceneId, excludeIds);
 
-          const phase2Results = phase2Result.output?.results || [];
+          const phase2Results = phase2Result.results || [];
 
           if (phase2Results.length > 0) {
             // Merge and re-render
