@@ -158,6 +158,7 @@ def get_local_scene(scene_id):
             files {
                 path
                 basename
+                duration
             }
             stash_ids {
                 endpoint
@@ -243,7 +244,7 @@ def get_local_scene_stash_ids(endpoint):
 # StashDB API
 # ============================================================================
 
-def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, max_pages=10):
+def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, max_pages=5):
     """Query StashDB for scenes featuring any of the given performers."""
     if not performer_ids:
         return []
@@ -330,7 +331,7 @@ def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, max_
     return all_scenes
 
 
-def query_stashdb_scenes_by_studio(stashdb_url, api_key, studio_id, max_pages=10):
+def query_stashdb_scenes_by_studio(stashdb_url, api_key, studio_id, max_pages=5):
     """Query StashDB for scenes from a studio."""
     if not studio_id:
         return []
@@ -641,9 +642,15 @@ def score_scene(scene, performer_stash_ids, studio_stash_id, local_title=None):
     return score, len(matching_performers), title_match
 
 
-def find_matching_scenes(scene_id, plugin_settings):
+def find_matching_scenes(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None):
     """
     Find StashDB scenes matching a local scene's performers and/or studio.
+
+    Args:
+        scene_id: Local scene ID
+        plugin_settings: Plugin settings dict
+        cached_stash_ids: Optional list of cached local stash_ids from JS
+        cache_endpoint: The endpoint the cache is for (to validate)
     """
     # Get stash-box configuration
     stashbox_configs = get_stashbox_config()
@@ -741,14 +748,57 @@ def find_matching_scenes(scene_id, plugin_settings):
             "results": []
         }
 
+    # Get local scene duration for filtering
+    local_duration = None
+    files = scene.get("files", [])
+    if files and files[0].get("duration"):
+        local_duration = files[0].get("duration")
+
+    # Filter by duration if we have it (±60 seconds)
+    if local_duration:
+        duration_tolerance = 60  # seconds
+        filtered_scenes = {}
+        for scene_id, stashdb_scene in all_scenes.items():
+            stashdb_duration = stashdb_scene.get("duration")
+            if stashdb_duration is None:
+                # Keep scenes without duration info
+                filtered_scenes[scene_id] = stashdb_scene
+            elif abs(stashdb_duration - local_duration) <= duration_tolerance:
+                filtered_scenes[scene_id] = stashdb_scene
+
+        log.LogInfo(f"Duration filter: {len(all_scenes)} -> {len(filtered_scenes)} scenes (±{duration_tolerance}s of {local_duration}s)")
+        all_scenes = filtered_scenes
+
+    if not all_scenes:
+        return {
+            "scene_title": scene.get("title"),
+            "search_attributes": {
+                "performers": performer_names,
+                "studio": studio_name
+            },
+            "stashdb_name": stashdb_name,
+            "stashdb_url": stashdb_url.replace("/graphql", ""),
+            "total_results": 0,
+            "results": [],
+            "filtered_by_duration": True
+        }
+
     # Get local scene stash_ids to mark which results user already has
-    log.LogDebug("Fetching local scene stash_ids...")
-    local_stash_ids = get_local_scene_stash_ids(stashdb_url)
+    # Use cache if available and valid for this endpoint
+    local_stash_ids = None
+    cache_hit = False
+
+    if cached_stash_ids and cache_endpoint == stashdb_url:
+        local_stash_ids = set(cached_stash_ids)
+        cache_hit = True
+        log.LogDebug(f"Using cached local stash_ids ({len(local_stash_ids)} entries)")
+    else:
+        log.LogDebug("Fetching local scene stash_ids...")
+        local_stash_ids = get_local_scene_stash_ids(stashdb_url)
 
     # Get local title and filename for matching
     local_title = scene.get("title") or ""
     local_filename = ""
-    files = scene.get("files", [])
     if files:
         # Use basename without extension
         basename = files[0].get("basename", "")
@@ -789,9 +839,9 @@ def find_matching_scenes(scene_id, plugin_settings):
 
     results.sort(key=sort_key)
 
-    log.LogInfo(f"Returning {len(results)} matching scenes")
+    log.LogInfo(f"Returning {len(results)} matching scenes (cache_hit={cache_hit})")
 
-    return {
+    response = {
         "scene_title": scene.get("title"),
         "search_attributes": {
             "performers": performer_names,
@@ -802,6 +852,12 @@ def find_matching_scenes(scene_id, plugin_settings):
         "total_results": len(results),
         "results": results
     }
+
+    # Include stash_ids for JS to cache (only on cache miss)
+    if not cache_hit:
+        response["local_stash_ids"] = list(local_stash_ids)
+
+    return response
 
 
 # ============================================================================
@@ -844,7 +900,14 @@ def main():
             if not scene_id:
                 output = {"error": "scene_id is required"}
             else:
-                output = find_matching_scenes(scene_id, plugin_settings)
+                # Get cached stash_ids from JS if provided
+                cached_stash_ids = args.get("cached_local_stash_ids")
+                cache_endpoint = args.get("cache_endpoint")
+                output = find_matching_scenes(
+                    scene_id, plugin_settings,
+                    cached_stash_ids=cached_stash_ids,
+                    cache_endpoint=cache_endpoint
+                )
 
         elif operation:
             output = {"error": f"Unknown operation: {operation}"}
