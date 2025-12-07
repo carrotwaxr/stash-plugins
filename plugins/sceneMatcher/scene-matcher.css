@@ -203,6 +203,27 @@
   }
 }
 
+/* Small inline spinner for "loading more" indicator */
+.sm-spinner-small {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #555;
+  border-top-color: #0d6efd;
+  border-radius: 50%;
+  animation: sm-spin 1s linear infinite;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.sm-loading-more {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 12px;
+  color: #0d6efd;
+  font-size: 13px;
+}
+
 /* Scene Card */
 .sm-scene-card {
   background: #2a2a2a;

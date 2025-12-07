@@ -9,6 +9,7 @@
   let currentSceneElement = null;
   let matchResults = [];
   let isLoading = false;
+  let isLoadingMore = false;
   let stashdbUrl = "";
 
   // Cache for local stash_ids (persists across modal opens in the same session)
@@ -88,11 +89,11 @@
   }
 
   /**
-   * Find matching scenes for a local scene
+   * Find matching scenes - Phase 1 (fast text searches)
    */
-  async function findMatchingScenes(sceneId) {
+  async function findMatchesFast(sceneId) {
     const args = {
-      operation: "find_matches",
+      operation: "find_matches_fast",
       scene_id: sceneId,
     };
 
@@ -109,6 +110,33 @@
       cachedLocalStashIds = result.output.local_stash_ids;
       cacheEndpoint = result.output.stashdb_url;
       console.log(`[SceneMatcher] Cached ${cachedLocalStashIds.length} local stash_ids for ${cacheEndpoint}`);
+    }
+
+    return result;
+  }
+
+  /**
+   * Find matching scenes - Phase 2 (thorough performer/studio searches)
+   */
+  async function findMatchesThorough(sceneId, excludeIds) {
+    const args = {
+      operation: "find_matches_thorough",
+      scene_id: sceneId,
+      exclude_ids: excludeIds || [],
+    };
+
+    // Pass cached stash_ids if we have them for this endpoint
+    if (cachedLocalStashIds && cacheEndpoint) {
+      args.cached_local_stash_ids = cachedLocalStashIds;
+      args.cache_endpoint = cacheEndpoint;
+    }
+
+    const result = await runPluginOperation(args);
+
+    // Cache the stash_ids from the response for future calls
+    if (result.output && result.output.local_stash_ids && result.output.stashdb_url) {
+      cachedLocalStashIds = result.output.local_stash_ids;
+      cacheEndpoint = result.output.stashdb_url;
     }
 
     return result;
@@ -241,7 +269,7 @@
   /**
    * Update the stats bar with search attributes
    */
-  function updateStats(data) {
+  function updateStats(data, showLoadingMore = false) {
     const statsEl = document.getElementById("sm-stats");
     if (!statsEl) return;
 
@@ -261,6 +289,10 @@
 
     attrHtml += "</div>";
 
+    const loadingMoreHtml = showLoadingMore
+      ? '<span class="sm-loading-more"><span class="sm-spinner-small"></span> Loading more...</span>'
+      : "";
+
     statsEl.innerHTML = `
       <div class="sm-stat">
         <span class="sm-stat-label">Searching by:</span>
@@ -268,9 +300,34 @@
       </div>
       <div class="sm-stat sm-stat-highlight">
         <span class="sm-stat-label">Results:</span>
-        <span class="sm-stat-value">${data.total_results || 0}</span>
+        <span class="sm-stat-value" id="sm-result-count">${data.total_results || 0}</span>
+        ${loadingMoreHtml}
       </div>
     `;
+  }
+
+  /**
+   * Update just the result count (for progressive loading)
+   */
+  function updateResultCount(count, showLoadingMore = false) {
+    const countEl = document.getElementById("sm-result-count");
+    if (countEl) {
+      countEl.textContent = count;
+    }
+
+    // Update or add loading more indicator
+    const statsHighlight = document.querySelector(".sm-stat-highlight");
+    if (statsHighlight) {
+      const existingLoading = statsHighlight.querySelector(".sm-loading-more");
+      if (showLoadingMore && !existingLoading) {
+        const loadingSpan = document.createElement("span");
+        loadingSpan.className = "sm-loading-more";
+        loadingSpan.innerHTML = '<span class="sm-spinner-small"></span> Loading more...';
+        statsHighlight.appendChild(loadingSpan);
+      } else if (!showLoadingMore && existingLoading) {
+        existingLoading.remove();
+      }
+    }
   }
 
   /**
@@ -565,7 +622,52 @@
   }
 
   /**
-   * Handle the match button click
+   * Merge and sort results from multiple phases
+   */
+  function mergeResults(existingResults, newResults) {
+    // Create a map of existing results by stash_id
+    const resultMap = new Map();
+    for (const r of existingResults) {
+      resultMap.set(r.stash_id, r);
+    }
+
+    // Add new results (skip duplicates)
+    for (const r of newResults) {
+      if (!resultMap.has(r.stash_id)) {
+        resultMap.set(r.stash_id, r);
+      }
+    }
+
+    // Convert back to array and sort
+    const merged = Array.from(resultMap.values());
+
+    // Sort: not in local stash first, then by score desc, then by duration_score desc, then by date
+    merged.sort((a, b) => {
+      // In stash last
+      if (a.in_local_stash !== b.in_local_stash) {
+        return a.in_local_stash ? 1 : -1;
+      }
+      // Higher score first
+      if (a.score !== b.score) {
+        return b.score - a.score;
+      }
+      // Higher duration score first
+      const aDur = a.duration_score || 0.5;
+      const bDur = b.duration_score || 0.5;
+      if (aDur !== bDur) {
+        return bDur - aDur;
+      }
+      // Newer date first
+      const aDate = a.release_date || "";
+      const bDate = b.release_date || "";
+      return bDate.localeCompare(aDate);
+    });
+
+    return merged;
+  }
+
+  /**
+   * Handle the match button click - Progressive loading with two phases
    */
   async function handleMatchClick(sceneId, sceneElement) {
     if (isLoading) return;
@@ -579,24 +681,70 @@
     setStatus("Searching...", "loading");
 
     try {
-      const result = await findMatchingScenes(sceneId);
+      // Phase 1: Fast text searches
+      console.log("[SceneMatcher] Starting Phase 1 (fast text search)...");
+      const phase1Result = await findMatchesFast(sceneId);
 
-      matchResults = result.results || [];
-      stashdbUrl = result.stashdb_url || "https://stashdb.org";
+      matchResults = phase1Result.output?.results || [];
+      stashdbUrl = phase1Result.output?.stashdb_url || "https://stashdb.org";
 
       // Update modal header with scene title
       const header = document.querySelector(".sm-modal-header h3");
-      if (header && result.scene_title) {
-        header.textContent = `Scene Matcher - ${result.scene_title}`;
-        header.title = result.scene_title;
+      if (header && phase1Result.output?.scene_title) {
+        header.textContent = `Scene Matcher - ${phase1Result.output.scene_title}`;
+        header.title = phase1Result.output.scene_title;
       }
 
-      updateStats(result);
+      // Show Phase 1 results immediately
+      const hasMore = phase1Result.output?.has_more;
+      updateStats(phase1Result.output || {}, hasMore);
       renderResults();
 
       if (matchResults.length > 0) {
-        setStatus(`Found ${matchResults.length} potential matches`, "success");
-      } else {
+        setStatus(
+          hasMore ? `Found ${matchResults.length} matches, loading more...` : `Found ${matchResults.length} potential matches`,
+          hasMore ? "loading" : "success"
+        );
+      } else if (hasMore) {
+        setStatus("Searching for more matches...", "loading");
+      }
+
+      // Phase 2: Thorough performer/studio searches (if has_more is true)
+      if (hasMore) {
+        isLoadingMore = true;
+        console.log("[SceneMatcher] Starting Phase 2 (thorough search)...");
+
+        try {
+          const excludeIds = matchResults.map((r) => r.stash_id);
+          const phase2Result = await findMatchesThorough(sceneId, excludeIds);
+
+          const phase2Results = phase2Result.output?.results || [];
+
+          if (phase2Results.length > 0) {
+            // Merge and re-render
+            matchResults = mergeResults(matchResults, phase2Results);
+            renderResults();
+            console.log(`[SceneMatcher] Phase 2 added ${phase2Results.length} results, total: ${matchResults.length}`);
+          }
+
+          // Update final status
+          updateResultCount(matchResults.length, false);
+          if (matchResults.length > 0) {
+            setStatus(`Found ${matchResults.length} potential matches`, "success");
+          } else {
+            setStatus("No matches found", "");
+          }
+        } catch (phase2Error) {
+          console.warn("[SceneMatcher] Phase 2 failed:", phase2Error);
+          // Phase 2 failure is non-fatal, we still have Phase 1 results
+          updateResultCount(matchResults.length, false);
+          if (matchResults.length > 0) {
+            setStatus(`Found ${matchResults.length} matches (thorough search failed)`, "success");
+          }
+        } finally {
+          isLoadingMore = false;
+        }
+      } else if (matchResults.length === 0) {
         setStatus("No matches found", "");
       }
     } catch (error) {
