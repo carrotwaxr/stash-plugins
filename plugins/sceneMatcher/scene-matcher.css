@@ -476,6 +476,68 @@
   background: #555;
 }
 
+/* Deep Search Prompt */
+.sm-deep-search-prompt {
+  background: linear-gradient(135deg, #1e3a5f 0%, #2d1b4e 100%);
+  border: 1px solid #3d5a80;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  text-align: center;
+}
+
+.sm-deep-search-description {
+  color: #b8c5d6;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.sm-deep-search-description strong {
+  color: #fff;
+}
+
+.sm-btn-deep-search {
+  background: linear-gradient(135deg, #0d6efd 0%, #6f42c1 100%);
+  border: none;
+  color: #fff;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+}
+
+.sm-btn-deep-search:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 15px rgba(13, 110, 253, 0.4);
+}
+
+.sm-btn-deep-search:active {
+  transform: translateY(0);
+}
+
+/* Deep Search Loading */
+.sm-deep-search-loading {
+  background: #222;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #0d6efd;
+  font-size: 14px;
+}
+
 /* Responsive Adjustments */
 @media (max-width: 768px) {
   .sm-modal {
