@@ -55,6 +55,24 @@ settings:
     description: Path to scan for new downloaded scenes (e.g., /data/unsorted). Used by the "Scan for New Scenes" task.
     type: STRING
 
+  # StashDB API settings (advanced - for rate limiting and error handling)
+  stashbox_request_delay:
+    displayName: Request Delay (seconds)
+    description: Delay between paginated StashDB requests to avoid rate limiting. Default is 0.5 seconds. Increase if you see 429 errors.
+    type: NUMBER
+  stashbox_max_retries:
+    displayName: Max Retries
+    description: Number of times to retry failed StashDB requests (for 504, 503, connection errors). Default is 3.
+    type: NUMBER
+  stashbox_max_pages_performer:
+    displayName: Max Pages (Performer)
+    description: Maximum pages to fetch when querying performer scenes (100 scenes per page). Default is 25 (2500 scenes max). Reduce for faster results.
+    type: NUMBER
+  stashbox_max_pages_studio:
+    displayName: Max Pages (Studio)
+    description: Maximum pages to fetch when querying studio scenes (100 scenes per page). Default is 25 (2500 scenes max). Reduce for faster results.
+    type: NUMBER
+
 # Tasks that can be run manually or scheduled
 tasks:
   - name: Scan for New Scenes
