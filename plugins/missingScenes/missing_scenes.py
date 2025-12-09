@@ -17,6 +17,9 @@ import ssl
 # Import Stash-compatible logging
 import log
 
+# Import resilient StashDB API utilities
+import stashbox_api
+
 # Create SSL context that doesn't verify certificates (for self-signed certs)
 SSL_CONTEXT = ssl.create_default_context()
 SSL_CONTEXT.check_hostname = False
@@ -24,11 +27,11 @@ SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 
 
 # ============================================================================
-# GraphQL Helpers
+# GraphQL Helpers (for local Stash and Whisparr - not StashDB)
 # ============================================================================
 
 def graphql_request(url, query, variables=None, api_key=None, timeout=30):
-    """Make a GraphQL request to the specified endpoint."""
+    """Make a GraphQL request to the specified endpoint (local Stash only)."""
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -255,189 +258,37 @@ def get_local_scene_stash_ids(endpoint):
 
 
 # ============================================================================
-# StashDB API
+# StashDB API (using resilient stashbox_api module)
 # ============================================================================
 
-def query_stashdb_performer_scenes(stashdb_url, api_key, performer_stash_id, max_pages=50):
-    """Query StashDB for all scenes featuring a performer using paginated queryScenes."""
-    # First get the performer name for logging
-    name_query = """
-    query FindPerformer($id: ID!) {
-        findPerformer(id: $id) {
-            name
-        }
-    }
+def query_stashdb_performer_scenes(stashdb_url, api_key, performer_stash_id, plugin_settings=None):
+    """Query StashDB for all scenes featuring a performer.
+
+    Uses stashbox_api module for:
+    - Retry with exponential backoff on 504/503/connection errors
+    - Rate limit detection and pause on 429
+    - Configurable delays between paginated requests
+    - Graceful degradation with partial results on failure
     """
-    name_data = graphql_request(stashdb_url, name_query, {"id": performer_stash_id}, api_key)
-    performer_name = "Unknown"
-    if name_data and "findPerformer" in name_data:
-        performer_name = name_data["findPerformer"].get("name", "Unknown")
+    return stashbox_api.query_scenes_by_performer(
+        stashdb_url, api_key, performer_stash_id,
+        plugin_settings=plugin_settings
+    )
 
-    # Use queryScenes with performer filter for proper pagination
-    query = """
-    query QueryScenes($input: SceneQueryInput!) {
-        queryScenes(input: $input) {
-            count
-            scenes {
-                id
-                title
-                details
-                release_date
-                duration
-                code
-                director
-                urls {
-                    url
-                    site {
-                        name
-                    }
-                }
-                studio {
-                    id
-                    name
-                }
-                images {
-                    id
-                    url
-                    width
-                    height
-                }
-                performers {
-                    performer {
-                        id
-                        name
-                        disambiguation
-                        gender
-                    }
-                    as
-                }
-            }
-        }
-    }
+
+def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, plugin_settings=None):
+    """Query StashDB for all scenes from a studio.
+
+    Uses stashbox_api module for:
+    - Retry with exponential backoff on 504/503/connection errors
+    - Rate limit detection and pause on 429
+    - Configurable delays between paginated requests
+    - Graceful degradation with partial results on failure
     """
-
-    all_scenes = []
-    page = 1
-    per_page = 100
-
-    while page <= max_pages:
-        variables = {
-            "input": {
-                "performers": {
-                    "value": [performer_stash_id],
-                    "modifier": "INCLUDES"
-                },
-                "page": page,
-                "per_page": per_page,
-                "sort": "DATE",
-                "direction": "DESC"
-            }
-        }
-
-        data = graphql_request(stashdb_url, query, variables, api_key)
-        if not data or "queryScenes" not in data:
-            break
-
-        scenes = data["queryScenes"].get("scenes", [])
-        if not scenes:
-            break
-
-        all_scenes.extend(scenes)
-
-        total = data["queryScenes"].get("count", 0)
-        log.LogInfo(f"StashDB: Fetched page {page}, {len(scenes)} scenes (total: {total})")
-
-        if page * per_page >= total:
-            break
-
-        page += 1
-
-    log.LogInfo(f"StashDB: Found {len(all_scenes)} scenes for {performer_name}")
-    return all_scenes
-
-
-def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, max_pages=50):
-    """Query StashDB for all scenes from a studio."""
-    query = """
-    query QueryScenes($input: SceneQueryInput!) {
-        queryScenes(input: $input) {
-            count
-            scenes {
-                id
-                title
-                details
-                release_date
-                duration
-                code
-                director
-                urls {
-                    url
-                    site {
-                        name
-                    }
-                }
-                studio {
-                    id
-                    name
-                }
-                images {
-                    id
-                    url
-                    width
-                    height
-                }
-                performers {
-                    performer {
-                        id
-                        name
-                        disambiguation
-                        gender
-                    }
-                    as
-                }
-            }
-        }
-    }
-    """
-
-    all_scenes = []
-    page = 1
-    per_page = 100
-
-    while page <= max_pages:
-        variables = {
-            "input": {
-                "studios": {
-                    "value": [studio_stash_id],
-                    "modifier": "INCLUDES"
-                },
-                "page": page,
-                "per_page": per_page,
-                "sort": "DATE",  # Use DATE to get all scenes (TRENDING only returns subset)
-                "direction": "DESC"
-            }
-        }
-
-        data = graphql_request(stashdb_url, query, variables, api_key)
-        if not data or "queryScenes" not in data:
-            break
-
-        scenes = data["queryScenes"].get("scenes", [])
-        if not scenes:
-            break
-
-        all_scenes.extend(scenes)
-
-        total = data["queryScenes"].get("count", 0)
-        log.LogInfo(f"StashDB: Fetched page {page}, {len(scenes)} scenes (total: {total})")
-
-        if page * per_page >= total:
-            break
-
-        page += 1
-
-    log.LogInfo(f"StashDB: Found {len(all_scenes)} total scenes for studio")
-    return all_scenes
+    return stashbox_api.query_scenes_by_studio(
+        stashdb_url, api_key, studio_stash_id,
+        plugin_settings=plugin_settings
+    )
 
 
 # ============================================================================
@@ -849,11 +700,11 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
 
     log.LogInfo(f"Found {entity_type} '{entity.get('name')}' with StashDB ID: {stash_id}")
 
-    # Query StashDB for all scenes
+    # Query StashDB for all scenes (with retry/rate limit handling)
     if entity_type == "performer":
-        stashdb_scenes = query_stashdb_performer_scenes(stashdb_url, stashdb_api_key, stash_id)
+        stashdb_scenes = query_stashdb_performer_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
     else:
-        stashdb_scenes = query_stashdb_studio_scenes(stashdb_url, stashdb_api_key, stash_id)
+        stashdb_scenes = query_stashdb_studio_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
 
     if not stashdb_scenes:
         return {
