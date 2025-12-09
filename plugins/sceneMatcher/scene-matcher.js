@@ -946,17 +946,27 @@
     const path = window.location.pathname;
     const search = window.location.search;
 
-    // Bulk tagger: /scenes?c=tagger
-    if (path.includes("/scenes") && search.includes("c=tagger")) {
+    // Must be on scenes page
+    if (!path.includes("/scenes")) {
+      return false;
+    }
+
+    // Check URL for tagger display mode (disp=3)
+    if (search.includes("disp=3")) {
       return true;
     }
 
-    // Single scene tagger: /scenes/123?... with tagger in the query or component
-    if (path.match(/\/scenes\/\d+/) && (search.includes("tagger") || document.querySelector(".tagger-container"))) {
+    // Legacy check: c=tagger (older Stash versions)
+    if (search.includes("c=tagger")) {
       return true;
     }
 
-    // Also check for tagger container existing on the page
+    // Single scene tagger: /scenes/123 with tagger container
+    if (path.match(/\/scenes\/\d+/) && document.querySelector(".tagger-container")) {
+      return true;
+    }
+
+    // Fallback: check for tagger container in DOM
     if (document.querySelector(".tagger-container")) {
       return true;
     }
