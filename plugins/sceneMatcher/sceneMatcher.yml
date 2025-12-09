@@ -1,6 +1,6 @@
 name: Scene Matcher
 description: Find StashDB matches for untagged scenes using known performer and studio associations. Adds a "Match" button to the Tagger UI that searches by linked attributes.
-version: 1.0.0
+version: 1.1.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on Tagger pages

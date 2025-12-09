@@ -9,8 +9,10 @@
   let currentSceneElement = null;
   let matchResults = [];
   let isLoading = false;
-  let isLoadingMore = false;
+  let isLoadingDeep = false;
   let stashdbUrl = "";
+  let canSearchDeep = false;
+  let phase1SearchAttrs = null;
 
   // Cache for local stash_ids (persists across modal opens in the same session)
   let cachedLocalStashIds = null;
@@ -354,21 +356,89 @@
   }
 
   /**
+   * Create the "Search by performer/studio" button for Phase 2
+   */
+  function createDeepSearchButton() {
+    const wrapper = document.createElement("div");
+    wrapper.className = "sm-deep-search-prompt";
+
+    const description = document.createElement("div");
+    description.className = "sm-deep-search-description";
+
+    // Build description of what will be searched
+    const attrs = phase1SearchAttrs || {};
+    const performers = attrs.performers || [];
+    const studio = attrs.studio;
+
+    let searchDesc = "Search StashDB for all scenes";
+    if (performers.length > 0 && studio) {
+      searchDesc += ` from <strong>${escapeHtml(studio)}</strong> featuring <strong>${escapeHtml(performers.slice(0, 2).join(", "))}${performers.length > 2 ? "..." : ""}</strong>`;
+    } else if (studio) {
+      searchDesc += ` from <strong>${escapeHtml(studio)}</strong>`;
+    } else if (performers.length > 0) {
+      searchDesc += ` featuring <strong>${escapeHtml(performers.slice(0, 2).join(", "))}${performers.length > 2 ? "..." : ""}</strong>`;
+    }
+
+    description.innerHTML = searchDesc;
+
+    const btn = document.createElement("button");
+    btn.className = "sm-btn sm-btn-deep-search";
+    btn.innerHTML = `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 1em; height: 1em; margin-right: 0.5em;">
+        <circle cx="11" cy="11" r="8"></circle>
+        <path d="m21 21-4.35-4.35"></path>
+      </svg>
+      Search by performer/studio
+    `;
+    btn.onclick = handleDeepSearchClick;
+
+    wrapper.appendChild(description);
+    wrapper.appendChild(btn);
+
+    return wrapper;
+  }
+
+  /**
    * Render the results grid
    */
   function renderResults() {
     const container = document.getElementById("sm-results");
     if (!container) return;
 
-    if (matchResults.length === 0) {
-      container.innerHTML = `
-        <div class="sm-placeholder">
-          <div>No matching scenes found on StashDB for these attributes.</div>
-          <div style="font-size: 14px; color: #666; margin-top: 8px;">
-            Try linking more performers or the studio to StashDB first.
-          </div>
+    container.innerHTML = "";
+
+    // Show deep search button if available and not already loading
+    if (canSearchDeep && !isLoadingDeep) {
+      const deepSearchBtn = createDeepSearchButton();
+      container.appendChild(deepSearchBtn);
+    }
+
+    // Show loading indicator for deep search
+    if (isLoadingDeep) {
+      const loadingDiv = document.createElement("div");
+      loadingDiv.className = "sm-deep-search-loading";
+      loadingDiv.innerHTML = `
+        <span class="sm-spinner-small"></span>
+        <span>Searching by performer/studio...</span>
+      `;
+      container.appendChild(loadingDiv);
+    }
+
+    if (matchResults.length === 0 && !canSearchDeep && !isLoadingDeep) {
+      const placeholder = document.createElement("div");
+      placeholder.className = "sm-placeholder";
+      placeholder.innerHTML = `
+        <div>No matching scenes found on StashDB.</div>
+        <div style="font-size: 14px; color: #666; margin-top: 8px;">
+          Try linking more performers or the studio to StashDB first.
         </div>
       `;
+      container.appendChild(placeholder);
+      return;
+    }
+
+    if (matchResults.length === 0) {
+      // No results yet but deep search available or loading
       return;
     }
 
@@ -381,7 +451,6 @@
       grid.appendChild(item);
     }
 
-    container.innerHTML = "";
     container.appendChild(grid);
   }
 
@@ -668,13 +737,57 @@
   }
 
   /**
-   * Handle the match button click - Progressive loading with two phases
+   * Handle deep search button click (Phase 2)
+   */
+  async function handleDeepSearchClick() {
+    if (isLoadingDeep || !currentSceneId) return;
+
+    isLoadingDeep = true;
+    canSearchDeep = false; // Hide the button
+    renderResults();
+    setStatus("Searching by performer/studio...", "loading");
+
+    try {
+      const excludeIds = matchResults.map((r) => r.stash_id);
+      const phase2Result = await findMatchesThorough(currentSceneId, excludeIds);
+
+      const phase2Results = phase2Result.results || [];
+
+      if (phase2Results.length > 0) {
+        // Merge and re-render
+        matchResults = mergeResults(matchResults, phase2Results);
+        console.log(`[SceneMatcher] Deep search added ${phase2Results.length} results, total: ${matchResults.length}`);
+      }
+
+      // Update final status
+      updateResultCount(matchResults.length, false);
+      if (matchResults.length > 0) {
+        setStatus(`Found ${matchResults.length} potential matches`, "success");
+      } else {
+        setStatus("No matches found", "");
+      }
+    } catch (error) {
+      console.warn("[SceneMatcher] Deep search failed:", error);
+      setStatus("Deep search failed: " + (error.message || "Unknown error"), "error");
+      // Re-enable the button so user can retry
+      canSearchDeep = true;
+    } finally {
+      isLoadingDeep = false;
+      renderResults();
+    }
+  }
+
+  /**
+   * Handle the match button click - Phase 1 only, Phase 2 is user-initiated
    */
   async function handleMatchClick(sceneId, sceneElement) {
     if (isLoading) return;
 
     currentSceneId = sceneId;
     currentSceneElement = sceneElement;
+    matchResults = [];
+    canSearchDeep = false;
+    phase1SearchAttrs = null;
 
     isLoading = true;
     createModal();
@@ -683,12 +796,15 @@
 
     try {
       // Phase 1: Fast text searches
-      // Note: Stash auto-unwraps the "output" field, so we access result directly
       console.log("[SceneMatcher] Starting Phase 1 (fast text search)...");
       const phase1Result = await findMatchesFast(sceneId);
 
       matchResults = phase1Result.results || [];
       stashdbUrl = phase1Result.stashdb_url || "https://stashdb.org";
+      phase1SearchAttrs = phase1Result.search_attributes;
+
+      // Check if deeper search is available (has linked performers or studio)
+      canSearchDeep = phase1Result.has_more || false;
 
       // Update modal header with scene title
       const header = document.querySelector(".sm-modal-header h3");
@@ -697,56 +813,16 @@
         header.title = phase1Result.scene_title;
       }
 
-      // Show Phase 1 results immediately
-      const hasMore = phase1Result.has_more;
-      updateStats(phase1Result, hasMore);
+      // Show Phase 1 results
+      updateStats(phase1Result, false);
       renderResults();
 
       if (matchResults.length > 0) {
-        setStatus(
-          hasMore ? `Found ${matchResults.length} matches, loading more...` : `Found ${matchResults.length} potential matches`,
-          hasMore ? "loading" : "success"
-        );
-      } else if (hasMore) {
-        setStatus("Searching for more matches...", "loading");
-      }
-
-      // Phase 2: Thorough performer/studio searches (if has_more is true)
-      if (hasMore) {
-        isLoadingMore = true;
-        console.log("[SceneMatcher] Starting Phase 2 (thorough search)...");
-
-        try {
-          const excludeIds = matchResults.map((r) => r.stash_id);
-          const phase2Result = await findMatchesThorough(sceneId, excludeIds);
-
-          const phase2Results = phase2Result.results || [];
-
-          if (phase2Results.length > 0) {
-            // Merge and re-render
-            matchResults = mergeResults(matchResults, phase2Results);
-            renderResults();
-            console.log(`[SceneMatcher] Phase 2 added ${phase2Results.length} results, total: ${matchResults.length}`);
-          }
-
-          // Update final status
-          updateResultCount(matchResults.length, false);
-          if (matchResults.length > 0) {
-            setStatus(`Found ${matchResults.length} potential matches`, "success");
-          } else {
-            setStatus("No matches found", "");
-          }
-        } catch (phase2Error) {
-          console.warn("[SceneMatcher] Phase 2 failed:", phase2Error);
-          // Phase 2 failure is non-fatal, we still have Phase 1 results
-          updateResultCount(matchResults.length, false);
-          if (matchResults.length > 0) {
-            setStatus(`Found ${matchResults.length} matches (thorough search failed)`, "success");
-          }
-        } finally {
-          isLoadingMore = false;
-        }
-      } else if (matchResults.length === 0) {
+        const moreAvailable = canSearchDeep ? " (more search options available)" : "";
+        setStatus(`Found ${matchResults.length} potential matches${moreAvailable}`, "success");
+      } else if (canSearchDeep) {
+        setStatus("No matches from title search. Try searching by performer/studio.", "");
+      } else {
         setStatus("No matches found", "");
       }
     } catch (error) {
@@ -889,6 +965,32 @@
   }
 
   /**
+   * Wait for Tagger elements to appear, then add buttons.
+   * Uses polling to handle React rendering timing.
+   */
+  function waitForTaggerElements(maxAttempts = 20, interval = 250) {
+    let attempts = 0;
+
+    function check() {
+      attempts++;
+      const sceneItems = document.querySelectorAll(".search-item, .tagger-scene");
+
+      if (sceneItems.length > 0) {
+        // Found scene items, add buttons
+        addMatchButtons();
+        return;
+      }
+
+      if (attempts < maxAttempts) {
+        // Keep polling
+        setTimeout(check, interval);
+      }
+    }
+
+    check();
+  }
+
+  /**
    * Wait for page to be ready and add buttons
    */
   function waitForPage() {
@@ -897,10 +999,10 @@
       return;
     }
 
-    // Check immediately
-    addMatchButtons();
+    // Poll for Tagger elements (handles React rendering delay)
+    waitForTaggerElements();
 
-    // Also observe for dynamic content loading
+    // Also observe for dynamic content loading (new scenes added, etc.)
     const observer = new MutationObserver(() => {
       if (isTaggerPage()) {
         // Small delay to let React finish rendering
@@ -917,7 +1019,7 @@
     window.addEventListener("popstate", () => {
       setTimeout(() => {
         if (isTaggerPage()) {
-          addMatchButtons();
+          waitForTaggerElements();
         }
       }, 100);
     });
