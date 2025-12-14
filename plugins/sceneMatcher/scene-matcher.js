@@ -166,7 +166,11 @@
   function formatDate(dateStr) {
     if (!dateStr) return "";
     try {
-      const date = new Date(dateStr);
+      // Parse as local date components to avoid timezone shift
+      // new Date("2025-12-07") is interpreted as UTC midnight, which displays
+      // as the previous day for users west of UTC
+      const [year, month, day] = dateStr.split("-").map(Number);
+      const date = new Date(year, month - 1, day);
       return date.toLocaleDateString(undefined, {
         year: "numeric",
         month: "short",
