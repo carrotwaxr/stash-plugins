@@ -441,7 +441,7 @@
     return `
       <div class="tm-tag-row" data-tag-id="${tag.id}">
         <div class="tm-tag-info">
-          <span class="tm-tag-name">${escapeHtml(tag.name)}</span>
+          <a href="/tags/${tag.id}" class="tm-tag-name">${escapeHtml(tag.name)}</a>
           ${tag.aliases?.length ? `<span class="tm-tag-aliases">${escapeHtml(tag.aliases.join(', '))}</span>` : ''}
         </div>
         <div class="tm-tag-match">
