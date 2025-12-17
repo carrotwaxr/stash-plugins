@@ -164,6 +164,36 @@ def get_stashbox_config():
     return []
 
 
+def get_available_endpoints_for_entity(entity_stash_ids):
+    """Get stash-box endpoints that both the entity is linked to AND are configured in Stash.
+
+    Args:
+        entity_stash_ids: List of {endpoint, stash_id} dicts from the entity
+
+    Returns:
+        List of {endpoint, name, stash_id} dicts for valid endpoints
+    """
+    configured_boxes = get_stashbox_config()
+    if not configured_boxes:
+        return []
+
+    # Build lookup of configured endpoints
+    configured_lookup = {box["endpoint"]: box for box in configured_boxes}
+
+    available = []
+    for sid in entity_stash_ids:
+        endpoint = sid.get("endpoint")
+        if endpoint in configured_lookup:
+            box = configured_lookup[endpoint]
+            available.append({
+                "endpoint": endpoint,
+                "name": box.get("name", endpoint),
+                "stash_id": sid.get("stash_id")
+            })
+
+    return available
+
+
 def get_local_performer(performer_id):
     """Get a performer from local Stash with their stash_ids."""
     query = """
