@@ -6,12 +6,16 @@
   // State
   let modalRoot = null;
   let currentEntityId = null;
-  let currentEntityType = null; // "performer" or "studio"
+  let currentEntityType = null; // "performer", "studio", or "tag"
   let currentEntityName = null;
   let missingScenes = [];
   let isLoading = false;
   let whisparrConfigured = false;
   let stashdbUrl = "";
+
+  // Endpoint selection state (for tags with multiple stash-box links)
+  let availableEndpoints = []; // [{endpoint, name, stash_id}]
+  let selectedEndpoint = null;
 
   /**
    * Get the GraphQL endpoint URL
