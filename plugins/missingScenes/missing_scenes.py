@@ -311,6 +311,21 @@ def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, plugin_se
     )
 
 
+def query_stashdb_tag_scenes(stashdb_url, api_key, tag_stash_id, plugin_settings=None):
+    """Query StashDB for all scenes with a tag.
+
+    Uses stashbox_api module for:
+    - Retry with exponential backoff on 504/503/connection errors
+    - Rate limit detection and pause on 429
+    - Configurable delays between paginated requests
+    - Graceful degradation with partial results on failure
+    """
+    return stashbox_api.query_scenes_by_tag(
+        stashdb_url, api_key, tag_stash_id,
+        plugin_settings=plugin_settings
+    )
+
+
 # ============================================================================
 # Whisparr API (v3 - Compatible with Stasharr approach)
 # ============================================================================
