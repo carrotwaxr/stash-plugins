@@ -467,3 +467,58 @@
   border-radius: 4px;
   border-left: 3px solid var(--bs-danger, #dc3545);
 }
+
+/* Alias pill editing */
+.tm-alias-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bs-tertiary-bg, #3d3d5c);
+  border-radius: 4px;
+  min-height: 38px;
+}
+
+.tm-alias-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--bs-secondary-bg, #2d2d44);
+  border: 1px solid var(--bs-border-color, #444);
+  border-radius: 16px;
+  font-size: 0.85em;
+}
+
+.tm-alias-pill-remove {
+  background: none;
+  border: none;
+  color: var(--bs-secondary-color, #888);
+  cursor: pointer;
+  padding: 0;
+  font-size: 1.1em;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+}
+
+.tm-alias-pill-remove:hover {
+  background: var(--bs-danger, #dc3545);
+  color: #fff;
+}
+
+.tm-alias-empty {
+  color: var(--bs-secondary-color, #888);
+  font-style: italic;
+  padding: 4px;
+}
+
+.tm-alias-source-label {
+  font-size: 0.75em;
+  color: var(--bs-secondary-color, #888);
+  margin-bottom: 4px;
+}
