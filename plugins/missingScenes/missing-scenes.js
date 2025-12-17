@@ -103,6 +103,17 @@
   }
 
   /**
+   * Get available endpoints for an entity
+   */
+  async function getEndpoints(entityType, entityId) {
+    return runPluginOperation({
+      operation: "get_endpoints",
+      entity_type: entityType,
+      entity_id: entityId,
+    });
+  }
+
+  /**
    * Add a scene to Whisparr
    */
   async function addToWhisparr(stashId, title) {
