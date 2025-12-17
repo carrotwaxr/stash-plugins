@@ -1361,6 +1361,50 @@ def main():
             else:
                 output = add_to_whisparr(stash_id, title, plugin_settings)
 
+        elif operation == "get_endpoints":
+            entity_type = args.get("entity_type", "")
+            entity_id = args.get("entity_id", "")
+
+            if not entity_id or not entity_type:
+                output = {"error": "entity_type and entity_id are required"}
+            else:
+                # Get the entity
+                if entity_type == "performer":
+                    entity = get_local_performer(entity_id)
+                elif entity_type == "studio":
+                    entity = get_local_studio(entity_id)
+                elif entity_type == "tag":
+                    entity = get_local_tag(entity_id)
+                else:
+                    entity = None
+
+                if not entity:
+                    output = {"error": f"{entity_type.title()} not found: {entity_id}"}
+                else:
+                    stash_ids = entity.get("stash_ids", [])
+                    available = get_available_endpoints_for_entity(stash_ids)
+
+                    # Determine which endpoint to use by default
+                    preferred = plugin_settings.get("stashBoxEndpoint", "").strip()
+                    default_endpoint = None
+
+                    if preferred:
+                        # Check if preferred endpoint is in available list
+                        for ep in available:
+                            if ep["endpoint"] == preferred:
+                                default_endpoint = preferred
+                                break
+
+                    if not default_endpoint and available:
+                        default_endpoint = available[0]["endpoint"]
+
+                    output = {
+                        "entity_name": entity.get("name"),
+                        "available_endpoints": available,
+                        "default_endpoint": default_endpoint,
+                        "show_selector": len(available) > 1 and not default_endpoint
+                    }
+
         elif operation:
             output = {"error": f"Unknown operation: {operation}"}
         else:
