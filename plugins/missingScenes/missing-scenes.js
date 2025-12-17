@@ -94,12 +94,16 @@
   /**
    * Find missing scenes for the current entity
    */
-  async function findMissingScenes(entityType, entityId) {
-    return runPluginOperation({
+  async function findMissingScenes(entityType, entityId, endpoint = null) {
+    const args = {
       operation: "find_missing",
       entity_type: entityType,
       entity_id: entityId,
-    });
+    };
+    if (endpoint) {
+      args.endpoint = endpoint;
+    }
+    return runPluginOperation(args);
   }
 
   /**
