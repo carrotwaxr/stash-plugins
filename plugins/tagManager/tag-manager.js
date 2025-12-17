@@ -1110,16 +1110,204 @@
   }
 
   /**
-   * Tag Hierarchy page component (placeholder)
+   * Tag Hierarchy page state
+   */
+  let hierarchyTags = [];
+  let hierarchyTree = [];
+  let hierarchyStats = {};
+  let showImages = true;
+  let expandedNodes = new Set();
+
+  /**
+   * Render a single tree node
+   */
+  function renderTreeNode(node, isRoot = false) {
+    const hasChildren = node.childNodes.length > 0;
+    const isExpanded = expandedNodes.has(node.id);
+
+    // Build scene/child count text
+    const metaParts = [];
+    if (node.scene_count > 0) {
+      metaParts.push(`${node.scene_count} scene${node.scene_count !== 1 ? 's' : ''}`);
+    }
+    if (node.child_count > 0) {
+      metaParts.push(`${node.child_count} sub-tag${node.child_count !== 1 ? 's' : ''}`);
+    }
+    const metaText = metaParts.length > 0 ? metaParts.join(', ') : '';
+
+    // Image HTML
+    const imageHtml = node.image_path
+      ? `<div class="th-image ${showImages ? '' : 'th-hidden'}">
+           <img src="${escapeHtml(node.image_path)}" alt="${escapeHtml(node.name)}" loading="lazy">
+         </div>`
+      : `<div class="th-image-placeholder ${showImages ? '' : 'th-hidden'}">
+           <span>?</span>
+         </div>`;
+
+    // Children HTML (recursive)
+    let childrenHtml = '';
+    if (hasChildren) {
+      const childNodes = node.childNodes.map(child => renderTreeNode(child, false)).join('');
+      childrenHtml = `<div class="th-children ${isExpanded ? 'th-expanded' : ''}" data-parent-id="${node.id}">${childNodes}</div>`;
+    }
+
+    // Toggle icon
+    const toggleIcon = hasChildren
+      ? (isExpanded ? '&#9660;' : '&#9654;')  // Down arrow / Right arrow
+      : '';
+
+    return `
+      <div class="th-node ${isRoot ? 'th-root' : ''}" data-tag-id="${node.id}">
+        <div class="th-node-content">
+          <span class="th-toggle ${hasChildren ? '' : 'th-leaf'}" data-tag-id="${node.id}">${toggleIcon}</span>
+          ${imageHtml}
+          <div class="th-info">
+            <a href="/tags/${node.id}" class="th-name">${escapeHtml(node.name)}</a>
+            ${metaText ? `<div class="th-meta">${metaText}</div>` : ''}
+          </div>
+        </div>
+        ${childrenHtml}
+      </div>
+    `;
+  }
+
+  /**
+   * Render the full hierarchy page
+   */
+  function renderHierarchyPage(container) {
+    const treeHtml = hierarchyTree.map(root => renderTreeNode(root, true)).join('');
+
+    container.innerHTML = `
+      <div class="tag-hierarchy">
+        <div class="tag-hierarchy-header">
+          <h2>Tag Hierarchy</h2>
+          <div class="tag-hierarchy-controls">
+            <button id="th-expand-all">Expand All</button>
+            <button id="th-collapse-all">Collapse All</button>
+            <label>
+              <input type="checkbox" id="th-show-images" ${showImages ? 'checked' : ''}>
+              Show images
+            </label>
+          </div>
+        </div>
+        <div class="th-stats">
+          <span class="stat"><strong>${hierarchyStats.totalTags}</strong> total tags</span>
+          <span class="stat"><strong>${hierarchyStats.rootTags}</strong> root tags</span>
+          <span class="stat"><strong>${hierarchyStats.tagsWithChildren}</strong> with sub-tags</span>
+          <span class="stat"><strong>${hierarchyStats.tagsWithParents}</strong> with parents</span>
+        </div>
+        <div class="th-tree">
+          ${treeHtml || '<div class="th-empty">No tags found</div>'}
+        </div>
+      </div>
+    `;
+
+    // Attach event handlers
+    attachHierarchyEventHandlers(container);
+  }
+
+  /**
+   * Attach event handlers for hierarchy page
+   */
+  function attachHierarchyEventHandlers(container) {
+    // Toggle expand/collapse on node click
+    container.querySelectorAll('.th-toggle').forEach(toggle => {
+      toggle.addEventListener('click', (e) => {
+        const tagId = e.target.dataset.tagId;
+        if (!tagId) return;
+
+        const childrenContainer = container.querySelector(`.th-children[data-parent-id="${tagId}"]`);
+        if (!childrenContainer) return;
+
+        if (expandedNodes.has(tagId)) {
+          expandedNodes.delete(tagId);
+          childrenContainer.classList.remove('th-expanded');
+          e.target.innerHTML = '&#9654;';  // Right arrow
+        } else {
+          expandedNodes.add(tagId);
+          childrenContainer.classList.add('th-expanded');
+          e.target.innerHTML = '&#9660;';  // Down arrow
+        }
+      });
+    });
+
+    // Expand All button
+    const expandAllBtn = container.querySelector('#th-expand-all');
+    if (expandAllBtn) {
+      expandAllBtn.addEventListener('click', () => {
+        container.querySelectorAll('.th-children').forEach(el => {
+          el.classList.add('th-expanded');
+          const parentId = el.dataset.parentId;
+          if (parentId) expandedNodes.add(parentId);
+        });
+        container.querySelectorAll('.th-toggle:not(.th-leaf)').forEach(el => {
+          el.innerHTML = '&#9660;';
+        });
+      });
+    }
+
+    // Collapse All button
+    const collapseAllBtn = container.querySelector('#th-collapse-all');
+    if (collapseAllBtn) {
+      collapseAllBtn.addEventListener('click', () => {
+        container.querySelectorAll('.th-children').forEach(el => {
+          el.classList.remove('th-expanded');
+        });
+        container.querySelectorAll('.th-toggle:not(.th-leaf)').forEach(el => {
+          el.innerHTML = '&#9654;';
+        });
+        expandedNodes.clear();
+      });
+    }
+
+    // Show images toggle
+    const showImagesCheckbox = container.querySelector('#th-show-images');
+    if (showImagesCheckbox) {
+      showImagesCheckbox.addEventListener('change', (e) => {
+        showImages = e.target.checked;
+        container.querySelectorAll('.th-image, .th-image-placeholder').forEach(el => {
+          el.classList.toggle('th-hidden', !showImages);
+        });
+      });
+    }
+  }
+
+  /**
+   * Tag Hierarchy page component
    */
   function TagHierarchyPage() {
     const React = PluginApi.React;
     const containerRef = React.useRef(null);
 
     React.useEffect(() => {
-      if (!containerRef.current) return;
-      document.title = "Tag Hierarchy | Stash";
-      containerRef.current.innerHTML = '<div class="tag-hierarchy"><div class="th-loading">Tag Hierarchy - Coming Soon</div></div>';
+      async function init() {
+        if (!containerRef.current) return;
+
+        document.title = "Tag Hierarchy | Stash";
+        containerRef.current.innerHTML = '<div class="tag-hierarchy"><div class="th-loading">Loading tags...</div></div>';
+
+        try {
+          // Fetch all tags with hierarchy info
+          hierarchyTags = await fetchAllTagsWithHierarchy();
+          console.debug(`[tagManager] Loaded ${hierarchyTags.length} tags for hierarchy`);
+
+          // Build tree structure
+          hierarchyTree = buildTagTree(hierarchyTags);
+          hierarchyStats = getTreeStats(hierarchyTags);
+          console.debug(`[tagManager] Built tree with ${hierarchyTree.length} root nodes`);
+
+          // Reset expand state
+          expandedNodes.clear();
+
+          // Render the page
+          renderHierarchyPage(containerRef.current);
+        } catch (e) {
+          console.error("[tagManager] Failed to load tag hierarchy:", e);
+          containerRef.current.innerHTML = `<div class="tag-hierarchy"><div class="th-loading">Error loading tags: ${escapeHtml(e.message)}</div></div>`;
+        }
+      }
+
+      init();
     }, []);
 
     return React.createElement('div', {
