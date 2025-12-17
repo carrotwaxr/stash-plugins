@@ -761,15 +761,8 @@
         updateInput.description = stashdbTag.description || '';
       }
 
-      // Use the edited aliases directly
+      // Use the edited aliases directly (user has full control via pill UI)
       updateInput.aliases = Array.from(editableAliases);
-
-      // If "Keep + Add as Alias" was selected, ensure StashDB name is in aliases
-      if (nameChoice === 'local_add_alias') {
-        if (!updateInput.aliases.some(a => a.toLowerCase() === stashdbTag.name.toLowerCase())) {
-          updateInput.aliases.push(stashdbTag.name);
-        }
-      }
 
       try {
         await updateTag(updateInput);
