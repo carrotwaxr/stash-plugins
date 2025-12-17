@@ -264,12 +264,17 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
     # Add API matches (convert to our format)
     for tag in api_matches:
         seen_ids.add(tag["id"])
-        # Determine match type
-        match_type = "exact" if tag["name"].lower() == tag_name.lower() else "alias"
+        # Determine match type and score
+        if tag["name"].lower() == tag_name.lower():
+            match_type = "exact"
+            score = 100
+        else:
+            match_type = "alias"
+            score = 95  # Slightly lower than exact matches
         combined_matches.append({
             "tag": tag,
             "match_type": match_type,
-            "score": 100,
+            "score": score,
             "matched_on": tag_name if match_type == "alias" else tag["name"]
         })
 

@@ -45,6 +45,53 @@ class TestTagManagerModes(unittest.TestCase):
         self.assertGreater(len(result["matches"]), 0)
         self.assertEqual(result["matches"][0]["tag"]["name"], "Anal Creampie")
 
+    @patch('stashdb_api.graphql_request')
+    def test_search_mode_scores_exact_higher_than_alias(self, mock_graphql):
+        """Exact name matches should score higher than alias matches."""
+        # Mock StashDB response with two tags:
+        # - One where search term matches the name exactly
+        # - One where search term matches an alias
+        mock_graphql.return_value = {
+            "queryTags": {
+                "count": 2,
+                "tags": [
+                    {
+                        "id": "alias-match",
+                        "name": "Different Name",
+                        "description": "",
+                        "aliases": ["Test Tag"],
+                        "category": None
+                    },
+                    {
+                        "id": "exact-match",
+                        "name": "Test Tag",
+                        "description": "",
+                        "aliases": [],
+                        "category": None
+                    }
+                ]
+            }
+        }
+
+        from tag_manager import handle_search
+
+        result = handle_search(
+            tag_name="Test Tag",
+            stashdb_url="https://stashdb.org/graphql",
+            stashdb_api_key="fake-key",
+            settings={}
+        )
+
+        # Exact match should be first (higher score)
+        self.assertEqual(result["matches"][0]["tag"]["id"], "exact-match")
+        self.assertEqual(result["matches"][0]["match_type"], "exact")
+        self.assertEqual(result["matches"][0]["score"], 100)
+
+        # Alias match should be second (lower score)
+        self.assertEqual(result["matches"][1]["tag"]["id"], "alias-match")
+        self.assertEqual(result["matches"][1]["match_type"], "alias")
+        self.assertLess(result["matches"][1]["score"], 100)
+
 
 class TestCacheFunctions(unittest.TestCase):
     """Test caching functionality."""

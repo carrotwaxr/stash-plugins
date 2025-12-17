@@ -441,7 +441,7 @@
     return `
       <div class="tm-tag-row" data-tag-id="${tag.id}">
         <div class="tm-tag-info">
-          <span class="tm-tag-name">${escapeHtml(tag.name)}</span>
+          <a href="/tags/${tag.id}" class="tm-tag-name">${escapeHtml(tag.name)}</a>
           ${tag.aliases?.length ? `<span class="tm-tag-aliases">${escapeHtml(tag.aliases.join(', '))}</span>` : ''}
         </div>
         <div class="tm-tag-match">
@@ -599,9 +599,40 @@
     const stashdbTag = match.tag;
 
     // Determine defaults: use StashDB value if local is empty
-    const nameDefault = tag.name ? 'local' : 'stashdb';
+    // For name: if local differs from StashDB, default to "keep + add alias"
+    const namesMatch = tag.name.toLowerCase() === stashdbTag.name.toLowerCase();
+    const nameDefault = !tag.name ? 'stashdb' : (namesMatch ? 'local' : 'local_add_alias');
     const descDefault = tag.description ? 'local' : 'stashdb';
-    const aliasesDefault = tag.aliases?.length ? 'local' : 'stashdb';
+
+    // Alias editing state - start with merged aliases
+    let editableAliases = new Set([...(tag.aliases || []), ...(stashdbTag.aliases || [])]);
+
+    // Function to render alias pills
+    function renderAliasPills() {
+      const pillsContainer = modal.querySelector('#tm-alias-pills');
+      if (!pillsContainer) return;
+
+      if (editableAliases.size === 0) {
+        pillsContainer.innerHTML = '<span class="tm-alias-empty">No aliases</span>';
+        return;
+      }
+
+      pillsContainer.innerHTML = Array.from(editableAliases).map(alias => `
+        <span class="tm-alias-pill">
+          ${escapeHtml(alias)}
+          <button type="button" class="tm-alias-pill-remove" data-alias="${escapeHtml(alias)}">&times;</button>
+        </span>
+      `).join('');
+
+      // Attach remove handlers
+      pillsContainer.querySelectorAll('.tm-alias-pill-remove').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const aliasToRemove = e.target.dataset.alias;
+          editableAliases.delete(aliasToRemove);
+          renderAliasPills();
+        });
+      });
+    }
 
     const modal = document.createElement('div');
     modal.className = 'tm-modal-backdrop';
@@ -633,6 +664,7 @@
                 <td>${escapeHtml(tag.name) || '<em>empty</em>'}</td>
                 <td>${escapeHtml(stashdbTag.name)}</td>
                 <td>
+                  <label><input type="radio" name="tm-name" value="local_add_alias" ${nameDefault === 'local_add_alias' ? 'checked' : ''}> Keep + Add as Alias</label>
                   <label><input type="radio" name="tm-name" value="local" ${nameDefault === 'local' ? 'checked' : ''}> Keep</label>
                   <label><input type="radio" name="tm-name" value="stashdb" ${nameDefault === 'stashdb' ? 'checked' : ''}> StashDB</label>
                 </td>
@@ -648,12 +680,11 @@
               </tr>
               <tr>
                 <td>Aliases</td>
-                <td>${tag.aliases?.length ? escapeHtml(tag.aliases.join(', ')) : '<em>none</em>'}</td>
-                <td>${stashdbTag.aliases?.length ? escapeHtml(stashdbTag.aliases.join(', ')) : '<em>none</em>'}</td>
-                <td>
-                  <label><input type="radio" name="tm-aliases" value="local" ${aliasesDefault === 'local' ? 'checked' : ''}> Keep</label>
-                  <label><input type="radio" name="tm-aliases" value="stashdb" ${aliasesDefault === 'stashdb' ? 'checked' : ''}> StashDB</label>
-                  <label><input type="radio" name="tm-aliases" value="merge"> Merge</label>
+                <td colspan="3">
+                  <div class="tm-alias-source-label">Your aliases: ${tag.aliases?.length ? escapeHtml(tag.aliases.join(', ')) : '<em>none</em>'}</div>
+                  <div class="tm-alias-source-label">StashDB aliases: ${stashdbTag.aliases?.length ? escapeHtml(stashdbTag.aliases.join(', ')) : '<em>none</em>'}</div>
+                  <div class="tm-alias-source-label" style="margin-top: 8px;">Final aliases (click &times; to remove):</div>
+                  <div class="tm-alias-pills" id="tm-alias-pills"></div>
                 </td>
               </tr>
             </tbody>
@@ -662,6 +693,7 @@
           <div class="tm-stashid-note">
             <strong>StashDB ID will be added:</strong> ${escapeHtml(stashdbTag.id)}
           </div>
+          <div class="tm-modal-error" id="tm-diff-error" style="display: none;"></div>
         </div>
         <div class="tm-modal-footer">
           <button class="btn btn-secondary tm-cancel-btn">Cancel</button>
@@ -671,6 +703,31 @@
     `;
 
     document.body.appendChild(modal);
+
+    // Initialize alias pills
+    renderAliasPills();
+
+    // When name choice changes, update aliases if needed
+    modal.querySelectorAll('input[name="tm-name"]').forEach(radio => {
+      radio.addEventListener('change', (e) => {
+        if (e.target.value === 'local_add_alias') {
+          // Add StashDB name to aliases if not already present
+          if (!editableAliases.has(stashdbTag.name) &&
+              !Array.from(editableAliases).some(a => a.toLowerCase() === stashdbTag.name.toLowerCase())) {
+            editableAliases.add(stashdbTag.name);
+            renderAliasPills();
+          }
+        }
+      });
+    });
+
+    // If default is local_add_alias, ensure StashDB name is in aliases
+    if (nameDefault === 'local_add_alias') {
+      if (!Array.from(editableAliases).some(a => a.toLowerCase() === stashdbTag.name.toLowerCase())) {
+        editableAliases.add(stashdbTag.name);
+        renderAliasPills();
+      }
+    }
 
     // Event handlers
     modal.querySelector('.tm-close-btn').addEventListener('click', () => modal.remove());
@@ -682,7 +739,6 @@
     modal.querySelector('.tm-apply-btn').addEventListener('click', async () => {
       const nameChoice = modal.querySelector('input[name="tm-name"]:checked').value;
       const descChoice = modal.querySelector('input[name="tm-desc"]:checked').value;
-      const aliasesChoice = modal.querySelector('input[name="tm-aliases"]:checked').value;
 
       // Use the selected stash-box endpoint
       const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
@@ -705,12 +761,8 @@
         updateInput.description = stashdbTag.description || '';
       }
 
-      if (aliasesChoice === 'stashdb') {
-        updateInput.aliases = stashdbTag.aliases || [];
-      } else if (aliasesChoice === 'merge') {
-        const merged = new Set([...(tag.aliases || []), ...(stashdbTag.aliases || [])]);
-        updateInput.aliases = Array.from(merged);
-      }
+      // Use the edited aliases directly (user has full control via pill UI)
+      updateInput.aliases = Array.from(editableAliases);
 
       try {
         await updateTag(updateInput);
@@ -729,7 +781,17 @@
         showStatus(`Matched "${tag.name}" to "${stashdbTag.name}"`, 'success');
         renderPage(container);
       } catch (e) {
-        showStatus(`Error: ${e.message}`, 'error');
+        const errorEl = modal.querySelector('#tm-diff-error');
+        if (errorEl) {
+          // Parse error message for friendlier display
+          let errorMsg = e.message;
+          const aliasConflictMatch = errorMsg.match(/tag with name '([^']+)' already exists/i);
+          if (aliasConflictMatch) {
+            errorMsg = `Cannot save: "${aliasConflictMatch[1]}" conflicts with an existing tag name. Remove it from aliases to continue.`;
+          }
+          errorEl.textContent = errorMsg;
+          errorEl.style.display = 'block';
+        }
       }
     });
   }
