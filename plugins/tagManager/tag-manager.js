@@ -358,28 +358,283 @@
   /**
    * Show diff dialog for accepting a match
    */
-  function showDiffDialog(tagId, container) {
+  function showDiffDialog(tagId, container, matchIndex = 0) {
     const tag = localTags.find(t => t.id === tagId);
     const matches = matchResults[tagId];
     if (!tag || !matches?.length) return;
 
-    const match = matches[0];
-    // TODO: Implement full diff dialog (Task 6)
-    console.log('Show diff dialog for', tag.name, 'with match', match.tag.name);
-    showStatus('Diff dialog coming in next task...', 'info');
+    const match = matches[matchIndex];
+    const stashdbTag = match.tag;
+
+    // Determine defaults: use StashDB value if local is empty
+    const nameDefault = tag.name ? 'local' : 'stashdb';
+    const descDefault = tag.description ? 'local' : 'stashdb';
+    const aliasesDefault = tag.aliases?.length ? 'local' : 'stashdb';
+
+    const modal = document.createElement('div');
+    modal.className = 'tm-modal-backdrop';
+    modal.innerHTML = `
+      <div class="tm-modal">
+        <div class="tm-modal-header">
+          <h3>Match: ${escapeHtml(tag.name)} - ${escapeHtml(stashdbTag.name)}</h3>
+          <button class="tm-close-btn">&times;</button>
+        </div>
+        <div class="tm-modal-body">
+          <div class="tm-diff-info">
+            <span class="tm-match-type-badge tm-match-${match.match_type}">${match.match_type}</span>
+            <span>Score: ${match.score}%</span>
+            ${stashdbTag.category ? `<span>Category: ${escapeHtml(stashdbTag.category.name)}</span>` : ''}
+          </div>
+
+          <table class="tm-diff-table">
+            <thead>
+              <tr>
+                <th>Field</th>
+                <th>Your Value</th>
+                <th>StashDB Value</th>
+                <th>Use</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Name</td>
+                <td>${escapeHtml(tag.name) || '<em>empty</em>'}</td>
+                <td>${escapeHtml(stashdbTag.name)}</td>
+                <td>
+                  <label><input type="radio" name="tm-name" value="local" ${nameDefault === 'local' ? 'checked' : ''}> Keep</label>
+                  <label><input type="radio" name="tm-name" value="stashdb" ${nameDefault === 'stashdb' ? 'checked' : ''}> StashDB</label>
+                </td>
+              </tr>
+              <tr>
+                <td>Description</td>
+                <td>${escapeHtml(tag.description) || '<em>empty</em>'}</td>
+                <td>${escapeHtml(stashdbTag.description) || '<em>empty</em>'}</td>
+                <td>
+                  <label><input type="radio" name="tm-desc" value="local" ${descDefault === 'local' ? 'checked' : ''}> Keep</label>
+                  <label><input type="radio" name="tm-desc" value="stashdb" ${descDefault === 'stashdb' ? 'checked' : ''}> StashDB</label>
+                </td>
+              </tr>
+              <tr>
+                <td>Aliases</td>
+                <td>${tag.aliases?.length ? escapeHtml(tag.aliases.join(', ')) : '<em>none</em>'}</td>
+                <td>${stashdbTag.aliases?.length ? escapeHtml(stashdbTag.aliases.join(', ')) : '<em>none</em>'}</td>
+                <td>
+                  <label><input type="radio" name="tm-aliases" value="local" ${aliasesDefault === 'local' ? 'checked' : ''}> Keep</label>
+                  <label><input type="radio" name="tm-aliases" value="stashdb" ${aliasesDefault === 'stashdb' ? 'checked' : ''}> StashDB</label>
+                  <label><input type="radio" name="tm-aliases" value="merge"> Merge</label>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="tm-stashid-note">
+            <strong>StashDB ID will be added:</strong> ${escapeHtml(stashdbTag.id)}
+          </div>
+        </div>
+        <div class="tm-modal-footer">
+          <button class="btn btn-secondary tm-cancel-btn">Cancel</button>
+          <button class="btn btn-primary tm-apply-btn">Apply</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Event handlers
+    modal.querySelector('.tm-close-btn').addEventListener('click', () => modal.remove());
+    modal.querySelector('.tm-cancel-btn').addEventListener('click', () => modal.remove());
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.remove();
+    });
+
+    modal.querySelector('.tm-apply-btn').addEventListener('click', async () => {
+      const nameChoice = modal.querySelector('input[name="tm-name"]:checked').value;
+      const descChoice = modal.querySelector('input[name="tm-desc"]:checked').value;
+      const aliasesChoice = modal.querySelector('input[name="tm-aliases"]:checked').value;
+
+      // Build update input
+      const updateInput = {
+        id: tag.id,
+        stash_ids: [{
+          endpoint: settings.stashdbEndpoint,
+          stash_id: stashdbTag.id,
+        }],
+      };
+
+      if (nameChoice === 'stashdb') {
+        updateInput.name = stashdbTag.name;
+      }
+
+      if (descChoice === 'stashdb') {
+        updateInput.description = stashdbTag.description || '';
+      }
+
+      if (aliasesChoice === 'stashdb') {
+        updateInput.aliases = stashdbTag.aliases || [];
+      } else if (aliasesChoice === 'merge') {
+        const merged = new Set([...(tag.aliases || []), ...(stashdbTag.aliases || [])]);
+        updateInput.aliases = Array.from(merged);
+      }
+
+      try {
+        await updateTag(updateInput);
+        modal.remove();
+
+        // Update local state
+        const idx = localTags.findIndex(t => t.id === tag.id);
+        if (idx >= 0) {
+          localTags[idx].stash_ids = updateInput.stash_ids;
+          if (updateInput.name) localTags[idx].name = updateInput.name;
+          if (updateInput.description !== undefined) localTags[idx].description = updateInput.description;
+          if (updateInput.aliases) localTags[idx].aliases = updateInput.aliases;
+        }
+        delete matchResults[tag.id];
+
+        showStatus(`Matched "${tag.name}" to "${stashdbTag.name}"`, 'success');
+        renderPage(container);
+      } catch (e) {
+        showStatus(`Error: ${e.message}`, 'error');
+      }
+    });
   }
 
   /**
-   * Show modal with all matches
+   * Update a tag via GraphQL
+   */
+  async function updateTag(input) {
+    const query = `
+      mutation TagUpdate($input: TagUpdateInput!) {
+        tagUpdate(input: $input) {
+          id
+          name
+          stash_ids {
+            endpoint
+            stash_id
+          }
+        }
+      }
+    `;
+
+    const data = await graphqlRequest(query, { input });
+    return data?.tagUpdate;
+  }
+
+  /**
+   * Show modal with all matches for manual selection
    */
   function showMatchesModal(tagId, container) {
     const tag = localTags.find(t => t.id === tagId);
     const matches = matchResults[tagId];
-    if (!tag || !matches?.length) return;
+    if (!tag) return;
 
-    // TODO: Implement matches modal (Task 6)
-    console.log('Show matches modal for', tag.name, matches);
-    showStatus('Matches modal coming in next task...', 'info');
+    const modal = document.createElement('div');
+    modal.className = 'tm-modal-backdrop';
+    modal.innerHTML = `
+      <div class="tm-modal tm-modal-wide">
+        <div class="tm-modal-header">
+          <h3>Matches for: ${escapeHtml(tag.name)}</h3>
+          <button class="tm-close-btn">&times;</button>
+        </div>
+        <div class="tm-modal-body">
+          <div class="tm-search-row">
+            <input type="text" id="tm-manual-search" class="form-control" placeholder="Search StashDB..." value="${escapeHtml(tag.name)}">
+            <button class="btn btn-primary" id="tm-manual-search-btn">Search</button>
+          </div>
+          <div class="tm-matches-list" id="tm-matches-list">
+            ${matches?.length
+              ? matches.map((m, i) => `
+                <div class="tm-match-item" data-index="${i}">
+                  <div class="tm-match-info">
+                    <span class="tm-match-name">${escapeHtml(m.tag.name)}</span>
+                    <span class="tm-match-type-badge tm-match-${m.match_type}">${m.match_type} (${m.score}%)</span>
+                    ${m.tag.category ? `<span class="tm-match-category">${escapeHtml(m.tag.category.name)}</span>` : ''}
+                  </div>
+                  <div class="tm-match-desc">${escapeHtml(m.tag.description || '')}</div>
+                  <div class="tm-match-aliases">Aliases: ${m.tag.aliases?.join(', ') || 'none'}</div>
+                  <button class="btn btn-success btn-sm tm-select-match">Select</button>
+                </div>
+              `).join('')
+              : '<div class="tm-no-matches">No matches found. Try searching manually above.</div>'
+            }
+          </div>
+        </div>
+        <div class="tm-modal-footer">
+          <button class="btn btn-secondary tm-cancel-btn">Close</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Event handlers
+    modal.querySelector('.tm-close-btn').addEventListener('click', () => modal.remove());
+    modal.querySelector('.tm-cancel-btn').addEventListener('click', () => modal.remove());
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.remove();
+    });
+
+    // Manual search
+    const searchInput = modal.querySelector('#tm-manual-search');
+    const searchBtn = modal.querySelector('#tm-manual-search-btn');
+
+    const doSearch = async () => {
+      const term = searchInput.value.trim();
+      if (!term) return;
+
+      searchBtn.disabled = true;
+      searchBtn.textContent = 'Searching...';
+
+      try {
+        const result = await callBackend('search', {
+          tag_name: term,
+          stashdb_tags: stashdbTags,
+        });
+        matchResults[tagId] = result.matches || [];
+
+        // Re-render matches list
+        const listEl = modal.querySelector('#tm-matches-list');
+        const newMatches = matchResults[tagId];
+        listEl.innerHTML = newMatches?.length
+          ? newMatches.map((m, i) => `
+            <div class="tm-match-item" data-index="${i}">
+              <div class="tm-match-info">
+                <span class="tm-match-name">${escapeHtml(m.tag.name)}</span>
+                <span class="tm-match-type-badge tm-match-${m.match_type}">${m.match_type} (${m.score}%)</span>
+                ${m.tag.category ? `<span class="tm-match-category">${escapeHtml(m.tag.category.name)}</span>` : ''}
+              </div>
+              <div class="tm-match-desc">${escapeHtml(m.tag.description || '')}</div>
+              <div class="tm-match-aliases">Aliases: ${m.tag.aliases?.join(', ') || 'none'}</div>
+              <button class="btn btn-success btn-sm tm-select-match">Select</button>
+            </div>
+          `).join('')
+          : '<div class="tm-no-matches">No matches found.</div>';
+
+        // Re-attach select handlers
+        attachSelectHandlers();
+      } catch (e) {
+        showStatus(`Search error: ${e.message}`, 'error');
+      } finally {
+        searchBtn.disabled = false;
+        searchBtn.textContent = 'Search';
+      }
+    };
+
+    searchBtn.addEventListener('click', doSearch);
+    searchInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') doSearch();
+    });
+
+    // Select match handlers
+    function attachSelectHandlers() {
+      modal.querySelectorAll('.tm-select-match').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const idx = parseInt(e.target.closest('.tm-match-item').dataset.index);
+          modal.remove();
+          showDiffDialog(tagId, container, idx);
+        });
+      });
+    }
+    attachSelectHandlers();
   }
 
   /**
