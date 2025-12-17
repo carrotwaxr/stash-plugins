@@ -3,6 +3,7 @@
 
   const PLUGIN_ID = "tagManager";
   const ROUTE_PATH = "/plugins/tag-manager";
+  const HIERARCHY_ROUTE_PATH = "/plugins/tag-hierarchy";
 
   // Default settings
   const DEFAULTS = {
@@ -141,6 +142,101 @@
 
     const data = await graphqlRequest(query);
     return data?.findTags?.tags || [];
+  }
+
+  /**
+   * Fetch all tags with hierarchy information (parents, children)
+   */
+  async function fetchAllTagsWithHierarchy() {
+    const query = `
+      query AllTagsWithHierarchy {
+        allTags {
+          id
+          name
+          image_path
+          scene_count
+          parent_count
+          child_count
+          parents {
+            id
+          }
+          children {
+            id
+          }
+        }
+      }
+    `;
+
+    const result = await graphqlRequest(query);
+    return result.allTags || [];
+  }
+
+  /**
+   * Build a tree structure from flat tag list
+   * Tags with multiple parents appear under each parent
+   * @param {Array} tags - Flat array of tags with parent/children info
+   * @returns {Array} - Array of root nodes (tags with no parents)
+   */
+  function buildTagTree(tags) {
+    // Create a map for quick lookup
+    const tagMap = new Map();
+    tags.forEach(tag => {
+      tagMap.set(tag.id, {
+        ...tag,
+        childNodes: []
+      });
+    });
+
+    // Find root tags (no parents) and build children arrays
+    const roots = [];
+
+    tags.forEach(tag => {
+      const node = tagMap.get(tag.id);
+
+      if (tag.parents.length === 0) {
+        // Root tag
+        roots.push(node);
+      } else {
+        // Add this tag as a child to each of its parents
+        tag.parents.forEach(parent => {
+          const parentNode = tagMap.get(parent.id);
+          if (parentNode) {
+            parentNode.childNodes.push(node);
+          }
+        });
+      }
+    });
+
+    // Sort roots and all children alphabetically by name
+    const sortByName = (a, b) => a.name.localeCompare(b.name);
+    roots.sort(sortByName);
+
+    function sortChildren(node) {
+      if (node.childNodes.length > 0) {
+        node.childNodes.sort(sortByName);
+        node.childNodes.forEach(sortChildren);
+      }
+    }
+    roots.forEach(sortChildren);
+
+    return roots;
+  }
+
+  /**
+   * Get stats from tag tree
+   */
+  function getTreeStats(tags) {
+    const totalTags = tags.length;
+    const rootTags = tags.filter(t => t.parents.length === 0).length;
+    const tagsWithChildren = tags.filter(t => t.child_count > 0).length;
+    const tagsWithParents = tags.filter(t => t.parent_count > 0).length;
+
+    return {
+      totalTags,
+      rootTags,
+      tagsWithChildren,
+      tagsWithParents
+    };
   }
 
   /**
@@ -959,6 +1055,7 @@
         if (!containerRef.current) return;
 
         console.debug("[tagManager] Initializing...");
+        document.title = "Tag Matcher | Stash";
         containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
 
         await loadSettings();
@@ -1013,11 +1110,219 @@
   }
 
   /**
+   * Tag Hierarchy page state
+   */
+  let hierarchyTags = [];
+  let hierarchyTree = [];
+  let hierarchyStats = {};
+  let showImages = true;
+  let expandedNodes = new Set();
+
+  /**
+   * Render a single tree node
+   */
+  function renderTreeNode(node, isRoot = false) {
+    const hasChildren = node.childNodes.length > 0;
+    const isExpanded = expandedNodes.has(node.id);
+
+    // Build scene/child count text
+    const metaParts = [];
+    if (node.scene_count > 0) {
+      metaParts.push(`${node.scene_count} scene${node.scene_count !== 1 ? 's' : ''}`);
+    }
+    if (node.child_count > 0) {
+      metaParts.push(`${node.child_count} sub-tag${node.child_count !== 1 ? 's' : ''}`);
+    }
+    const metaText = metaParts.length > 0 ? metaParts.join(', ') : '';
+
+    // Image HTML
+    const imageHtml = node.image_path
+      ? `<div class="th-image ${showImages ? '' : 'th-hidden'}">
+           <img src="${escapeHtml(node.image_path)}" alt="${escapeHtml(node.name)}" loading="lazy">
+         </div>`
+      : `<div class="th-image-placeholder ${showImages ? '' : 'th-hidden'}">
+           <span>?</span>
+         </div>`;
+
+    // Children HTML (recursive)
+    let childrenHtml = '';
+    if (hasChildren) {
+      const childNodes = node.childNodes.map(child => renderTreeNode(child, false)).join('');
+      childrenHtml = `<div class="th-children ${isExpanded ? 'th-expanded' : ''}" data-parent-id="${node.id}">${childNodes}</div>`;
+    }
+
+    // Toggle icon
+    const toggleIcon = hasChildren
+      ? (isExpanded ? '&#9660;' : '&#9654;')  // Down arrow / Right arrow
+      : '';
+
+    return `
+      <div class="th-node ${isRoot ? 'th-root' : ''}" data-tag-id="${node.id}">
+        <div class="th-node-content">
+          <span class="th-toggle ${hasChildren ? '' : 'th-leaf'}" data-tag-id="${node.id}">${toggleIcon}</span>
+          ${imageHtml}
+          <div class="th-info">
+            <a href="/tags/${node.id}" class="th-name">${escapeHtml(node.name)}</a>
+            ${metaText ? `<div class="th-meta">${metaText}</div>` : ''}
+          </div>
+        </div>
+        ${childrenHtml}
+      </div>
+    `;
+  }
+
+  /**
+   * Render the full hierarchy page
+   */
+  function renderHierarchyPage(container) {
+    const treeHtml = hierarchyTree.map(root => renderTreeNode(root, true)).join('');
+
+    container.innerHTML = `
+      <div class="tag-hierarchy">
+        <div class="tag-hierarchy-header">
+          <h2>Tag Hierarchy</h2>
+          <div class="tag-hierarchy-controls">
+            <button id="th-expand-all">Expand All</button>
+            <button id="th-collapse-all">Collapse All</button>
+            <label>
+              <input type="checkbox" id="th-show-images" ${showImages ? 'checked' : ''}>
+              Show images
+            </label>
+          </div>
+        </div>
+        <div class="th-stats">
+          <span class="stat"><strong>${hierarchyStats.totalTags}</strong> total tags</span>
+          <span class="stat"><strong>${hierarchyStats.rootTags}</strong> root tags</span>
+          <span class="stat"><strong>${hierarchyStats.tagsWithChildren}</strong> with sub-tags</span>
+          <span class="stat"><strong>${hierarchyStats.tagsWithParents}</strong> with parents</span>
+        </div>
+        <div class="th-tree">
+          ${treeHtml || '<div class="th-empty">No tags found</div>'}
+        </div>
+      </div>
+    `;
+
+    // Attach event handlers
+    attachHierarchyEventHandlers(container);
+  }
+
+  /**
+   * Attach event handlers for hierarchy page
+   */
+  function attachHierarchyEventHandlers(container) {
+    // Toggle expand/collapse on node click
+    container.querySelectorAll('.th-toggle').forEach(toggle => {
+      toggle.addEventListener('click', (e) => {
+        const tagId = e.target.dataset.tagId;
+        if (!tagId) return;
+
+        const childrenContainer = container.querySelector(`.th-children[data-parent-id="${tagId}"]`);
+        if (!childrenContainer) return;
+
+        if (expandedNodes.has(tagId)) {
+          expandedNodes.delete(tagId);
+          childrenContainer.classList.remove('th-expanded');
+          e.target.innerHTML = '&#9654;';  // Right arrow
+        } else {
+          expandedNodes.add(tagId);
+          childrenContainer.classList.add('th-expanded');
+          e.target.innerHTML = '&#9660;';  // Down arrow
+        }
+      });
+    });
+
+    // Expand All button
+    const expandAllBtn = container.querySelector('#th-expand-all');
+    if (expandAllBtn) {
+      expandAllBtn.addEventListener('click', () => {
+        container.querySelectorAll('.th-children').forEach(el => {
+          el.classList.add('th-expanded');
+          const parentId = el.dataset.parentId;
+          if (parentId) expandedNodes.add(parentId);
+        });
+        container.querySelectorAll('.th-toggle:not(.th-leaf)').forEach(el => {
+          el.innerHTML = '&#9660;';
+        });
+      });
+    }
+
+    // Collapse All button
+    const collapseAllBtn = container.querySelector('#th-collapse-all');
+    if (collapseAllBtn) {
+      collapseAllBtn.addEventListener('click', () => {
+        container.querySelectorAll('.th-children').forEach(el => {
+          el.classList.remove('th-expanded');
+        });
+        container.querySelectorAll('.th-toggle:not(.th-leaf)').forEach(el => {
+          el.innerHTML = '&#9654;';
+        });
+        expandedNodes.clear();
+      });
+    }
+
+    // Show images toggle
+    const showImagesCheckbox = container.querySelector('#th-show-images');
+    if (showImagesCheckbox) {
+      showImagesCheckbox.addEventListener('change', (e) => {
+        showImages = e.target.checked;
+        container.querySelectorAll('.th-image, .th-image-placeholder').forEach(el => {
+          el.classList.toggle('th-hidden', !showImages);
+        });
+      });
+    }
+  }
+
+  /**
+   * Tag Hierarchy page component
+   */
+  function TagHierarchyPage() {
+    const React = PluginApi.React;
+    const containerRef = React.useRef(null);
+
+    React.useEffect(() => {
+      async function init() {
+        if (!containerRef.current) return;
+
+        document.title = "Tag Hierarchy | Stash";
+        containerRef.current.innerHTML = '<div class="tag-hierarchy"><div class="th-loading">Loading tags...</div></div>';
+
+        try {
+          // Fetch all tags with hierarchy info
+          hierarchyTags = await fetchAllTagsWithHierarchy();
+          console.debug(`[tagManager] Loaded ${hierarchyTags.length} tags for hierarchy`);
+
+          // Build tree structure
+          hierarchyTree = buildTagTree(hierarchyTags);
+          hierarchyStats = getTreeStats(hierarchyTags);
+          console.debug(`[tagManager] Built tree with ${hierarchyTree.length} root nodes`);
+
+          // Reset expand state
+          expandedNodes.clear();
+
+          // Render the page
+          renderHierarchyPage(containerRef.current);
+        } catch (e) {
+          console.error("[tagManager] Failed to load tag hierarchy:", e);
+          containerRef.current.innerHTML = `<div class="tag-hierarchy"><div class="th-loading">Error loading tags: ${escapeHtml(e.message)}</div></div>`;
+        }
+      }
+
+      init();
+    }, []);
+
+    return React.createElement('div', {
+      ref: containerRef,
+      className: 'tag-hierarchy-container'
+    });
+  }
+
+  /**
    * Register the route
    */
   function registerRoute() {
     PluginApi.register.route(ROUTE_PATH, TagManagerPage);
-    console.log('[tagManager] Route registered:', ROUTE_PATH);
+    PluginApi.register.route(HIERARCHY_ROUTE_PATH, TagHierarchyPage);
+    console.log('[tagManager] Routes registered:', ROUTE_PATH, HIERARCHY_ROUTE_PATH);
   }
 
   /**
@@ -1045,15 +1350,37 @@
   }
 
   /**
-   * Inject Tag Manager button into Tags list page toolbar
+   * Create the Tag Hierarchy nav button SVG icon
+   * Uses a sitemap icon to represent hierarchy/tree view
    */
-  function injectTagManagerButton() {
+  function createHierarchyIcon() {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 576 512');
+    svg.setAttribute('class', 'svg-inline--fa fa-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    svg.style.width = '1em';
+    svg.style.height = '1em';
+
+    // FontAwesome "sitemap" icon path
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('fill', 'currentColor');
+    path.setAttribute('d', 'M208 80c0-26.5 21.5-48 48-48h64c26.5 0 48 21.5 48 48v64c0 26.5-21.5 48-48 48h-8v40H464c30.9 0 56 25.1 56 56v32h8c26.5 0 48 21.5 48 48v64c0 26.5-21.5 48-48 48h-64c-26.5 0-48-21.5-48-48v-64c0-26.5 21.5-48 48-48h8v-32c0-4.4-3.6-8-8-8H312v40h8c26.5 0 48 21.5 48 48v64c0 26.5-21.5 48-48 48h-64c-26.5 0-48-21.5-48-48v-64c0-26.5 21.5-48 48-48h8v-40H112c-4.4 0-8 3.6-8 8v32h8c26.5 0 48 21.5 48 48v64c0 26.5-21.5 48-48 48H48c-26.5 0-48-21.5-48-48v-64c0-26.5 21.5-48 48-48h8v-32c0-30.9 25.1-56 56-56h152v-40h-8c-26.5 0-48-21.5-48-48V80z');
+    svg.appendChild(path);
+
+    return svg;
+  }
+
+  /**
+   * Inject Tag Manager and Tag Hierarchy buttons into Tags list page toolbar
+   */
+  function injectNavButtons() {
     // Only run on Tags list page
     if (!window.location.pathname.endsWith('/tags')) {
       return;
     }
 
-    // Check if we already injected the button
+    // Check if we already injected the buttons
     if (document.querySelector('#tm-nav-button')) {
       return;
     }
@@ -1089,22 +1416,32 @@
       return;
     }
 
-    // Create our button
-    const btn = document.createElement('button');
-    btn.id = 'tm-nav-button';
-    btn.className = 'btn btn-secondary';
-    btn.title = 'Tag Manager';
-    btn.style.marginLeft = '0.5rem';
-    btn.appendChild(createTagManagerIcon());
-
-    // Add click handler to navigate to Tag Manager
-    btn.addEventListener('click', () => {
+    // Create Tag Manager button
+    const tmBtn = document.createElement('button');
+    tmBtn.id = 'tm-nav-button';
+    tmBtn.className = 'btn btn-secondary';
+    tmBtn.title = 'Tag Matcher';
+    tmBtn.style.marginLeft = '0.5rem';
+    tmBtn.appendChild(createTagManagerIcon());
+    tmBtn.addEventListener('click', () => {
       window.location.href = ROUTE_PATH;
     });
 
-    // Insert after the insertion point
-    insertionPoint.parentNode.insertBefore(btn, insertionPoint.nextSibling);
-    console.debug('[tagManager] Nav button injected on Tags page');
+    // Create Tag Hierarchy button
+    const thBtn = document.createElement('button');
+    thBtn.id = 'th-nav-button';
+    thBtn.className = 'btn btn-secondary';
+    thBtn.title = 'Tag Hierarchy';
+    thBtn.style.marginLeft = '0.25rem';
+    thBtn.appendChild(createHierarchyIcon());
+    thBtn.addEventListener('click', () => {
+      window.location.href = HIERARCHY_ROUTE_PATH;
+    });
+
+    // Insert both buttons after the insertion point
+    insertionPoint.parentNode.insertBefore(tmBtn, insertionPoint.nextSibling);
+    tmBtn.parentNode.insertBefore(thBtn, tmBtn.nextSibling);
+    console.debug('[tagManager] Nav buttons injected on Tags page');
   }
 
   /**
@@ -1112,7 +1449,7 @@
    */
   function setupNavButtonInjection() {
     // Try to inject immediately
-    injectTagManagerButton();
+    injectNavButtons();
 
     // Watch for URL changes (SPA navigation)
     let lastUrl = window.location.href;
@@ -1120,19 +1457,19 @@
       if (window.location.href !== lastUrl) {
         lastUrl = window.location.href;
         // Wait a bit for DOM to update after navigation
-        setTimeout(injectTagManagerButton, 100);
-        setTimeout(injectTagManagerButton, 500);
-        setTimeout(injectTagManagerButton, 1000);
+        setTimeout(injectNavButtons, 100);
+        setTimeout(injectNavButtons, 500);
+        setTimeout(injectNavButtons, 1000);
       }
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
 
     // Also try on initial load with delays (for refresh on Tags page)
-    setTimeout(injectTagManagerButton, 100);
-    setTimeout(injectTagManagerButton, 500);
-    setTimeout(injectTagManagerButton, 1000);
-    setTimeout(injectTagManagerButton, 2000);
+    setTimeout(injectNavButtons, 100);
+    setTimeout(injectNavButtons, 500);
+    setTimeout(injectNavButtons, 1000);
+    setTimeout(injectNavButtons, 2000);
   }
 
   // Initialize
