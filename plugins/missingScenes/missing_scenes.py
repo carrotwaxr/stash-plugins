@@ -797,6 +797,73 @@ def get_or_build_cache(endpoint: str) -> set[str]:
     return stash_ids
 
 
+def count_local_scenes_for_entity(endpoint: str, entity_type: str, entity_id: str) -> int:
+    """Count local scenes that match an entity AND have a stash_id for the endpoint.
+
+    Args:
+        endpoint: StashDB endpoint URL
+        entity_type: "performer", "studio", or "tag"
+        entity_id: Local Stash ID of the entity
+
+    Returns:
+        Count of matching scenes with stash_ids for the endpoint
+    """
+    # Build the scene filter based on entity type
+    if entity_type == "performer":
+        entity_filter = {
+            "performers": {
+                "value": [entity_id],
+                "modifier": "INCLUDES"
+            }
+        }
+    elif entity_type == "studio":
+        entity_filter = {
+            "studios": {
+                "value": [entity_id],
+                "modifier": "INCLUDES",
+                "depth": -1  # Include child studios
+            }
+        }
+    elif entity_type == "tag":
+        entity_filter = {
+            "tags": {
+                "value": [entity_id],
+                "modifier": "INCLUDES",
+                "depth": -1  # Include child tags
+            }
+        }
+    else:
+        log.LogWarning(f"Unknown entity type: {entity_type}")
+        return 0
+
+    # Combine with stash_id filter
+    scene_filter = {
+        **entity_filter,
+        "stash_id_endpoint": {
+            "endpoint": endpoint,
+            "modifier": "NOT_NULL"
+        }
+    }
+
+    # Query just the count (no need to fetch all scenes)
+    result = stash_graphql("""
+        query FindScenes($scene_filter: SceneFilterType) {
+            findScenes(scene_filter: $scene_filter) {
+                count
+            }
+        }
+    """, {
+        "scene_filter": scene_filter
+    })
+
+    if result and "findScenes" in result:
+        count = result["findScenes"].get("count", 0)
+        log.LogDebug(f"Local scenes for {entity_type} {entity_id} with {endpoint}: {count}")
+        return count
+
+    return 0
+
+
 # ============================================================================
 # Fetch Until Full Pagination
 # ============================================================================
@@ -1182,9 +1249,11 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
                      f"Please use the Tagger to link this {entity_type} first."
         }
 
-    # Get or build local stash_id cache
+    # Get or build local stash_id cache (for filtering)
     local_ids = get_or_build_cache(stashdb_url)
-    total_local = len(local_ids)
+
+    # Count local scenes matching this specific entity (for accurate "You Have" display)
+    total_local = count_local_scenes_for_entity(stashdb_url, entity_type, entity_id)
 
     # Determine starting position
     if cursor_state:
