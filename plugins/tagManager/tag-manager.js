@@ -1089,15 +1089,15 @@
   }
 
   /**
-   * Inject Tag Manager button into Tags list page toolbar
+   * Inject Tag Manager and Tag Hierarchy buttons into Tags list page toolbar
    */
-  function injectTagManagerButton() {
+  function injectNavButtons() {
     // Only run on Tags list page
     if (!window.location.pathname.endsWith('/tags')) {
       return;
     }
 
-    // Check if we already injected the button
+    // Check if we already injected the buttons
     if (document.querySelector('#tm-nav-button')) {
       return;
     }
@@ -1133,22 +1133,32 @@
       return;
     }
 
-    // Create our button
-    const btn = document.createElement('button');
-    btn.id = 'tm-nav-button';
-    btn.className = 'btn btn-secondary';
-    btn.title = 'Tag Manager';
-    btn.style.marginLeft = '0.5rem';
-    btn.appendChild(createTagManagerIcon());
-
-    // Add click handler to navigate to Tag Manager
-    btn.addEventListener('click', () => {
+    // Create Tag Manager button
+    const tmBtn = document.createElement('button');
+    tmBtn.id = 'tm-nav-button';
+    tmBtn.className = 'btn btn-secondary';
+    tmBtn.title = 'Tag Matcher';
+    tmBtn.style.marginLeft = '0.5rem';
+    tmBtn.appendChild(createTagManagerIcon());
+    tmBtn.addEventListener('click', () => {
       window.location.href = ROUTE_PATH;
     });
 
-    // Insert after the insertion point
-    insertionPoint.parentNode.insertBefore(btn, insertionPoint.nextSibling);
-    console.debug('[tagManager] Nav button injected on Tags page');
+    // Create Tag Hierarchy button
+    const thBtn = document.createElement('button');
+    thBtn.id = 'th-nav-button';
+    thBtn.className = 'btn btn-secondary';
+    thBtn.title = 'Tag Hierarchy';
+    thBtn.style.marginLeft = '0.25rem';
+    thBtn.appendChild(createHierarchyIcon());
+    thBtn.addEventListener('click', () => {
+      window.location.href = HIERARCHY_ROUTE_PATH;
+    });
+
+    // Insert both buttons after the insertion point
+    insertionPoint.parentNode.insertBefore(tmBtn, insertionPoint.nextSibling);
+    tmBtn.parentNode.insertBefore(thBtn, tmBtn.nextSibling);
+    console.debug('[tagManager] Nav buttons injected on Tags page');
   }
 
   /**
@@ -1156,7 +1166,7 @@
    */
   function setupNavButtonInjection() {
     // Try to inject immediately
-    injectTagManagerButton();
+    injectNavButtons();
 
     // Watch for URL changes (SPA navigation)
     let lastUrl = window.location.href;
@@ -1164,19 +1174,19 @@
       if (window.location.href !== lastUrl) {
         lastUrl = window.location.href;
         // Wait a bit for DOM to update after navigation
-        setTimeout(injectTagManagerButton, 100);
-        setTimeout(injectTagManagerButton, 500);
-        setTimeout(injectTagManagerButton, 1000);
+        setTimeout(injectNavButtons, 100);
+        setTimeout(injectNavButtons, 500);
+        setTimeout(injectNavButtons, 1000);
       }
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
 
     // Also try on initial load with delays (for refresh on Tags page)
-    setTimeout(injectTagManagerButton, 100);
-    setTimeout(injectTagManagerButton, 500);
-    setTimeout(injectTagManagerButton, 1000);
-    setTimeout(injectTagManagerButton, 2000);
+    setTimeout(injectNavButtons, 100);
+    setTimeout(injectNavButtons, 500);
+    setTimeout(injectNavButtons, 1000);
+    setTimeout(injectNavButtons, 2000);
   }
 
   // Initialize
