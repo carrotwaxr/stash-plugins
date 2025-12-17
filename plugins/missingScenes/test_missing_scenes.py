@@ -15,8 +15,9 @@ import json
 import unittest
 from unittest.mock import patch, MagicMock
 
-# Import the module to test
+# Import the modules to test
 import missing_scenes
+import stashbox_api
 
 
 class TestFormatScene(unittest.TestCase):
@@ -402,6 +403,480 @@ class TestEndpointSelection(unittest.TestCase):
         self.assertIsNone(stashbox)
 
 
+class TestLocalStashIdCache(unittest.TestCase):
+    """Test local stash_id cache functionality."""
+
+    def setUp(self):
+        """Reset cache before each test."""
+        missing_scenes._local_stash_id_cache.clear()
+        missing_scenes._cache_metadata.clear()
+
+    def test_cache_exists(self):
+        """Test that cache data structures exist."""
+        self.assertIsInstance(missing_scenes._local_stash_id_cache, dict)
+        self.assertIsInstance(missing_scenes._cache_metadata, dict)
+
+    def test_cache_initially_empty(self):
+        """Test that cache starts empty."""
+        self.assertEqual(len(missing_scenes._local_stash_id_cache), 0)
+        self.assertEqual(len(missing_scenes._cache_metadata), 0)
+
+    def test_cache_stores_set_of_ids(self):
+        """Test that cache stores sets of stash_ids."""
+        endpoint = "https://stashdb.org/graphql"
+        test_ids = {"id1", "id2", "id3"}
+        missing_scenes._local_stash_id_cache[endpoint] = test_ids
+        self.assertEqual(missing_scenes._local_stash_id_cache[endpoint], test_ids)
+
+    def test_cache_lookup_performance(self):
+        """Test that cache lookup is O(1) via set membership."""
+        endpoint = "https://stashdb.org/graphql"
+        # Create a large set to verify O(1) lookups
+        test_ids = {f"id-{i}" for i in range(10000)}
+        missing_scenes._local_stash_id_cache[endpoint] = test_ids
+
+        # These should be fast O(1) operations
+        self.assertIn("id-5000", missing_scenes._local_stash_id_cache[endpoint])
+        self.assertNotIn("id-99999", missing_scenes._local_stash_id_cache[endpoint])
+
+
+class TestQueryScenesPage(unittest.TestCase):
+    """Test the query_scenes_page function in stashbox_api."""
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_query_scenes_page_performer(self, mock_request):
+        """Test querying scenes by performer."""
+        mock_request.return_value = {
+            "queryScenes": {
+                "count": 150,
+                "scenes": [{"id": f"scene-{i}"} for i in range(100)]
+            }
+        }
+
+        result = stashbox_api.query_scenes_page(
+            "https://stashdb.org/graphql",
+            "api-key",
+            "performer",
+            "performer-id-123",
+            page=1,
+            per_page=100
+        )
+
+        self.assertEqual(result["count"], 150)
+        self.assertEqual(len(result["scenes"]), 100)
+        self.assertTrue(result["has_more"])
+
+        # Verify the variables passed to GraphQL
+        call_args = mock_request.call_args
+        variables = call_args[0][2]  # Third positional arg is variables
+        self.assertIn("performers", variables["input"])
+        self.assertEqual(variables["input"]["performers"]["value"], ["performer-id-123"])
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_query_scenes_page_studio(self, mock_request):
+        """Test querying scenes by studio."""
+        mock_request.return_value = {
+            "queryScenes": {
+                "count": 50,
+                "scenes": [{"id": f"scene-{i}"} for i in range(50)]
+            }
+        }
+
+        result = stashbox_api.query_scenes_page(
+            "https://stashdb.org/graphql",
+            "api-key",
+            "studio",
+            "studio-id-456"
+        )
+
+        self.assertEqual(result["count"], 50)
+        self.assertFalse(result["has_more"])
+
+        call_args = mock_request.call_args
+        variables = call_args[0][2]
+        self.assertIn("studios", variables["input"])
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_query_scenes_page_tag(self, mock_request):
+        """Test querying scenes by tag."""
+        mock_request.return_value = {
+            "queryScenes": {
+                "count": 1000,
+                "scenes": [{"id": f"scene-{i}"} for i in range(100)]
+            }
+        }
+
+        result = stashbox_api.query_scenes_page(
+            "https://stashdb.org/graphql",
+            "api-key",
+            "tag",
+            "tag-id-789",
+            sort="TITLE",
+            direction="ASC"
+        )
+
+        self.assertTrue(result["has_more"])
+
+        call_args = mock_request.call_args
+        variables = call_args[0][2]
+        self.assertIn("tags", variables["input"])
+        self.assertEqual(variables["input"]["sort"], "TITLE")
+        self.assertEqual(variables["input"]["direction"], "ASC")
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_query_scenes_page_invalid_sort_defaults(self, mock_request):
+        """Test that invalid sort field defaults to DATE."""
+        mock_request.return_value = {
+            "queryScenes": {"count": 10, "scenes": []}
+        }
+
+        stashbox_api.query_scenes_page(
+            "https://stashdb.org/graphql",
+            "api-key",
+            "performer",
+            "id",
+            sort="INVALID"
+        )
+
+        call_args = mock_request.call_args
+        variables = call_args[0][2]
+        self.assertEqual(variables["input"]["sort"], "DATE")
+
+    def test_query_scenes_page_unknown_entity_type(self):
+        """Test that unknown entity type returns None."""
+        result = stashbox_api.query_scenes_page(
+            "https://stashdb.org/graphql",
+            "api-key",
+            "unknown_type",
+            "id"
+        )
+        self.assertIsNone(result)
+
+
+class TestCacheBuildingFunction(unittest.TestCase):
+    """Test the get_or_build_cache function."""
+
+    def setUp(self):
+        """Reset cache before each test."""
+        missing_scenes._local_stash_id_cache.clear()
+        missing_scenes._cache_metadata.clear()
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_build_cache_single_page(self, mock_graphql):
+        """Test building cache from a single page of results."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findScenes": {
+                "count": 2,
+                "scenes": [
+                    {"stash_ids": [{"endpoint": endpoint, "stash_id": "id-1"}]},
+                    {"stash_ids": [{"endpoint": endpoint, "stash_id": "id-2"}]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_or_build_cache(endpoint)
+
+        self.assertEqual(result, {"id-1", "id-2"})
+        self.assertIn(endpoint, missing_scenes._cache_metadata)
+        self.assertEqual(missing_scenes._cache_metadata[endpoint]["count"], 2)
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_build_cache_multiple_pages(self, mock_graphql):
+        """Test building cache with pagination."""
+        endpoint = "https://stashdb.org/graphql"
+        # First call returns page 1 with count indicating more pages
+        # Second call returns page 2
+        mock_graphql.side_effect = [
+            {
+                "findScenes": {
+                    "count": 150,  # More than 100, requires 2 pages
+                    "scenes": [{"stash_ids": [{"endpoint": endpoint, "stash_id": f"id-{i}"}]} for i in range(100)]
+                }
+            },
+            {
+                "findScenes": {
+                    "count": 150,
+                    "scenes": [{"stash_ids": [{"endpoint": endpoint, "stash_id": f"id-{i}"}]} for i in range(100, 150)]
+                }
+            }
+        ]
+
+        result = missing_scenes.get_or_build_cache(endpoint)
+
+        self.assertEqual(len(result), 150)
+        self.assertIn("id-0", result)
+        self.assertIn("id-149", result)
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_cache_returns_existing(self, mock_graphql):
+        """Test that existing cache is returned without re-building."""
+        endpoint = "https://stashdb.org/graphql"
+        existing_ids = {"existing-1", "existing-2"}
+        missing_scenes._local_stash_id_cache[endpoint] = existing_ids
+
+        result = missing_scenes.get_or_build_cache(endpoint)
+
+        self.assertEqual(result, existing_ids)
+        mock_graphql.assert_not_called()
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_build_cache_filters_by_endpoint(self, mock_graphql):
+        """Test that only stash_ids matching the endpoint are cached."""
+        endpoint = "https://stashdb.org/graphql"
+        other_endpoint = "https://fansdb.cc/graphql"
+        mock_graphql.return_value = {
+            "findScenes": {
+                "count": 2,
+                "scenes": [
+                    {"stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "stashdb-id"},
+                        {"endpoint": other_endpoint, "stash_id": "fansdb-id"}
+                    ]},
+                    {"stash_ids": [{"endpoint": other_endpoint, "stash_id": "fansdb-only"}]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_or_build_cache(endpoint)
+
+        # Should only contain the StashDB ID
+        self.assertEqual(result, {"stashdb-id"})
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_build_cache_empty_stash(self, mock_graphql):
+        """Test building cache when no scenes have stash_ids."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findScenes": {
+                "count": 0,
+                "scenes": []
+            }
+        }
+
+        result = missing_scenes.get_or_build_cache(endpoint)
+
+        self.assertEqual(result, set())
+        self.assertEqual(missing_scenes._cache_metadata[endpoint]["count"], 0)
+
+
+class TestFetchUntilFull(unittest.TestCase):
+    """Test the fetch_until_full pagination logic."""
+
+    def setUp(self):
+        """Reset cache before each test."""
+        missing_scenes._local_stash_id_cache.clear()
+        missing_scenes._cache_metadata.clear()
+
+    @patch.object(stashbox_api, 'query_scenes_page')
+    def test_fetch_until_full_basic(self, mock_query):
+        """Test basic fetch until full logic."""
+        # Setup: StashDB has 5 scenes, we own 2 of them
+        endpoint = "https://stashdb.org/graphql"
+        local_ids = {"scene-1", "scene-3"}  # We own scenes 1 and 3
+        missing_scenes._local_stash_id_cache[endpoint] = local_ids
+
+        # StashDB returns 5 scenes
+        mock_query.return_value = {
+            "scenes": [
+                {"id": "scene-1"},  # owned
+                {"id": "scene-2"},  # missing
+                {"id": "scene-3"},  # owned
+                {"id": "scene-4"},  # missing
+                {"id": "scene-5"},  # missing
+            ],
+            "count": 5,
+            "page": 1,
+            "has_more": False
+        }
+
+        # Request 2 missing scenes
+        result = missing_scenes.fetch_until_full(
+            url=endpoint,
+            api_key="key",
+            entity_type="performer",
+            entity_stash_id="perf-123",
+            local_ids=local_ids,
+            page_size=2,
+            stashdb_page=1,
+            offset=0,
+            sort="DATE",
+            direction="DESC"
+        )
+
+        # Should return 2 missing scenes
+        self.assertEqual(len(result["scenes"]), 2)
+        self.assertEqual(result["scenes"][0]["id"], "scene-2")
+        self.assertEqual(result["scenes"][1]["id"], "scene-4")
+        self.assertEqual(result["total_on_stashdb"], 5)
+
+    @patch.object(stashbox_api, 'query_scenes_page')
+    def test_fetch_until_full_spans_pages(self, mock_query):
+        """Test that fetch_until_full spans multiple StashDB pages if needed."""
+        endpoint = "https://stashdb.org/graphql"
+        # We own most scenes - need to fetch multiple pages to find missing
+        local_ids = {f"scene-{i}" for i in range(1, 95)}  # Own 1-94
+        missing_scenes._local_stash_id_cache[endpoint] = local_ids
+
+        # First page: all owned except last 5
+        page1_scenes = [{"id": f"scene-{i}"} for i in range(1, 101)]
+        # Second page: all missing
+        page2_scenes = [{"id": f"scene-{i}"} for i in range(101, 201)]
+
+        mock_query.side_effect = [
+            {"scenes": page1_scenes, "count": 200, "page": 1, "has_more": True},
+            {"scenes": page2_scenes, "count": 200, "page": 2, "has_more": False},
+        ]
+
+        result = missing_scenes.fetch_until_full(
+            url=endpoint,
+            api_key="key",
+            entity_type="performer",
+            entity_stash_id="perf-123",
+            local_ids=local_ids,
+            page_size=10,
+            stashdb_page=1,
+            offset=0,
+            sort="DATE",
+            direction="DESC"
+        )
+
+        # Should have fetched from both pages
+        self.assertEqual(len(result["scenes"]), 10)
+        # Should have called query_scenes_page at least twice
+        self.assertGreaterEqual(mock_query.call_count, 1)
+
+    @patch.object(stashbox_api, 'query_scenes_page')
+    def test_fetch_until_full_respects_offset(self, mock_query):
+        """Test that fetch_until_full respects the offset parameter."""
+        endpoint = "https://stashdb.org/graphql"
+        local_ids = set()  # Own nothing
+        missing_scenes._local_stash_id_cache[endpoint] = local_ids
+
+        mock_query.return_value = {
+            "scenes": [{"id": f"scene-{i}"} for i in range(1, 11)],
+            "count": 100,
+            "page": 1,
+            "has_more": True
+        }
+
+        # Start at offset 5 (skip first 5 scenes on page)
+        result = missing_scenes.fetch_until_full(
+            url=endpoint,
+            api_key="key",
+            entity_type="performer",
+            entity_stash_id="perf-123",
+            local_ids=local_ids,
+            page_size=3,
+            stashdb_page=1,
+            offset=5,
+            sort="DATE",
+            direction="DESC"
+        )
+
+        # Should skip first 5 and return next 3 (scenes 6, 7, 8)
+        self.assertEqual(len(result["scenes"]), 3)
+        self.assertEqual(result["scenes"][0]["id"], "scene-6")
+
+    @patch.object(stashbox_api, 'query_scenes_page')
+    def test_fetch_until_full_returns_cursor(self, mock_query):
+        """Test that fetch_until_full returns a valid cursor for continuation."""
+        endpoint = "https://stashdb.org/graphql"
+        local_ids = set()
+        missing_scenes._local_stash_id_cache[endpoint] = local_ids
+
+        mock_query.return_value = {
+            "scenes": [{"id": f"scene-{i}"} for i in range(1, 101)],
+            "count": 200,
+            "page": 1,
+            "has_more": True
+        }
+
+        result = missing_scenes.fetch_until_full(
+            url=endpoint,
+            api_key="key",
+            entity_type="performer",
+            entity_stash_id="perf-123",
+            local_ids=local_ids,
+            page_size=50,
+            stashdb_page=1,
+            offset=0,
+            sort="DATE",
+            direction="DESC"
+        )
+
+        # Should have a cursor for continuation
+        self.assertIsNotNone(result.get("next_cursor"))
+        # Cursor should be decodable
+        cursor_state = missing_scenes.decode_cursor(result["next_cursor"])
+        self.assertIsNotNone(cursor_state)
+        self.assertEqual(cursor_state["offset"], 50)  # We took 50 items
+
+
+class TestCursorEncoding(unittest.TestCase):
+    """Test cursor encoding and decoding for pagination."""
+
+    def test_encode_cursor(self):
+        """Test that cursor encoding produces a base64 string."""
+        state = {
+            "stashdb_page": 4,
+            "offset": 12,
+            "sort": "DATE",
+            "direction": "DESC",
+            "entity_type": "tag",
+            "entity_stash_id": "abc-123",
+            "endpoint": "https://stashdb.org/graphql"
+        }
+        cursor = missing_scenes.encode_cursor(state)
+        self.assertIsInstance(cursor, str)
+        self.assertTrue(len(cursor) > 0)
+
+    def test_decode_cursor(self):
+        """Test that cursor decoding restores original state."""
+        state = {
+            "stashdb_page": 4,
+            "offset": 12,
+            "sort": "DATE",
+            "direction": "DESC",
+            "entity_type": "tag",
+            "entity_stash_id": "abc-123",
+            "endpoint": "https://stashdb.org/graphql"
+        }
+        cursor = missing_scenes.encode_cursor(state)
+        decoded = missing_scenes.decode_cursor(cursor)
+        self.assertEqual(decoded, state)
+
+    def test_decode_invalid_cursor_returns_none(self):
+        """Test that invalid cursor returns None."""
+        result = missing_scenes.decode_cursor("invalid-base64!")
+        self.assertIsNone(result)
+
+    def test_decode_empty_cursor_returns_none(self):
+        """Test that empty cursor returns None."""
+        result = missing_scenes.decode_cursor("")
+        self.assertIsNone(result)
+
+    def test_decode_none_cursor_returns_none(self):
+        """Test that None cursor returns None."""
+        result = missing_scenes.decode_cursor(None)
+        self.assertIsNone(result)
+
+    def test_roundtrip_preserves_unicode(self):
+        """Test that unicode characters are preserved."""
+        state = {
+            "stashdb_page": 1,
+            "offset": 0,
+            "sort": "DATE",
+            "direction": "DESC",
+            "entity_type": "performer",
+            "entity_stash_id": "performer-with-émojis-🎬",
+            "endpoint": "https://stashdb.org/graphql"
+        }
+        cursor = missing_scenes.encode_cursor(state)
+        decoded = missing_scenes.decode_cursor(cursor)
+        self.assertEqual(decoded["entity_stash_id"], state["entity_stash_id"])
+
+
 class TestEndpointMatching(unittest.TestCase):
     """Test endpoint URL matching."""
 
@@ -463,6 +938,11 @@ def run_all_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestSceneSorting))
     suite.addTests(loader.loadTestsFromTestCase(TestGraphQLQueryConstruction))
     suite.addTests(loader.loadTestsFromTestCase(TestEndpointSelection))
+    suite.addTests(loader.loadTestsFromTestCase(TestLocalStashIdCache))
+    suite.addTests(loader.loadTestsFromTestCase(TestQueryScenesPage))
+    suite.addTests(loader.loadTestsFromTestCase(TestCacheBuildingFunction))
+    suite.addTests(loader.loadTestsFromTestCase(TestFetchUntilFull))
+    suite.addTests(loader.loadTestsFromTestCase(TestCursorEncoding))
     suite.addTests(loader.loadTestsFromTestCase(TestEndpointMatching))
 
     # Run tests

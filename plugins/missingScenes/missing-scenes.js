@@ -17,6 +17,15 @@
   let availableEndpoints = []; // [{endpoint, name, stash_id}]
   let selectedEndpoint = null;
 
+  // Pagination state
+  let currentCursor = null;
+  let hasMore = true;
+  let isComplete = false;
+  let totalOnStashdb = 0;
+  let totalLocal = 0;
+  let sortField = "DATE";
+  let sortDirection = "DESC";
+
   /**
    * Get the GraphQL endpoint URL
    */
@@ -92,16 +101,22 @@
   }
 
   /**
-   * Find missing scenes for the current entity
+   * Find missing scenes for the current entity (paginated)
    */
-  async function findMissingScenes(entityType, entityId, endpoint = null) {
+  async function findMissingScenes(entityType, entityId, endpoint = null, options = {}) {
     const args = {
       operation: "find_missing",
       entity_type: entityType,
       entity_id: entityId,
+      page_size: options.pageSize || 50,
+      sort: options.sort || "DATE",
+      direction: options.direction || "DESC",
     };
     if (endpoint) {
       args.endpoint = endpoint;
+    }
+    if (options.cursor) {
+      args.cursor = options.cursor;
     }
     return runPluginOperation(args);
   }
@@ -198,6 +213,24 @@
     stats.className = "ms-stats-bar";
     stats.id = "ms-stats";
 
+    // Sort controls
+    const sortControls = document.createElement("div");
+    sortControls.className = "ms-sort-controls";
+    sortControls.id = "ms-sort-controls";
+    sortControls.innerHTML = `
+      <label for="ms-sort-field">Sort by:</label>
+      <select id="ms-sort-field" class="ms-sort-select">
+        <option value="DATE">Release Date</option>
+        <option value="TITLE">Title</option>
+        <option value="CREATED_AT">Added to StashDB</option>
+        <option value="UPDATED_AT">Last Updated</option>
+      </select>
+      <select id="ms-sort-direction" class="ms-sort-select">
+        <option value="DESC">Newest First</option>
+        <option value="ASC">Oldest First</option>
+      </select>
+    `;
+
     // Body (results)
     const body = document.createElement("div");
     body.className = "ms-modal-body";
@@ -210,6 +243,7 @@
     footer.innerHTML = `
       <div class="ms-status" id="ms-status"></div>
       <div class="ms-footer-actions">
+        <button class="ms-btn ms-btn-secondary" id="ms-load-more-btn" style="display: none;">Load More</button>
         <button class="ms-btn" id="ms-add-all-btn" style="display: none;">Add All to Whisparr</button>
       </div>
     `;
@@ -217,12 +251,19 @@
     // Assemble modal
     modal.appendChild(header);
     modal.appendChild(stats);
+    modal.appendChild(sortControls);
     modal.appendChild(body);
     modal.appendChild(footer);
     backdrop.appendChild(modal);
     document.body.appendChild(backdrop);
 
     modalRoot = backdrop;
+
+    // Sort control event handlers
+    const sortFieldSelect = sortControls.querySelector("#ms-sort-field");
+    const sortDirSelect = sortControls.querySelector("#ms-sort-direction");
+    sortFieldSelect.onchange = handleSortChange;
+    sortDirSelect.onchange = handleSortChange;
 
     // Keyboard handler for escape
     const keyHandler = (e) => {
@@ -234,6 +275,20 @@
     backdrop._keyHandler = keyHandler;
 
     return modal;
+  }
+
+  /**
+   * Handle sort control changes
+   */
+  function handleSortChange() {
+    const sortFieldEl = document.getElementById("ms-sort-field");
+    const sortDirEl = document.getElementById("ms-sort-direction");
+    if (sortFieldEl && sortDirEl) {
+      sortField = sortFieldEl.value;
+      sortDirection = sortDirEl.value;
+      // Reset pagination and re-search
+      performSearch(true);
+    }
   }
 
   /**
@@ -289,7 +344,7 @@
   }
 
   /**
-   * Update the stats bar
+   * Update the stats bar (supports both legacy and paginated responses)
    */
   function updateStats(data) {
     const statsEl = document.getElementById("ms-stats");
@@ -310,6 +365,24 @@
         entityLabel = "Entity";
     }
 
+    // Handle both legacy (missing_count) and paginated (missing_count_estimate/loaded) responses
+    let missingDisplay;
+    if (data.is_complete !== undefined) {
+      // Paginated response
+      const estimate = data.missing_count_estimate;
+      const loaded = missingScenes.length;
+      if (data.is_complete) {
+        missingDisplay = `${loaded}`;
+      } else if (estimate !== null) {
+        missingDisplay = `~${estimate} (${loaded} loaded)`;
+      } else {
+        missingDisplay = `${loaded} loaded`;
+      }
+    } else {
+      // Legacy response
+      missingDisplay = `${data.missing_count || 0}`;
+    }
+
     statsEl.innerHTML = `
       <div class="ms-stat">
         <span class="ms-stat-label">${entityLabel}:</span>
@@ -325,9 +398,13 @@
       </div>
       <div class="ms-stat ms-stat-highlight">
         <span class="ms-stat-label">Missing:</span>
-        <span class="ms-stat-value">${data.missing_count || 0}</span>
+        <span class="ms-stat-value">${missingDisplay}</span>
       </div>
     `;
+
+    // Update pagination state
+    totalOnStashdb = data.total_on_stashdb || 0;
+    totalLocal = data.total_local || 0;
   }
 
   /**
@@ -344,6 +421,7 @@
           <div>You have all available scenes!</div>
         </div>
       `;
+      updateLoadMoreButton();
       return;
     }
 
@@ -369,6 +447,34 @@
         addAllBtn.onclick = () => handleAddAll(notInWhisparr);
       }
     }
+
+    updateLoadMoreButton();
+  }
+
+  /**
+   * Update the Load More button visibility and text
+   */
+  function updateLoadMoreButton() {
+    const loadMoreBtn = document.getElementById("ms-load-more-btn");
+    if (!loadMoreBtn) return;
+
+    if (hasMore && !isComplete && missingScenes.length > 0) {
+      loadMoreBtn.style.display = "inline-block";
+      const estimate = totalOnStashdb - totalLocal;
+      loadMoreBtn.textContent = `Load More (${missingScenes.length} of ~${estimate})`;
+      loadMoreBtn.onclick = handleLoadMore;
+      loadMoreBtn.disabled = isLoading;
+    } else {
+      loadMoreBtn.style.display = "none";
+    }
+  }
+
+  /**
+   * Handle Load More button click
+   */
+  async function handleLoadMore() {
+    if (isLoading || !hasMore) return;
+    await performSearch(false); // false = don't reset, load more
   }
 
   /**
@@ -743,24 +849,50 @@
   }
 
   /**
-   * Perform the actual search (called by handleSearch and endpoint selector)
+   * Perform the actual search (called by handleSearch, endpoint selector, and Load More)
+   * @param {boolean} reset - If true, reset pagination state for new search
    */
-  async function performSearch() {
-    showLoading();
-    setStatus("Searching...", "loading");
+  async function performSearch(reset = true) {
+    if (reset) {
+      // Reset pagination state for new search
+      currentCursor = null;
+      hasMore = true;
+      isComplete = false;
+      missingScenes = [];
+      showLoading();
+    }
+
+    isLoading = true;
+    setStatus(reset ? "Searching..." : "Loading more...", "loading");
 
     try {
-      const result = await findMissingScenes(currentEntityType, currentEntityId, selectedEndpoint);
+      const result = await findMissingScenes(currentEntityType, currentEntityId, selectedEndpoint, {
+        pageSize: 50,
+        cursor: currentCursor,
+        sort: sortField,
+        direction: sortDirection,
+      });
 
-      missingScenes = result.missing_scenes || [];
+      // Append new scenes to existing list
+      const newScenes = result.missing_scenes || [];
+      missingScenes = [...missingScenes, ...newScenes];
+
       whisparrConfigured = result.whisparr_configured || false;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
+
+      // Update pagination state
+      currentCursor = result.cursor;
+      hasMore = result.has_more || false;
+      isComplete = result.is_complete || false;
 
       updateStats(result);
       renderResults();
 
       if (missingScenes.length > 0) {
-        setStatus(`Found ${missingScenes.length} missing scenes`, "success");
+        const statusText = isComplete
+          ? `Found ${missingScenes.length} missing scenes`
+          : `Loaded ${missingScenes.length} missing scenes`;
+        setStatus(statusText, "success");
       } else {
         setStatus("You have all available scenes!", "success");
       }
@@ -770,6 +902,7 @@
       setStatus(error.message || "Search failed", "error");
     } finally {
       isLoading = false;
+      updateLoadMoreButton();
     }
   }
 

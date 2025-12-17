@@ -671,3 +671,116 @@ def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None
 
     log.LogInfo(f"StashDB: Found {len(scenes)} scenes for {len(performer_ids)} performers")
     return scenes
+
+
+# ============================================================================
+# Paginated Single-Page Query for "Fetch Until Full" Pagination
+# ============================================================================
+
+def query_scenes_page(url, api_key, entity_type, entity_stash_id, page=1,
+                      per_page=100, sort="DATE", direction="DESC",
+                      plugin_settings=None):
+    """
+    Fetch a single page of scenes from StashDB for pagination.
+
+    Args:
+        url: StashDB GraphQL endpoint URL
+        api_key: API key for authentication
+        entity_type: "performer", "studio", or "tag"
+        entity_stash_id: StashDB ID of the entity
+        page: Page number (1-indexed)
+        per_page: Number of results per page
+        sort: Sort field - "DATE", "TITLE", "CREATED_AT", "UPDATED_AT"
+        direction: Sort direction - "ASC" or "DESC"
+        plugin_settings: Plugin configuration
+
+    Returns:
+        dict with:
+            - scenes: list of scene objects
+            - count: total scene count on StashDB
+            - page: current page number
+            - has_more: whether more pages exist
+        Returns None on error.
+    """
+    # Validate sort field
+    valid_sorts = {"DATE", "TITLE", "CREATED_AT", "UPDATED_AT"}
+    if sort not in valid_sorts:
+        log.LogWarning(f"Invalid sort field '{sort}', using DATE")
+        sort = "DATE"
+
+    # Validate direction
+    if direction not in {"ASC", "DESC"}:
+        log.LogWarning(f"Invalid direction '{direction}', using DESC")
+        direction = "DESC"
+
+    # Build the input filter based on entity type
+    if entity_type == "performer":
+        filter_input = {
+            "performers": {
+                "value": [entity_stash_id],
+                "modifier": "INCLUDES"
+            }
+        }
+    elif entity_type == "studio":
+        filter_input = {
+            "studios": {
+                "value": [entity_stash_id],
+                "modifier": "INCLUDES"
+            }
+        }
+    elif entity_type == "tag":
+        filter_input = {
+            "tags": {
+                "value": [entity_stash_id],
+                "modifier": "INCLUDES"
+            }
+        }
+    else:
+        log.LogError(f"Unknown entity type: {entity_type}")
+        return None
+
+    query = f"""
+    query QueryScenes($input: SceneQueryInput!) {{
+        queryScenes(input: $input) {{
+            count
+            scenes {{
+                {SCENE_FIELDS}
+            }}
+        }}
+    }}
+    """
+
+    variables = {
+        "input": {
+            **filter_input,
+            "page": page,
+            "per_page": per_page,
+            "sort": sort,
+            "direction": direction
+        }
+    }
+
+    try:
+        data = graphql_request_with_retry(
+            url, query, variables, api_key,
+            plugin_settings=plugin_settings,
+            operation_name=f"scenes page {page} for {entity_type}"
+        )
+
+        if not data:
+            return None
+
+        query_data = data.get("queryScenes", {})
+        scenes = query_data.get("scenes", [])
+        count = query_data.get("count", 0)
+
+        return {
+            "scenes": scenes,
+            "count": count,
+            "page": page,
+            "has_more": page * per_page < count
+        }
+
+    except StashBoxAPIError as e:
+        log.LogError(f"Error fetching scenes page {page}: {e}")
+        return None
