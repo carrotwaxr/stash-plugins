@@ -959,6 +959,7 @@
         if (!containerRef.current) return;
 
         console.debug("[tagManager] Initializing...");
+        document.title = "Tag Matcher | Stash";
         containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
 
         await loadSettings();
