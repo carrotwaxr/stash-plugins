@@ -662,6 +662,7 @@
           <div class="tm-stashid-note">
             <strong>StashDB ID will be added:</strong> ${escapeHtml(stashdbTag.id)}
           </div>
+          <div class="tm-modal-error" id="tm-diff-error" style="display: none;"></div>
         </div>
         <div class="tm-modal-footer">
           <button class="btn btn-secondary tm-cancel-btn">Cancel</button>
@@ -729,7 +730,17 @@
         showStatus(`Matched "${tag.name}" to "${stashdbTag.name}"`, 'success');
         renderPage(container);
       } catch (e) {
-        showStatus(`Error: ${e.message}`, 'error');
+        const errorEl = modal.querySelector('#tm-diff-error');
+        if (errorEl) {
+          // Parse error message for friendlier display
+          let errorMsg = e.message;
+          const aliasConflictMatch = errorMsg.match(/tag with name '([^']+)' already exists/i);
+          if (aliasConflictMatch) {
+            errorMsg = `Cannot save: "${aliasConflictMatch[1]}" conflicts with an existing tag name. Remove it from aliases to continue.`;
+          }
+          errorEl.textContent = errorMsg;
+          errorEl.style.display = 'block';
+        }
       }
     });
   }

@@ -450,3 +450,13 @@
   padding: 30px;
   color: var(--bs-secondary-color, #888);
 }
+
+/* Modal error message */
+.tm-modal-error {
+  margin-top: 15px;
+  padding: 12px 15px;
+  background: var(--bs-danger-bg-subtle, #4a1a1a);
+  color: var(--bs-danger, #dc3545);
+  border-radius: 4px;
+  border-left: 3px solid var(--bs-danger, #dc3545);
+}
