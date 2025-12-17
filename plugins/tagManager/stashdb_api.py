@@ -58,6 +58,9 @@ def graphql_request(url, query, variables=None, api_key=None, timeout=30):
     Raises:
         StashDBAPIError: On request failure
     """
+    log.LogTrace(f"GraphQL request to {url}")
+    log.LogTrace(f"Variables: {json.dumps(variables) if variables else 'None'}")
+
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -65,6 +68,9 @@ def graphql_request(url, query, variables=None, api_key=None, timeout=30):
 
     if api_key:
         headers["ApiKey"] = api_key
+        log.LogTrace("API key provided")
+    else:
+        log.LogWarning("No API key provided for request")
 
     data = json.dumps({
         "query": query,
@@ -78,8 +84,11 @@ def graphql_request(url, query, variables=None, api_key=None, timeout=30):
 
     for attempt in range(max_retries + 1):
         try:
+            log.LogTrace(f"Request attempt {attempt + 1}/{max_retries + 1}")
             with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
-                result = json.loads(response.read().decode("utf-8"))
+                response_data = response.read().decode("utf-8")
+                log.LogTrace(f"Response received: {len(response_data)} bytes")
+                result = json.loads(response_data)
 
                 if "errors" in result:
                     error_messages = [e.get("message", str(e)) for e in result["errors"]]
@@ -88,15 +97,24 @@ def graphql_request(url, query, variables=None, api_key=None, timeout=30):
                 return result.get("data")
 
         except urllib.error.HTTPError as e:
+            log.LogDebug(f"HTTP error {e.code}: {e.reason}")
             if e.code in RETRYABLE_STATUS_CODES and attempt < max_retries:
                 log.LogWarning(f"HTTP {e.code}, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
                 delay = min(delay * DEFAULT_CONFIG["retry_backoff_multiplier"], DEFAULT_CONFIG["max_retry_delay"])
                 continue
 
+            error_body = ""
+            try:
+                error_body = e.read().decode("utf-8")[:500]
+                log.LogDebug(f"Error response body: {error_body}")
+            except Exception:
+                pass
+
             raise StashDBAPIError(f"HTTP {e.code}: {e.reason}", status_code=e.code)
 
         except urllib.error.URLError as e:
+            log.LogDebug(f"URL error: {e.reason}")
             if attempt < max_retries:
                 log.LogWarning(f"Connection error: {e.reason}, retrying in {delay:.1f}s")
                 time.sleep(delay)
@@ -104,6 +122,10 @@ def graphql_request(url, query, variables=None, api_key=None, timeout=30):
                 continue
 
             raise StashDBAPIError(f"Connection failed: {e.reason}")
+
+        except json.JSONDecodeError as e:
+            log.LogError(f"Failed to parse JSON response: {e}")
+            raise StashDBAPIError(f"Invalid JSON response: {e}")
 
     raise StashDBAPIError("Max retries exceeded")
 

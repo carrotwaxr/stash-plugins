@@ -85,6 +85,8 @@ class TagMatcher:
                 ...
             ]
         """
+        log.LogDebug(f"Finding matches for: '{local_tag_name}' (fuzzy={enable_fuzzy}, synonyms={enable_synonyms})")
+
         matches = []
         search_term = local_tag_name.strip()
         search_lower = search_term.lower()
@@ -138,6 +140,10 @@ class TagMatcher:
 
         # Sort by score descending
         matches.sort(key=lambda m: m["score"], reverse=True)
+
+        log.LogDebug(f"Found {len(matches)} matches for '{local_tag_name}'")
+        if matches:
+            log.LogTrace(f"Top match: {matches[0]['tag']['name']} ({matches[0]['match_type']}, {matches[0]['score']}%)")
 
         return matches[:limit]
 

@@ -16,10 +16,14 @@
 
   // State
   let settings = { ...DEFAULTS };
-  let stashdbTags = null; // Cached StashDB tags
+  let stashBoxes = []; // Configured stash-box endpoints from Stash
+  let selectedStashBox = null; // Currently selected stash-box
+  let stashdbTags = null; // Cached tags for selected endpoint
+  let cacheStatus = null; // Cache status for selected endpoint
   let localTags = []; // Local Stash tags
   let currentPage = 1;
   let isLoading = false;
+  let isCacheLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
 
@@ -55,7 +59,7 @@
   }
 
   /**
-   * Get plugin settings from Stash configuration
+   * Get plugin settings and stash-box endpoints from Stash configuration
    */
   async function loadSettings() {
     try {
@@ -63,6 +67,13 @@
         query Configuration {
           configuration {
             plugins
+            general {
+              stashBoxes {
+                endpoint
+                api_key
+                name
+              }
+            }
           }
         }
       `;
@@ -78,7 +89,29 @@
         pageSize: parseInt(pluginConfig.pageSize) || DEFAULTS.pageSize,
       };
 
-      console.debug("[tagManager] Settings loaded:", settings);
+      // Load configured stash-boxes
+      stashBoxes = data?.configuration?.general?.stashBoxes || [];
+      console.debug("[tagManager] Found stash-boxes:", stashBoxes.length);
+
+      // Select first stash-box by default, or use plugin setting as fallback
+      if (stashBoxes.length > 0) {
+        selectedStashBox = stashBoxes[0];
+        console.debug("[tagManager] Selected default stash-box:", selectedStashBox.name);
+      } else if (settings.stashdbEndpoint && settings.stashdbApiKey) {
+        // Fallback to plugin settings if no stash-boxes configured
+        selectedStashBox = {
+          endpoint: settings.stashdbEndpoint,
+          api_key: settings.stashdbApiKey,
+          name: "Plugin Settings"
+        };
+        stashBoxes = [selectedStashBox];
+        console.debug("[tagManager] Using plugin settings as fallback stash-box");
+      }
+
+      console.debug("[tagManager] Settings loaded:", {
+        ...settings,
+        stashdbApiKey: settings.stashdbApiKey ? "[REDACTED]" : ""
+      });
     } catch (e) {
       console.error("[tagManager] Failed to load settings:", e);
     }
@@ -120,10 +153,16 @@
       }
     `;
 
+    // Use selected stash-box or fall back to plugin settings
+    const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
+    const apiKey = selectedStashBox?.api_key || settings.stashdbApiKey;
+
+    console.debug(`[tagManager] callBackend mode=${mode} endpoint=${endpoint}`);
+
     const fullArgs = {
       mode,
-      stashdb_url: settings.stashdbEndpoint,
-      stashdb_api_key: settings.stashdbApiKey,
+      stashdb_url: endpoint,
+      stashdb_api_key: apiKey,
       settings: settings,
       ...args,
     };
@@ -139,6 +178,93 @@
     }
 
     return output;
+  }
+
+  /**
+   * Load cache status for current endpoint
+   */
+  async function loadCacheStatus() {
+    if (!selectedStashBox) return;
+
+    try {
+      console.debug("[tagManager] Loading cache status for", selectedStashBox.endpoint);
+      cacheStatus = await callBackend('get_cache_status');
+      console.debug("[tagManager] Cache status:", cacheStatus);
+    } catch (e) {
+      console.error("[tagManager] Failed to load cache status:", e);
+      cacheStatus = null;
+    }
+  }
+
+  /**
+   * Refresh tag cache for current endpoint
+   */
+  async function refreshCache(container) {
+    if (!selectedStashBox) {
+      showStatus('No stash-box selected', 'error');
+      return;
+    }
+
+    isCacheLoading = true;
+    renderPage(container);
+    showStatus(`Building cache for ${selectedStashBox.name}... This may take 30+ seconds.`, 'info');
+
+    try {
+      console.debug("[tagManager] Refreshing cache for", selectedStashBox.endpoint);
+      const result = await callBackend('fetch_all', { force_refresh: true });
+
+      stashdbTags = result.tags || [];
+      cacheStatus = {
+        exists: true,
+        count: result.count,
+        age_hours: 0,
+        expired: false
+      };
+
+      const msg = result.from_cache
+        ? `Loaded ${result.count} tags from cache (${result.cache_age_hours}h old)`
+        : `Fetched ${result.count} tags in ${result.fetch_time_seconds}s`;
+
+      console.debug("[tagManager] Cache refresh complete:", msg);
+      showStatus(msg, 'success');
+    } catch (e) {
+      console.error("[tagManager] Cache refresh failed:", e);
+      showStatus(`Cache refresh failed: ${e.message}`, 'error');
+    } finally {
+      isCacheLoading = false;
+      renderPage(container);
+    }
+  }
+
+  /**
+   * Load tags from cache (or fetch if no cache)
+   */
+  async function loadTagsFromCache(container) {
+    if (!selectedStashBox) return;
+
+    try {
+      console.debug("[tagManager] Loading tags for", selectedStashBox.endpoint);
+      const result = await callBackend('fetch_all', { force_refresh: false });
+
+      stashdbTags = result.tags || [];
+      cacheStatus = {
+        exists: true,
+        count: result.count,
+        age_hours: result.cache_age_hours || 0,
+        expired: false,
+        from_cache: result.from_cache
+      };
+
+      if (result.from_cache) {
+        console.debug(`[tagManager] Loaded ${result.count} tags from cache (${result.cache_age_hours}h old)`);
+      } else {
+        console.debug(`[tagManager] Fetched ${result.count} tags fresh (${result.fetch_time_seconds}s)`);
+      }
+    } catch (e) {
+      console.error("[tagManager] Failed to load tags:", e);
+      stashdbTags = null;
+      cacheStatus = { exists: false, error: e.message };
+    }
   }
 
   /**
@@ -172,6 +298,25 @@
   }
 
   /**
+   * Render cache status badge
+   */
+  function renderCacheStatus() {
+    if (isCacheLoading) {
+      return '<span class="tm-cache-status tm-cache-loading">Building cache...</span>';
+    }
+    if (!cacheStatus) {
+      return '<span class="tm-cache-status tm-cache-unknown">Cache unknown</span>';
+    }
+    if (!cacheStatus.exists) {
+      return '<span class="tm-cache-status tm-cache-none">No cache</span>';
+    }
+    if (cacheStatus.expired) {
+      return `<span class="tm-cache-status tm-cache-expired">${cacheStatus.count} tags (expired)</span>`;
+    }
+    return `<span class="tm-cache-status tm-cache-valid">${cacheStatus.count} tags (${cacheStatus.age_hours}h old)</span>`;
+  }
+
+  /**
    * Render the main page content
    */
   function renderPage(container) {
@@ -187,6 +332,14 @@
         ? 'No tags found'
         : 'No unmatched tags found';
 
+    // Build stash-box dropdown options
+    const stashBoxOptions = stashBoxes.map(sb => {
+      const selected = selectedStashBox?.endpoint === sb.endpoint ? 'selected' : '';
+      return `<option value="${escapeHtml(sb.endpoint)}" ${selected}>${escapeHtml(sb.name)}</option>`;
+    }).join('');
+
+    const hasStashBox = stashBoxes.length > 0;
+
     container.innerHTML = `
       <div class="tag-manager">
         <div class="tag-manager-header">
@@ -197,29 +350,49 @@
           </div>
         </div>
 
-        <div class="tag-manager-filters">
-          <select id="tm-filter" class="form-control">
-            <option value="unmatched" ${currentFilter === 'unmatched' ? 'selected' : ''}>Show Unmatched</option>
-            <option value="matched" ${currentFilter === 'matched' ? 'selected' : ''}>Show Matched</option>
-            <option value="all" ${currentFilter === 'all' ? 'selected' : ''}>Show All</option>
-          </select>
-          <button class="btn btn-primary" id="tm-search-all-btn" ${isLoading ? 'disabled' : ''}>
-            ${isLoading ? 'Searching...' : 'Find Matches for Page'}
-          </button>
-        </div>
+        ${!hasStashBox ? `
+          <div class="tag-manager-error">
+            <h3>No Stash-Box Configured</h3>
+            <p>Please configure a stash-box endpoint in Settings → Metadata Providers → Stash-Box Endpoints</p>
+          </div>
+        ` : `
+          <div class="tag-manager-endpoint">
+            <label for="tm-stashbox">Stash-Box:</label>
+            <select id="tm-stashbox" class="form-control">
+              ${stashBoxOptions}
+            </select>
+            <div class="tm-cache-info">
+              ${renderCacheStatus()}
+              <button class="btn btn-secondary btn-sm" id="tm-refresh-cache" ${isCacheLoading ? 'disabled' : ''}>
+                ${isCacheLoading ? 'Building...' : 'Refresh Cache'}
+              </button>
+            </div>
+          </div>
 
-        <div class="tag-manager-list" id="tm-tag-list">
-          ${pageTags.length === 0
-            ? `<div class="tm-empty">${emptyMessage}</div>`
-            : pageTags.map(tag => renderTagRow(tag)).join('')
-          }
-        </div>
+          <div class="tag-manager-filters">
+            <select id="tm-filter" class="form-control">
+              <option value="unmatched" ${currentFilter === 'unmatched' ? 'selected' : ''}>Show Unmatched</option>
+              <option value="matched" ${currentFilter === 'matched' ? 'selected' : ''}>Show Matched</option>
+              <option value="all" ${currentFilter === 'all' ? 'selected' : ''}>Show All</option>
+            </select>
+            <button class="btn btn-primary" id="tm-search-all-btn" ${isLoading || isCacheLoading ? 'disabled' : ''}>
+              ${isLoading ? 'Searching...' : 'Find Matches for Page'}
+            </button>
+          </div>
 
-        <div class="tag-manager-pagination">
-          <button class="btn btn-secondary" id="tm-prev" ${currentPage <= 1 ? 'disabled' : ''}>Previous</button>
-          <span>Page ${currentPage} of ${totalPages || 1}</span>
-          <button class="btn btn-secondary" id="tm-next" ${currentPage >= totalPages ? 'disabled' : ''}>Next</button>
-        </div>
+          <div class="tag-manager-list" id="tm-tag-list">
+            ${pageTags.length === 0
+              ? `<div class="tm-empty">${emptyMessage}</div>`
+              : pageTags.map(tag => renderTagRow(tag)).join('')
+            }
+          </div>
+
+          <div class="tag-manager-pagination">
+            <button class="btn btn-secondary" id="tm-prev" ${currentPage <= 1 ? 'disabled' : ''}>Previous</button>
+            <span>Page ${currentPage} of ${totalPages || 1}</span>
+            <button class="btn btn-secondary" id="tm-next" ${currentPage >= totalPages ? 'disabled' : ''}>Next</button>
+          </div>
+        `}
 
         <div id="tm-status" class="tag-manager-status"></div>
       </div>
@@ -282,6 +455,28 @@
    * Attach event handlers to rendered elements
    */
   function attachEventHandlers(container) {
+    // Stash-box dropdown
+    container.querySelector('#tm-stashbox')?.addEventListener('change', async (e) => {
+      const endpoint = e.target.value;
+      const newStashBox = stashBoxes.find(sb => sb.endpoint === endpoint);
+      if (newStashBox && newStashBox.endpoint !== selectedStashBox?.endpoint) {
+        console.debug("[tagManager] Switching to stash-box:", newStashBox.name);
+        selectedStashBox = newStashBox;
+        // Clear cached data for previous endpoint
+        stashdbTags = null;
+        matchResults = {};
+        cacheStatus = null;
+        // Load cache for new endpoint
+        await loadCacheStatus();
+        renderPage(container);
+      }
+    });
+
+    // Cache refresh button
+    container.querySelector('#tm-refresh-cache')?.addEventListener('click', () => {
+      refreshCache(container);
+    });
+
     // Filter dropdown
     container.querySelector('#tm-filter')?.addEventListener('change', (e) => {
       currentFilter = e.target.value;
@@ -489,11 +684,15 @@
       const descChoice = modal.querySelector('input[name="tm-desc"]:checked').value;
       const aliasesChoice = modal.querySelector('input[name="tm-aliases"]:checked').value;
 
+      // Use the selected stash-box endpoint
+      const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
+      console.debug(`[tagManager] Saving stash_id with endpoint: ${endpoint}`);
+
       // Build update input
       const updateInput = {
         id: tag.id,
         stash_ids: [{
-          endpoint: settings.stashdbEndpoint,
+          endpoint: endpoint,
           stash_id: stashdbTag.id,
         }],
       };
@@ -697,15 +896,20 @@
       async function init() {
         if (!containerRef.current) return;
 
+        console.debug("[tagManager] Initializing...");
+        containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
+
         await loadSettings();
 
-        // Check if API key is configured
-        if (!settings.stashdbApiKey) {
+        // Check if any stash-box is configured
+        if (stashBoxes.length === 0) {
+          console.warn("[tagManager] No stash-boxes configured");
           containerRef.current.innerHTML = `
             <div class="tag-manager">
               <div class="tag-manager-error">
-                <h3>StashDB API Key Required</h3>
-                <p>Please configure your StashDB API key in Settings - Plugins - Tag Manager</p>
+                <h3>No Stash-Box Configured</h3>
+                <p>Please configure a stash-box endpoint in Settings → Metadata Providers → Stash-Box Endpoints</p>
+                <p>Or configure a StashDB endpoint in Settings → Plugins → Tag Manager</p>
               </div>
             </div>
           `;
@@ -713,27 +917,27 @@
         }
 
         // Fetch local tags
-        containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading tags...</div></div>';
+        containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading local tags...</div></div>';
         try {
           localTags = await fetchLocalTags();
+          console.debug(`[tagManager] Loaded ${localTags.length} local tags`);
         } catch (e) {
+          console.error("[tagManager] Failed to load local tags:", e);
           containerRef.current.innerHTML = `<div class="tag-manager"><div class="tag-manager-error">Error loading tags: ${escapeHtml(e.message)}</div></div>`;
           return;
         }
 
-        // Optionally fetch all StashDB tags for fuzzy matching
-        // (Can be done in background for performance)
+        // Load cache status for selected endpoint
+        await loadCacheStatus();
+
+        // If fuzzy search enabled, load tags from cache (or fetch if no cache)
         if (settings.enableFuzzySearch) {
-          try {
-            const result = await callBackend('fetch_all');
-            stashdbTags = result.tags || [];
-            console.debug(`[tagManager] Cached ${stashdbTags.length} StashDB tags`);
-          } catch (e) {
-            console.warn('[tagManager] Could not cache StashDB tags:', e);
-          }
+          containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading tag cache...</div></div>';
+          await loadTagsFromCache(containerRef.current);
         }
 
         setInitialized(true);
+        console.debug("[tagManager] Initialization complete");
         renderPage(containerRef.current);
       }
 

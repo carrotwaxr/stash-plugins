@@ -46,6 +46,69 @@
   color: #fff;
 }
 
+/* Stash-box endpoint selector */
+
+.tag-manager-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  background: var(--bs-secondary-bg, #2d2d44);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+
+.tag-manager-endpoint label {
+  font-weight: 500;
+  margin: 0;
+}
+
+.tag-manager-endpoint select {
+  min-width: 200px;
+  max-width: 300px;
+}
+
+.tm-cache-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.tm-cache-status {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+
+.tm-cache-valid {
+  background: var(--bs-success-bg-subtle, #1a4a2a);
+  color: var(--bs-success, #28a745);
+}
+
+.tm-cache-expired {
+  background: var(--bs-warning-bg-subtle, #4a3a1a);
+  color: var(--bs-warning, #ffc107);
+}
+
+.tm-cache-none {
+  background: var(--bs-secondary-bg, #3d3d5c);
+  color: var(--bs-secondary-color, #888);
+}
+
+.tm-cache-loading {
+  background: var(--bs-info-bg-subtle, #1a3a4a);
+  color: var(--bs-info, #17a2b8);
+}
+
+.tm-cache-unknown {
+  background: var(--bs-secondary-bg, #3d3d5c);
+  color: var(--bs-secondary-color, #888);
+}
+
+/* Filters row */
+
 .tag-manager-filters {
   display: flex;
   gap: 10px;
