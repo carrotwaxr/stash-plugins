@@ -1,1 +1,198 @@
-/* Placeholder - will be implemented in Task 5 */
+/* tagManager plugin styles */
+
+.tag-manager-container {
+  padding: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.tag-manager {
+  background: var(--bs-body-bg, #1a1a2e);
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.tag-manager-header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.tag-manager-header h2 {
+  margin: 0;
+  flex: 1;
+}
+
+.tag-manager-stats {
+  display: flex;
+  gap: 15px;
+}
+
+.tag-manager-stats .stat {
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.stat-unmatched {
+  background: var(--bs-warning, #ffc107);
+  color: #000;
+}
+
+.stat-matched {
+  background: var(--bs-success, #28a745);
+  color: #fff;
+}
+
+.tag-manager-filters {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.tag-manager-filters select {
+  max-width: 200px;
+}
+
+.tag-manager-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tm-tag-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--bs-secondary-bg, #2d2d44);
+  border-radius: 6px;
+  gap: 20px;
+}
+
+.tm-tag-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+}
+
+.tm-tag-name {
+  font-weight: 500;
+  font-size: 1.1em;
+}
+
+.tm-tag-aliases {
+  font-size: 0.85em;
+  color: var(--bs-secondary-color, #888);
+}
+
+.tm-tag-match {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.tm-match {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-radius: 4px;
+  background: var(--bs-tertiary-bg, #3d3d5c);
+}
+
+.tm-match-exact {
+  border-left: 3px solid var(--bs-success, #28a745);
+}
+
+.tm-match-alias {
+  border-left: 3px solid var(--bs-info, #17a2b8);
+}
+
+.tm-match-fuzzy {
+  border-left: 3px solid var(--bs-warning, #ffc107);
+}
+
+.tm-match-name {
+  font-weight: 500;
+}
+
+.tm-match-type {
+  font-size: 0.8em;
+  color: var(--bs-secondary-color, #888);
+}
+
+.tm-match-category {
+  font-size: 0.8em;
+  padding: 2px 6px;
+  background: var(--bs-primary, #0d6efd);
+  color: #fff;
+  border-radius: 3px;
+}
+
+.tm-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.tm-no-match {
+  color: var(--bs-secondary-color, #888);
+  font-style: italic;
+}
+
+.tm-loading {
+  color: var(--bs-secondary-color, #888);
+}
+
+.tm-empty {
+  text-align: center;
+  padding: 40px;
+  color: var(--bs-secondary-color, #888);
+}
+
+.tag-manager-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--bs-border-color, #444);
+}
+
+.tag-manager-status {
+  margin-top: 15px;
+  padding: 10px;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.tm-status-info {
+  background: var(--bs-info-bg-subtle, #1a3a4a);
+  color: var(--bs-info, #17a2b8);
+}
+
+.tm-status-error {
+  background: var(--bs-danger-bg-subtle, #4a1a1a);
+  color: var(--bs-danger, #dc3545);
+}
+
+.tm-status-success {
+  background: var(--bs-success-bg-subtle, #1a4a2a);
+  color: var(--bs-success, #28a745);
+}
+
+.tag-manager-error {
+  text-align: center;
+  padding: 40px;
+}
+
+.tag-manager-error h3 {
+  color: var(--bs-warning, #ffc107);
+  margin-bottom: 10px;
+}
