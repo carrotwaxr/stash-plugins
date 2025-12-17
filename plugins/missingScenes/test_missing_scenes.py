@@ -660,6 +660,69 @@ class TestCacheBuildingFunction(unittest.TestCase):
         self.assertEqual(missing_scenes._cache_metadata[endpoint]["count"], 0)
 
 
+class TestCountLocalScenesForEntity(unittest.TestCase):
+    """Test the count_local_scenes_for_entity function."""
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_count_scenes_for_performer(self, mock_graphql):
+        """Test counting local scenes for a performer."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findScenes": {"count": 5}
+        }
+
+        result = missing_scenes.count_local_scenes_for_entity(endpoint, "performer", "123")
+
+        self.assertEqual(result, 5)
+        # Verify the query includes performer filter
+        call_args = mock_graphql.call_args
+        scene_filter = call_args[0][1]["scene_filter"]
+        self.assertIn("performers", scene_filter)
+        self.assertEqual(scene_filter["performers"]["value"], ["123"])
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_count_scenes_for_tag(self, mock_graphql):
+        """Test counting local scenes for a tag."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findScenes": {"count": 1}
+        }
+
+        result = missing_scenes.count_local_scenes_for_entity(endpoint, "tag", "456")
+
+        self.assertEqual(result, 1)
+        # Verify the query includes tag filter with depth
+        call_args = mock_graphql.call_args
+        scene_filter = call_args[0][1]["scene_filter"]
+        self.assertIn("tags", scene_filter)
+        self.assertEqual(scene_filter["tags"]["value"], ["456"])
+        self.assertEqual(scene_filter["tags"]["depth"], -1)
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_count_scenes_for_studio(self, mock_graphql):
+        """Test counting local scenes for a studio."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findScenes": {"count": 10}
+        }
+
+        result = missing_scenes.count_local_scenes_for_entity(endpoint, "studio", "789")
+
+        self.assertEqual(result, 10)
+        # Verify the query includes studio filter with depth
+        call_args = mock_graphql.call_args
+        scene_filter = call_args[0][1]["scene_filter"]
+        self.assertIn("studios", scene_filter)
+        self.assertEqual(scene_filter["studios"]["depth"], -1)
+
+    def test_count_scenes_unknown_entity_returns_zero(self):
+        """Test that unknown entity type returns 0."""
+        result = missing_scenes.count_local_scenes_for_entity(
+            "https://stashdb.org/graphql", "unknown", "123"
+        )
+        self.assertEqual(result, 0)
+
+
 class TestFetchUntilFull(unittest.TestCase):
     """Test the fetch_until_full pagination logic."""
 
