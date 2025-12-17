@@ -713,12 +713,13 @@
     // Determine page type
     const performerInfo = getPerformerPageInfo();
     const studioInfo = getStudioPageInfo();
+    const tagInfo = getTagPageInfo();
 
-    if (!performerInfo && !studioInfo) {
+    if (!performerInfo && !studioInfo && !tagInfo) {
       return;
     }
 
-    const entityInfo = performerInfo || studioInfo;
+    const entityInfo = performerInfo || studioInfo || tagInfo;
     currentEntityType = entityInfo.type;
     currentEntityId = entityInfo.id;
 
@@ -728,7 +729,8 @@
       document.querySelector(".detail-header-buttons") ||
       document.querySelector('[class*="detail"] [class*="button"]')?.parentElement ||
       document.querySelector(".performer-head") ||
-      document.querySelector(".studio-head");
+      document.querySelector(".studio-head") ||
+      document.querySelector(".tag-head");
 
     if (!buttonContainer) {
       // Try again later - page might not be fully loaded
