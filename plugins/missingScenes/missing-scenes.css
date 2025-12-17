@@ -487,3 +487,65 @@
   border-color: var(--ms-accent, #0d6efd);
   box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
 }
+
+/* Sort Controls */
+.ms-sort-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+  flex-wrap: wrap;
+}
+
+.ms-sort-controls label {
+  color: #888;
+  font-size: 13px;
+  margin: 0;
+}
+
+.ms-sort-select {
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ms-sort-select:hover {
+  border-color: var(--ms-accent, #0d6efd);
+}
+
+.ms-sort-select:focus {
+  outline: none;
+  border-color: var(--ms-accent, #0d6efd);
+  box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
+}
+
+/* Load More Button */
+.ms-btn-secondary {
+  background: #444;
+  border: none;
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+
+.ms-btn-secondary:hover:not(:disabled) {
+  background: #555;
+}
+
+.ms-btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#ms-load-more-btn {
+  margin-right: 10px;
+}

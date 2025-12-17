@@ -13,6 +13,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import ssl
+import base64
 
 # Import Stash-compatible logging
 import log
@@ -24,6 +25,41 @@ import stashbox_api
 SSL_CONTEXT = ssl.create_default_context()
 SSL_CONTEXT.check_hostname = False
 SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+
+
+# ============================================================================
+# Local Stash_ID Cache for Pagination
+# ============================================================================
+
+# In-memory cache: endpoint -> set of stash_ids
+_local_stash_id_cache: dict[str, set[str]] = {}
+
+# Metadata about the cache
+_cache_metadata: dict[str, dict] = {}
+
+
+# ============================================================================
+# Cursor Encoding/Decoding for Pagination
+# ============================================================================
+
+def encode_cursor(state: dict) -> str:
+    """Encode pagination state as a base64 cursor string."""
+    json_str = json.dumps(state, separators=(',', ':'))
+    return base64.urlsafe_b64encode(json_str.encode('utf-8')).decode('ascii')
+
+
+def decode_cursor(cursor: str) -> dict | None:
+    """Decode a base64 cursor string back to pagination state.
+
+    Returns None if cursor is invalid, empty, or None.
+    """
+    if not cursor:
+        return None
+    try:
+        json_str = base64.urlsafe_b64decode(cursor.encode('ascii')).decode('utf-8')
+        return json.loads(json_str)
+    except Exception:
+        return None
 
 
 # ============================================================================
@@ -693,6 +729,208 @@ def whisparr_get_status_map(whisparr_url, api_key):
 
 
 # ============================================================================
+# Local Stash_ID Cache Building
+# ============================================================================
+
+def get_or_build_cache(endpoint: str) -> set[str]:
+    """Get or build the local stash_id cache for a given endpoint.
+
+    Returns a set of stash_ids that exist in local Stash for the endpoint.
+    Uses cached data if available.
+    """
+    from datetime import datetime
+
+    if endpoint in _local_stash_id_cache:
+        return _local_stash_id_cache[endpoint]
+
+    log.LogInfo(f"Building local stash_id cache for {endpoint}...")
+
+    stash_ids = set()
+    page = 1
+    per_page = 100
+
+    while True:
+        result = stash_graphql("""
+            query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {
+                findScenes(filter: $filter, scene_filter: $scene_filter) {
+                    count
+                    scenes {
+                        stash_ids {
+                            endpoint
+                            stash_id
+                        }
+                    }
+                }
+            }
+        """, {
+            "filter": {"page": page, "per_page": per_page},
+            "scene_filter": {
+                "stash_id_endpoint": {
+                    "endpoint": endpoint,
+                    "modifier": "NOT_NULL"
+                }
+            }
+        })
+
+        find_scenes = result.get("findScenes", {})
+        total_count = find_scenes.get("count", 0)
+        scenes = find_scenes.get("scenes", [])
+
+        for scene in scenes:
+            for sid in scene.get("stash_ids", []):
+                if sid.get("endpoint") == endpoint:
+                    stash_ids.add(sid.get("stash_id"))
+
+        # Check if we've fetched all pages
+        if page * per_page >= total_count:
+            break
+        page += 1
+
+    _local_stash_id_cache[endpoint] = stash_ids
+    _cache_metadata[endpoint] = {
+        "count": len(stash_ids),
+        "built_at": datetime.now().isoformat()
+    }
+
+    log.LogInfo(f"Cache built: {len(stash_ids)} scenes with stash_ids for {endpoint}")
+
+    return stash_ids
+
+
+# ============================================================================
+# Fetch Until Full Pagination
+# ============================================================================
+
+# Safety limits
+MAX_PAGES_PER_REQUEST = 50  # Max StashDB pages to fetch in one request
+MAX_STASHDB_PAGE = 1000  # Absolute limit (100,000 scenes)
+PAGE_SIZE_MAX = 100
+PAGE_SIZE_DEFAULT = 50
+
+
+def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
+                     page_size=PAGE_SIZE_DEFAULT, stashdb_page=1, offset=0,
+                     sort="DATE", direction="DESC", plugin_settings=None):
+    """
+    Fetch scenes from StashDB until we have page_size missing scenes.
+
+    This implements the "fetch until full" pagination strategy where we
+    incrementally fetch StashDB pages, filtering against local_ids cache,
+    until we have enough missing scenes to fill the requested page.
+
+    Args:
+        url: StashDB GraphQL endpoint URL
+        api_key: API key for authentication
+        entity_type: "performer", "studio", or "tag"
+        entity_stash_id: StashDB ID of the entity
+        local_ids: Set of stash_ids we own locally
+        page_size: Number of missing scenes to return
+        stashdb_page: StashDB page to start from
+        offset: Number of scenes to skip on the first page
+        sort: Sort field for StashDB query
+        direction: Sort direction
+        plugin_settings: Plugin configuration
+
+    Returns:
+        dict with:
+            - scenes: list of missing scene objects (up to page_size)
+            - total_on_stashdb: total scene count on StashDB
+            - next_cursor: cursor for fetching next page (None if complete)
+            - is_complete: True if we've checked all StashDB scenes
+            - stashdb_pages_fetched: number of pages fetched
+    """
+    page_size = min(page_size, PAGE_SIZE_MAX)
+    collected = []
+    total_on_stashdb = 0
+    pages_fetched = 0
+    current_page = stashdb_page
+    current_offset = offset
+    is_complete = False
+    # Track cursor position for continuation
+    resume_page = stashdb_page
+    resume_offset = offset
+
+    while len(collected) < page_size and pages_fetched < MAX_PAGES_PER_REQUEST:
+        if current_page > MAX_STASHDB_PAGE:
+            log.LogWarning(f"Reached max StashDB page limit ({MAX_STASHDB_PAGE})")
+            is_complete = True
+            break
+
+        result = stashbox_api.query_scenes_page(
+            url, api_key, entity_type, entity_stash_id,
+            page=current_page,
+            per_page=100,
+            sort=sort,
+            direction=direction,
+            plugin_settings=plugin_settings
+        )
+
+        if not result:
+            log.LogWarning(f"Failed to fetch StashDB page {current_page}")
+            break
+
+        pages_fetched += 1
+        total_on_stashdb = result["count"]
+        scenes = result["scenes"]
+
+        if not scenes:
+            is_complete = True
+            break
+
+        # Process scenes starting from offset
+        filled = False
+        for i, scene in enumerate(scenes):
+            if i < current_offset:
+                continue
+
+            scene_id = scene.get("id")
+            if scene_id and scene_id not in local_ids:
+                collected.append(scene)
+                if len(collected) >= page_size:
+                    # Save position for next request
+                    # We've processed up to index i (inclusive), so next starts at i+1
+                    resume_offset = i + 1
+                    if resume_offset >= len(scenes):
+                        # Move to next page
+                        resume_page = current_page + 1
+                        resume_offset = 0
+                    else:
+                        resume_page = current_page
+                    filled = True
+                    break
+
+        # If we didn't fill up, move to next page
+        if not filled:
+            if not result["has_more"]:
+                is_complete = True
+                break
+            current_page += 1
+            current_offset = 0
+
+    # Build cursor for continuation
+    next_cursor = None
+    if not is_complete and len(collected) >= page_size:
+        cursor_state = {
+            "stashdb_page": resume_page,
+            "offset": resume_offset,
+            "sort": sort,
+            "direction": direction,
+            "entity_type": entity_type,
+            "entity_stash_id": entity_stash_id,
+            "endpoint": url
+        }
+        next_cursor = encode_cursor(cursor_state)
+
+    return {
+        "scenes": collected,
+        "total_on_stashdb": total_on_stashdb,
+        "next_cursor": next_cursor,
+        "is_complete": is_complete,
+        "stashdb_pages_fetched": pages_fetched
+    }
+
+
+# ============================================================================
 # Main Operations
 # ============================================================================
 
@@ -845,6 +1083,174 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_overri
         "total_local": len(stashdb_scenes) - len(missing_scenes),
         "missing_count": len(missing_scenes),
         "missing_scenes": missing_scenes,
+        "whisparr_configured": whisparr_configured
+    }
+
+
+def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
+                                   endpoint_override=None, page_size=PAGE_SIZE_DEFAULT,
+                                   cursor=None, sort="DATE", direction="DESC"):
+    """
+    Find missing scenes with pagination support.
+
+    This is the new paginated version that returns results incrementally
+    using the "fetch until full" strategy.
+
+    Args:
+        entity_type: "performer", "studio", or "tag"
+        entity_id: Local Stash ID of the entity
+        plugin_settings: Plugin configuration from Stash
+        endpoint_override: Optional endpoint URL to use
+        page_size: Number of missing scenes per page (default 50, max 100)
+        cursor: Pagination cursor from previous request (None for first page)
+        sort: Sort field - "DATE", "TITLE", "CREATED_AT", "UPDATED_AT"
+        direction: Sort direction - "ASC" or "DESC"
+
+    Returns:
+        Dict with:
+            - entity_name, entity_type, stashdb_name, stashdb_url
+            - total_on_stashdb: total scenes on StashDB
+            - total_local: scenes you own (from cache)
+            - missing_count_estimate: estimated missing (null until complete)
+            - missing_count_loaded: how many missing we've found so far
+            - cursor: cursor for next page
+            - has_more: whether more results available
+            - is_complete: true if we've checked all StashDB scenes
+            - missing_scenes: array of scene objects
+            - whisparr_configured: boolean
+    """
+    page_size = min(max(1, page_size), PAGE_SIZE_MAX)
+
+    # Get stash-box configuration
+    stashbox_configs = get_stashbox_config()
+    if not stashbox_configs:
+        return {"error": "No stash-box endpoints configured in Stash settings"}
+
+    # Determine endpoint
+    target_endpoint = endpoint_override or plugin_settings.get("stashBoxEndpoint", "").strip()
+
+    stashbox = None
+    if target_endpoint:
+        for config in stashbox_configs:
+            if config["endpoint"] == target_endpoint:
+                stashbox = config
+                break
+        if not stashbox:
+            available = ", ".join([c.get("name", c["endpoint"]) for c in stashbox_configs])
+            return {"error": f"Stash-box endpoint '{target_endpoint}' not found. Available: {available}"}
+    else:
+        stashbox = stashbox_configs[0]
+
+    stashdb_url = stashbox["endpoint"]
+    stashdb_api_key = stashbox.get("api_key", "")
+    stashdb_name = stashbox.get("name", "StashDB")
+
+    # Decode cursor if provided
+    cursor_state = None
+    if cursor:
+        cursor_state = decode_cursor(cursor)
+        if cursor_state:
+            # Validate cursor matches request
+            if (cursor_state.get("entity_type") != entity_type or
+                cursor_state.get("endpoint") != stashdb_url):
+                log.LogWarning("Cursor mismatch, starting fresh")
+                cursor_state = None
+
+    # Get entity stash_id
+    if entity_type == "performer":
+        entity = get_local_performer(entity_id)
+    elif entity_type == "studio":
+        entity = get_local_studio(entity_id)
+    elif entity_type == "tag":
+        entity = get_local_tag(entity_id)
+    else:
+        return {"error": f"Unknown entity type: {entity_type}"}
+
+    if not entity:
+        return {"error": f"{entity_type.title()} not found: {entity_id}"}
+
+    # Find stash_id for this endpoint
+    entity_stash_id = None
+    for sid in entity.get("stash_ids", []):
+        if sid.get("endpoint") == stashdb_url:
+            entity_stash_id = sid.get("stash_id")
+            break
+
+    if not entity_stash_id:
+        return {
+            "error": f"{entity_type.title()} '{entity.get('name')}' is not linked to {stashdb_name}. "
+                     f"Please use the Tagger to link this {entity_type} first."
+        }
+
+    # Get or build local stash_id cache
+    local_ids = get_or_build_cache(stashdb_url)
+    total_local = len(local_ids)
+
+    # Determine starting position
+    if cursor_state:
+        stashdb_page = cursor_state.get("stashdb_page", 1)
+        offset = cursor_state.get("offset", 0)
+        sort = cursor_state.get("sort", sort)
+        direction = cursor_state.get("direction", direction)
+    else:
+        stashdb_page = 1
+        offset = 0
+
+    # Fetch missing scenes
+    result = fetch_until_full(
+        url=stashdb_url,
+        api_key=stashdb_api_key,
+        entity_type=entity_type,
+        entity_stash_id=entity_stash_id,
+        local_ids=local_ids,
+        page_size=page_size,
+        stashdb_page=stashdb_page,
+        offset=offset,
+        sort=sort,
+        direction=direction,
+        plugin_settings=plugin_settings
+    )
+
+    # Format scenes
+    formatted_scenes = []
+    whisparr_status_map = {}
+    whisparr_configured = False
+    whisparr_url = plugin_settings.get("whisparrUrl", "")
+    whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
+
+    if whisparr_url and whisparr_api_key:
+        whisparr_configured = True
+        try:
+            whisparr_status_map = whisparr_get_status_map(whisparr_url, whisparr_api_key)
+        except Exception as e:
+            log.LogWarning(f"Could not fetch Whisparr status: {e}")
+
+    for scene in result["scenes"]:
+        scene_stash_id = scene.get("id")
+        formatted = format_scene(scene, scene_stash_id)
+        if scene_stash_id in whisparr_status_map:
+            formatted["whisparr_status"] = whisparr_status_map[scene_stash_id]
+        else:
+            formatted["whisparr_status"] = None
+        formatted["in_whisparr"] = scene_stash_id in whisparr_status_map
+        formatted_scenes.append(formatted)
+
+    total_on_stashdb = result["total_on_stashdb"]
+    is_complete = result["is_complete"]
+
+    return {
+        "entity_name": entity.get("name"),
+        "entity_type": entity_type,
+        "stashdb_name": stashdb_name,
+        "stashdb_url": stashdb_url.replace("/graphql", ""),
+        "total_on_stashdb": total_on_stashdb,
+        "total_local": total_local,
+        "missing_count_estimate": total_on_stashdb - total_local if not is_complete else None,
+        "missing_count_loaded": len(formatted_scenes),
+        "cursor": result["next_cursor"],
+        "has_more": result["next_cursor"] is not None,
+        "is_complete": is_complete,
+        "missing_scenes": formatted_scenes,
         "whisparr_configured": whisparr_configured
     }
 
@@ -1352,9 +1758,26 @@ def main():
             entity_id = args.get("entity_id", "")
             endpoint = args.get("endpoint")  # Optional endpoint override
 
+            # Check for pagination parameters to decide which function to use
+            page_size = args.get("page_size")
+            cursor = args.get("cursor")
+            sort = args.get("sort", "DATE")
+            direction = args.get("direction", "DESC")
+
             if not entity_id:
                 output = {"error": "entity_id is required"}
+            elif page_size is not None or cursor is not None:
+                # Use paginated version
+                output = find_missing_scenes_paginated(
+                    entity_type, entity_id, plugin_settings,
+                    endpoint_override=endpoint,
+                    page_size=page_size or PAGE_SIZE_DEFAULT,
+                    cursor=cursor,
+                    sort=sort,
+                    direction=direction
+                )
             else:
+                # Backward compatible - use original version
                 output = find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=endpoint)
 
         elif operation == "add_to_whisparr":
