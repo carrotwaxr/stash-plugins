@@ -680,10 +680,64 @@
     isLoading = true;
     createModal();
     showLoading();
+    setStatus("Checking endpoints...", "loading");
+
+    try {
+      // For tags, check available endpoints first
+      if (currentEntityType === "tag") {
+        const endpointInfo = await getEndpoints(currentEntityType, currentEntityId);
+        availableEndpoints = endpointInfo.available_endpoints || [];
+        selectedEndpoint = endpointInfo.default_endpoint;
+
+        if (availableEndpoints.length === 0) {
+          showError(`This tag is not linked to any configured stash-box. Please link it first.`);
+          setStatus("Tag not linked to stash-box", "error");
+          isLoading = false;
+          return;
+        }
+
+        // Show endpoint selector if multiple valid endpoints and no clear default
+        if (availableEndpoints.length > 1 && !endpointInfo.default_endpoint) {
+          // Insert selector into modal header
+          const statsEl = document.getElementById("ms-stats");
+          if (statsEl) {
+            const selector = createEndpointSelector(
+              availableEndpoints,
+              availableEndpoints[0].endpoint,
+              (newEndpoint) => {
+                // Re-run search with new endpoint
+                selectedEndpoint = newEndpoint;
+                performSearch();
+              }
+            );
+            statsEl.parentNode.insertBefore(selector, statsEl);
+          }
+          selectedEndpoint = availableEndpoints[0].endpoint;
+        }
+      } else {
+        // For performers/studios, clear endpoint state
+        availableEndpoints = [];
+        selectedEndpoint = null;
+      }
+
+      await performSearch();
+    } catch (error) {
+      console.error("[MissingScenes] Search failed:", error);
+      showError(error.message || "Failed to search for missing scenes");
+      setStatus(error.message || "Search failed", "error");
+      isLoading = false;
+    }
+  }
+
+  /**
+   * Perform the actual search (called by handleSearch and endpoint selector)
+   */
+  async function performSearch() {
+    showLoading();
     setStatus("Searching...", "loading");
 
     try {
-      const result = await findMissingScenes(currentEntityType, currentEntityId);
+      const result = await findMissingScenes(currentEntityType, currentEntityId, selectedEndpoint);
 
       missingScenes = result.missing_scenes || [];
       whisparrConfigured = result.whisparr_configured || false;
