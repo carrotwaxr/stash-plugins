@@ -15,10 +15,8 @@ import urllib.error
 
 import log
 
-# SSL context for HTTPS requests
+# SSL context for HTTPS requests (uses system defaults with proper verification)
 SSL_CONTEXT = ssl.create_default_context()
-SSL_CONTEXT.check_hostname = False
-SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 
 # Default configuration
 DEFAULT_CONFIG = {

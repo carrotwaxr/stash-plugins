@@ -21,6 +21,7 @@
   let currentPage = 1;
   let isLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
+  let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
 
   /**
    * Get the GraphQL endpoint URL for local Stash
@@ -154,32 +155,53 @@
   }
 
   /**
-   * Render the main page content
+   * Get filtered tags based on current filter setting
    */
-  function renderPage(container) {
+  function getFilteredTags() {
     const unmatchedTags = localTags.filter(t => !t.stash_ids || t.stash_ids.length === 0);
     const matchedTags = localTags.filter(t => t.stash_ids && t.stash_ids.length > 0);
 
-    const totalPages = Math.ceil(unmatchedTags.length / settings.pageSize);
+    switch (currentFilter) {
+      case 'matched':
+        return { filtered: matchedTags, unmatched: unmatchedTags, matched: matchedTags };
+      case 'all':
+        return { filtered: localTags, unmatched: unmatchedTags, matched: matchedTags };
+      default: // 'unmatched'
+        return { filtered: unmatchedTags, unmatched: unmatchedTags, matched: matchedTags };
+    }
+  }
+
+  /**
+   * Render the main page content
+   */
+  function renderPage(container) {
+    const { filtered, unmatched, matched } = getFilteredTags();
+
+    const totalPages = Math.ceil(filtered.length / settings.pageSize);
     const startIdx = (currentPage - 1) * settings.pageSize;
-    const pageTags = unmatchedTags.slice(startIdx, startIdx + settings.pageSize);
+    const pageTags = filtered.slice(startIdx, startIdx + settings.pageSize);
+
+    const emptyMessage = currentFilter === 'matched'
+      ? 'No matched tags found'
+      : currentFilter === 'all'
+        ? 'No tags found'
+        : 'No unmatched tags found';
 
     container.innerHTML = `
       <div class="tag-manager">
         <div class="tag-manager-header">
           <h2>Tag Manager</h2>
           <div class="tag-manager-stats">
-            <span class="stat stat-unmatched">${unmatchedTags.length} unmatched</span>
-            <span class="stat stat-matched">${matchedTags.length} matched</span>
+            <span class="stat stat-unmatched">${unmatched.length} unmatched</span>
+            <span class="stat stat-matched">${matched.length} matched</span>
           </div>
-          <button class="btn btn-secondary" id="tm-settings-btn">Settings</button>
         </div>
 
         <div class="tag-manager-filters">
           <select id="tm-filter" class="form-control">
-            <option value="unmatched">Show Unmatched</option>
-            <option value="matched">Show Matched</option>
-            <option value="all">Show All</option>
+            <option value="unmatched" ${currentFilter === 'unmatched' ? 'selected' : ''}>Show Unmatched</option>
+            <option value="matched" ${currentFilter === 'matched' ? 'selected' : ''}>Show Matched</option>
+            <option value="all" ${currentFilter === 'all' ? 'selected' : ''}>Show All</option>
           </select>
           <button class="btn btn-primary" id="tm-search-all-btn" ${isLoading ? 'disabled' : ''}>
             ${isLoading ? 'Searching...' : 'Find Matches for Page'}
@@ -188,7 +210,7 @@
 
         <div class="tag-manager-list" id="tm-tag-list">
           ${pageTags.length === 0
-            ? '<div class="tm-empty">No unmatched tags found</div>'
+            ? `<div class="tm-empty">${emptyMessage}</div>`
             : pageTags.map(tag => renderTagRow(tag)).join('')
           }
         </div>
@@ -260,6 +282,13 @@
    * Attach event handlers to rendered elements
    */
   function attachEventHandlers(container) {
+    // Filter dropdown
+    container.querySelector('#tm-filter')?.addEventListener('change', (e) => {
+      currentFilter = e.target.value;
+      currentPage = 1; // Reset to first page on filter change
+      renderPage(container);
+    });
+
     // Pagination
     container.querySelector('#tm-prev')?.addEventListener('click', () => {
       if (currentPage > 1) {
@@ -269,8 +298,8 @@
     });
 
     container.querySelector('#tm-next')?.addEventListener('click', () => {
-      const unmatchedTags = localTags.filter(t => !t.stash_ids || t.stash_ids.length === 0);
-      const totalPages = Math.ceil(unmatchedTags.length / settings.pageSize);
+      const { filtered } = getFilteredTags();
+      const totalPages = Math.ceil(filtered.length / settings.pageSize);
       if (currentPage < totalPages) {
         currentPage++;
         renderPage(container);
@@ -311,14 +340,22 @@
    * Search for matches for all tags on current page
    */
   async function searchAllOnPage(container) {
-    const unmatchedTags = localTags.filter(t => !t.stash_ids || t.stash_ids.length === 0);
+    const { filtered } = getFilteredTags();
     const startIdx = (currentPage - 1) * settings.pageSize;
-    const pageTags = unmatchedTags.slice(startIdx, startIdx + settings.pageSize);
+    const pageTags = filtered.slice(startIdx, startIdx + settings.pageSize);
+
+    // Only search tags that don't already have StashDB IDs
+    const tagsToSearch = pageTags.filter(t => !t.stash_ids || t.stash_ids.length === 0);
+
+    if (tagsToSearch.length === 0) {
+      showStatus('All tags on this page are already matched', 'info');
+      return;
+    }
 
     isLoading = true;
     renderPage(container);
 
-    for (const tag of pageTags) {
+    for (const tag of tagsToSearch) {
       try {
         const result = await callBackend('search', {
           tag_name: tag.name,
@@ -550,7 +587,7 @@
                     ${m.tag.category ? `<span class="tm-match-category">${escapeHtml(m.tag.category.name)}</span>` : ''}
                   </div>
                   <div class="tm-match-desc">${escapeHtml(m.tag.description || '')}</div>
-                  <div class="tm-match-aliases">Aliases: ${m.tag.aliases?.join(', ') || 'none'}</div>
+                  <div class="tm-match-aliases">Aliases: ${escapeHtml(m.tag.aliases?.join(', ') || 'none')}</div>
                   <button class="btn btn-success btn-sm tm-select-match">Select</button>
                 </div>
               `).join('')
@@ -603,7 +640,7 @@
                 ${m.tag.category ? `<span class="tm-match-category">${escapeHtml(m.tag.category.name)}</span>` : ''}
               </div>
               <div class="tm-match-desc">${escapeHtml(m.tag.description || '')}</div>
-              <div class="tm-match-aliases">Aliases: ${m.tag.aliases?.join(', ') || 'none'}</div>
+              <div class="tm-match-aliases">Aliases: ${escapeHtml(m.tag.aliases?.join(', ') || 'none')}</div>
               <button class="btn btn-success btn-sm tm-select-match">Select</button>
             </div>
           `).join('')
