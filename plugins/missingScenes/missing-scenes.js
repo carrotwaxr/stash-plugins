@@ -691,6 +691,17 @@
   }
 
   /**
+   * Check if we're on a tag page
+   */
+  function getTagPageInfo() {
+    const match = window.location.pathname.match(/\/tags\/(\d+)/);
+    if (match) {
+      return { type: "tag", id: match[1] };
+    }
+    return null;
+  }
+
+  /**
    * Add the search button to the page
    */
   function addSearchButton() {
