@@ -696,14 +696,15 @@ def whisparr_get_status_map(whisparr_url, api_key):
 # Main Operations
 # ============================================================================
 
-def find_missing_scenes(entity_type, entity_id, plugin_settings):
+def find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=None):
     """
     Find scenes from StashDB that are not in local Stash.
 
     Args:
-        entity_type: "performer" or "studio"
-        entity_id: Local Stash ID of the performer/studio
+        entity_type: "performer", "studio", or "tag"
+        entity_id: Local Stash ID of the performer/studio/tag
         plugin_settings: Plugin configuration from Stash
+        endpoint_override: Optional endpoint URL to use instead of settings
 
     Returns:
         Dict with missing scenes and metadata
@@ -714,21 +715,24 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
     if not stashbox_configs:
         return {"error": "No stash-box endpoints configured in Stash settings"}
 
-    # Check if user specified a preferred endpoint
-    preferred_endpoint = plugin_settings.get("stashBoxEndpoint", "").strip()
+    # Determine which endpoint to use:
+    # 1. endpoint_override from frontend (user selected from dropdown)
+    # 2. stashBoxEndpoint from plugin settings (user's configured preference)
+    # 3. First configured stash-box
+    target_endpoint = endpoint_override or plugin_settings.get("stashBoxEndpoint", "").strip()
 
     # Find the matching stash-box config
     stashbox = None
-    if preferred_endpoint:
+    if target_endpoint:
         # User specified an endpoint - find it
         for config in stashbox_configs:
-            if config["endpoint"] == preferred_endpoint:
+            if config["endpoint"] == target_endpoint:
                 stashbox = config
                 break
         if not stashbox:
             # Endpoint not found in configured list
             available = ", ".join([c.get("name", c["endpoint"]) for c in stashbox_configs])
-            return {"error": f"Configured stash-box endpoint '{preferred_endpoint}' not found. Available: {available}"}
+            return {"error": f"Stash-box endpoint '{target_endpoint}' not found. Available: {available}"}
     else:
         # Use the first stash-box (usually StashDB)
         stashbox = stashbox_configs[0]
