@@ -204,6 +204,26 @@ def get_local_studio(studio_id):
     return None
 
 
+def get_local_tag(tag_id):
+    """Get a tag from local Stash with its stash_ids."""
+    query = """
+    query FindTag($id: ID!) {
+        findTag(id: $id) {
+            id
+            name
+            stash_ids {
+                endpoint
+                stash_id
+            }
+        }
+    }
+    """
+    data = stash_graphql(query, {"id": tag_id})
+    if data:
+        return data.get("findTag")
+    return None
+
+
 def get_local_scene_stash_ids(endpoint):
     """Get all stash_ids for scenes that are linked to a specific stash-box endpoint."""
     # Get all scenes with stash_ids
