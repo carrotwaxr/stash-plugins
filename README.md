@@ -77,6 +77,7 @@ Match and sync local tags with StashDB tags. Bulk cleanup your tag library with 
 - Field-by-field merge dialog (name, description, aliases)
 - Manual search for edge cases
 - Links tags to StashDB via `stash_ids`
+- Tag Hierarchy view for browsing parent/child relationships
 
 [Documentation](plugins/tagManager/README.md)
 

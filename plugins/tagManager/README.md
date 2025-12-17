@@ -12,6 +12,7 @@ Match and sync local tags with stash-box tags. Bulk cleanup your tag library wit
 - **Field-by-field merge** - Choose what to keep vs. what to update
 - **Manual search** - Search the stash-box directly for edge cases
 - **Stash-box linking** - Adds `stash_ids` to tags for future syncing
+- **Tag Hierarchy View** - Browse your tags in a visual tree structure showing parent/child relationships
 
 ## Requirements
 
@@ -28,7 +29,7 @@ Match and sync local tags with stash-box tags. Bulk cleanup your tag library wit
 
 ## Usage
 
-1. Navigate to `/plugin/tag-manager` in your Stash UI
+1. Navigate to the Tags page and click the tag icon button, or go to `/plugins/tag-manager` in your Stash UI
 2. Select your stash-box endpoint from the dropdown
 3. The plugin will load cached tags (or fetch them if no cache exists)
 4. Click **Find Matches for Page** to search all visible tags
@@ -37,8 +38,16 @@ Match and sync local tags with stash-box tags. Bulk cleanup your tag library wit
    - **More** - View all potential matches and search manually
 6. In the diff dialog, choose what to update for each field:
    - **Keep** - Keep your current value
-   - **StashDB** - Use the stash-box value
-   - **Merge** (aliases only) - Combine both sets
+   - **Keep + Add stash-box alias** - Keep your name but add the stash-box name as an alias
+   - **StashDB** - Use the stash-box value (your old name is auto-added as an alias)
+
+### Tag Hierarchy
+
+1. Navigate to the Tags page and click the sitemap icon button, or go to `/plugins/tag-hierarchy`
+2. Browse your tags in a tree view showing parent/child relationships
+3. Click arrows to expand/collapse branches
+4. Use "Expand All" / "Collapse All" buttons for quick navigation
+5. Toggle "Show images" to show/hide tag thumbnails
 
 ## Tag Caching
 

@@ -29,6 +29,19 @@
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
 
   /**
+   * Set page title with retry to overcome Stash's title management
+   */
+  function setPageTitle(title) {
+    const doSet = () => { document.title = title; };
+    // Set immediately
+    doSet();
+    // Retry after short delays to override any framework title changes
+    setTimeout(doSet, 50);
+    setTimeout(doSet, 200);
+    setTimeout(doSet, 500);
+  }
+
+  /**
    * Get the GraphQL endpoint URL for local Stash
    */
   function getGraphQLUrl() {
@@ -526,7 +539,7 @@
     } else if (matches !== undefined) {
       matchContent = `
         <span class="tm-no-match">No matches found</span>
-        <button class="btn btn-secondary btn-sm tm-search" data-tag-id="${tag.id}">Search</button>
+        <button class="btn btn-secondary btn-sm tm-manual-search" data-tag-id="${tag.id}">Search</button>
       `;
     } else {
       matchContent = `
@@ -620,6 +633,14 @@
 
     // More buttons
     container.querySelectorAll('.tm-more').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const tagId = e.target.dataset.tagId;
+        showMatchesModal(tagId, container);
+      });
+    });
+
+    // Manual search buttons (shown when no matches found)
+    container.querySelectorAll('.tm-manual-search').forEach(btn => {
       btn.addEventListener('click', (e) => {
         const tagId = e.target.dataset.tagId;
         showMatchesModal(tagId, container);
@@ -760,7 +781,7 @@
                 <td>${escapeHtml(tag.name) || '<em>empty</em>'}</td>
                 <td>${escapeHtml(stashdbTag.name)}</td>
                 <td>
-                  <label><input type="radio" name="tm-name" value="local_add_alias" ${nameDefault === 'local_add_alias' ? 'checked' : ''}> Keep + Add as Alias</label>
+                  <label><input type="radio" name="tm-name" value="local_add_alias" ${nameDefault === 'local_add_alias' ? 'checked' : ''}> Keep + Add stash-box alias</label>
                   <label><input type="radio" name="tm-name" value="local" ${nameDefault === 'local' ? 'checked' : ''}> Keep</label>
                   <label><input type="radio" name="tm-name" value="stashdb" ${nameDefault === 'stashdb' ? 'checked' : ''}> StashDB</label>
                 </td>
@@ -811,6 +832,13 @@
           if (!editableAliases.has(stashdbTag.name) &&
               !Array.from(editableAliases).some(a => a.toLowerCase() === stashdbTag.name.toLowerCase())) {
             editableAliases.add(stashdbTag.name);
+            renderAliasPills();
+          }
+        } else if (e.target.value === 'stashdb') {
+          // Add local name to aliases if not already present (preserve old name when renaming)
+          if (tag.name && !editableAliases.has(tag.name) &&
+              !Array.from(editableAliases).some(a => a.toLowerCase() === tag.name.toLowerCase())) {
+            editableAliases.add(tag.name);
             renderAliasPills();
           }
         }
@@ -1055,7 +1083,7 @@
         if (!containerRef.current) return;
 
         console.debug("[tagManager] Initializing...");
-        document.title = "Tag Matcher | Stash";
+        setPageTitle("Tag Matcher | Stash");
         containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
 
         await loadSettings();
@@ -1283,7 +1311,7 @@
       async function init() {
         if (!containerRef.current) return;
 
-        document.title = "Tag Hierarchy | Stash";
+        setPageTitle("Tag Hierarchy | Stash");
         containerRef.current.innerHTML = '<div class="tag-hierarchy"><div class="th-loading">Loading tags...</div></div>';
 
         try {
