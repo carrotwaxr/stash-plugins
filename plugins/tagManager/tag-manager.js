@@ -172,6 +172,74 @@
   }
 
   /**
+   * Build a tree structure from flat tag list
+   * Tags with multiple parents appear under each parent
+   * @param {Array} tags - Flat array of tags with parent/children info
+   * @returns {Array} - Array of root nodes (tags with no parents)
+   */
+  function buildTagTree(tags) {
+    // Create a map for quick lookup
+    const tagMap = new Map();
+    tags.forEach(tag => {
+      tagMap.set(tag.id, {
+        ...tag,
+        childNodes: []
+      });
+    });
+
+    // Find root tags (no parents) and build children arrays
+    const roots = [];
+
+    tags.forEach(tag => {
+      const node = tagMap.get(tag.id);
+
+      if (tag.parents.length === 0) {
+        // Root tag
+        roots.push(node);
+      } else {
+        // Add this tag as a child to each of its parents
+        tag.parents.forEach(parent => {
+          const parentNode = tagMap.get(parent.id);
+          if (parentNode) {
+            parentNode.childNodes.push(node);
+          }
+        });
+      }
+    });
+
+    // Sort roots and all children alphabetically by name
+    const sortByName = (a, b) => a.name.localeCompare(b.name);
+    roots.sort(sortByName);
+
+    function sortChildren(node) {
+      if (node.childNodes.length > 0) {
+        node.childNodes.sort(sortByName);
+        node.childNodes.forEach(sortChildren);
+      }
+    }
+    roots.forEach(sortChildren);
+
+    return roots;
+  }
+
+  /**
+   * Get stats from tag tree
+   */
+  function getTreeStats(tags) {
+    const totalTags = tags.length;
+    const rootTags = tags.filter(t => t.parents.length === 0).length;
+    const tagsWithChildren = tags.filter(t => t.child_count > 0).length;
+    const tagsWithParents = tags.filter(t => t.parent_count > 0).length;
+
+    return {
+      totalTags,
+      rootTags,
+      tagsWithChildren,
+      tagsWithParents
+    };
+  }
+
+  /**
    * Call Python backend via runPluginOperation
    */
   async function callBackend(mode, args = {}) {
