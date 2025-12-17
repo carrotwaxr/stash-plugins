@@ -3,6 +3,7 @@
 
   const PLUGIN_ID = "tagManager";
   const ROUTE_PATH = "/plugins/tag-manager";
+  const HIERARCHY_ROUTE_PATH = "/plugins/tag-hierarchy";
 
   // Default settings
   const DEFAULTS = {
@@ -1014,11 +1015,31 @@
   }
 
   /**
+   * Tag Hierarchy page component (placeholder)
+   */
+  function TagHierarchyPage() {
+    const React = PluginApi.React;
+    const containerRef = React.useRef(null);
+
+    React.useEffect(() => {
+      if (!containerRef.current) return;
+      document.title = "Tag Hierarchy | Stash";
+      containerRef.current.innerHTML = '<div class="tag-hierarchy"><div class="th-loading">Tag Hierarchy - Coming Soon</div></div>';
+    }, []);
+
+    return React.createElement('div', {
+      ref: containerRef,
+      className: 'tag-hierarchy-container'
+    });
+  }
+
+  /**
    * Register the route
    */
   function registerRoute() {
     PluginApi.register.route(ROUTE_PATH, TagManagerPage);
-    console.log('[tagManager] Route registered:', ROUTE_PATH);
+    PluginApi.register.route(HIERARCHY_ROUTE_PATH, TagHierarchyPage);
+    console.log('[tagManager] Routes registered:', ROUTE_PATH, HIERARCHY_ROUTE_PATH);
   }
 
   /**
