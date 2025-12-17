@@ -714,6 +714,8 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
         entity = get_local_performer(entity_id)
     elif entity_type == "studio":
         entity = get_local_studio(entity_id)
+    elif entity_type == "tag":
+        entity = get_local_tag(entity_id)
     else:
         return {"error": f"Unknown entity type: {entity_type}"}
 
@@ -738,8 +740,10 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
     # Query StashDB for all scenes (with retry/rate limit handling)
     if entity_type == "performer":
         stashdb_scenes = query_stashdb_performer_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
-    else:
+    elif entity_type == "studio":
         stashdb_scenes = query_stashdb_studio_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
+    else:  # tag
+        stashdb_scenes = query_stashdb_tag_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
 
     if not stashdb_scenes:
         return {
