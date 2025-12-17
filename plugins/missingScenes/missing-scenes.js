@@ -295,7 +295,20 @@
     const statsEl = document.getElementById("ms-stats");
     if (!statsEl) return;
 
-    const entityLabel = data.entity_type === "performer" ? "Performer" : "Studio";
+    let entityLabel;
+    switch (data.entity_type) {
+      case "performer":
+        entityLabel = "Performer";
+        break;
+      case "studio":
+        entityLabel = "Studio";
+        break;
+      case "tag":
+        entityLabel = "Tag";
+        break;
+      default:
+        entityLabel = "Entity";
+    }
 
     statsEl.innerHTML = `
       <div class="ms-stat">
