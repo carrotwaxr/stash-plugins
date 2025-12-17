@@ -145,6 +145,33 @@
   }
 
   /**
+   * Fetch all tags with hierarchy information (parents, children)
+   */
+  async function fetchAllTagsWithHierarchy() {
+    const query = `
+      query AllTagsWithHierarchy {
+        allTags {
+          id
+          name
+          image_path
+          scene_count
+          parent_count
+          child_count
+          parents {
+            id
+          }
+          children {
+            id
+          }
+        }
+      }
+    `;
+
+    const result = await graphqlRequest(query);
+    return result.allTags || [];
+  }
+
+  /**
    * Call Python backend via runPluginOperation
    */
   async function callBackend(mode, args = {}) {
