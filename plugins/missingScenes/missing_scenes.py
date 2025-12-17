@@ -1350,11 +1350,12 @@ def main():
         if operation == "find_missing":
             entity_type = args.get("entity_type", "performer")
             entity_id = args.get("entity_id", "")
+            endpoint = args.get("endpoint")  # Optional endpoint override
 
             if not entity_id:
                 output = {"error": "entity_id is required"}
             else:
-                output = find_missing_scenes(entity_type, entity_id, plugin_settings)
+                output = find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=endpoint)
 
         elif operation == "add_to_whisparr":
             stash_id = args.get("stash_id", "")
