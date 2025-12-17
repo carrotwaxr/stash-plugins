@@ -66,6 +66,20 @@ Find StashDB matches for untagged scenes using known performer and studio associ
 
 [Documentation](plugins/sceneMatcher/README.md)
 
+### Tag Manager (v1.0.0)
+
+Match and sync local tags with StashDB tags. Bulk cleanup your tag library with smart matching.
+
+**Features:**
+- Paginated list of unmatched tags with match status
+- Layered search: exact name, alias match, fuzzy matching, synonyms
+- One-click accept for high-confidence matches
+- Field-by-field merge dialog (name, description, aliases)
+- Manual search for edge cases
+- Links tags to StashDB via `stash_ids`
+
+[Documentation](plugins/tagManager/README.md)
+
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/carrotwaxr/stash-plugins/issues)
