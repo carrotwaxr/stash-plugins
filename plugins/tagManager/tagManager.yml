@@ -1,0 +1,41 @@
+name: Tag Manager
+description: Match and sync local tags with StashDB. Features layered search (exact, fuzzy, synonym) and field-by-field merge dialog.
+version: 0.1.0
+url: https://github.com/carrotwaxr/stash-plugins
+
+ui:
+  javascript:
+    - tag-manager.js
+  css:
+    - tag-manager.css
+
+settings:
+  stashdbEndpoint:
+    displayName: StashDB Endpoint
+    description: StashDB GraphQL endpoint URL. Default is https://stashdb.org/graphql
+    type: STRING
+  stashdbApiKey:
+    displayName: StashDB API Key
+    description: Your StashDB API key for authentication
+    type: STRING
+  enableFuzzySearch:
+    displayName: Enable Fuzzy Search
+    description: Use fuzzy matching for close variations (typos, etc). Enabled by default.
+    type: BOOLEAN
+  enableSynonymSearch:
+    displayName: Enable Synonym Search
+    description: Use custom synonym mappings. Enabled by default.
+    type: BOOLEAN
+  fuzzyThreshold:
+    displayName: Fuzzy Match Threshold
+    description: Minimum score (0-100) for fuzzy matches. Default is 80.
+    type: NUMBER
+  pageSize:
+    displayName: Tags Per Page
+    description: Number of tags to show per page. Default is 25.
+    type: NUMBER
+
+exec:
+  - python
+  - "{pluginDir}/tag_manager.py"
+interface: raw

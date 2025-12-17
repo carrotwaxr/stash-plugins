@@ -1,0 +1,4 @@
+{
+  "_comment": "Custom synonym mappings for tag matching. Keys are local tag names, values are arrays of StashDB equivalents.",
+  "synonyms": {}
+}
