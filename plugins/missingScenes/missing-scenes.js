@@ -237,6 +237,45 @@
   }
 
   /**
+   * Create the endpoint selector dropdown
+   */
+  function createEndpointSelector(endpoints, defaultEndpoint, onSelect) {
+    const container = document.createElement("div");
+    container.className = "ms-endpoint-selector";
+    container.id = "ms-endpoint-selector";
+
+    const label = document.createElement("label");
+    label.textContent = "Search on: ";
+    label.htmlFor = "ms-endpoint-dropdown";
+
+    const select = document.createElement("select");
+    select.id = "ms-endpoint-dropdown";
+    select.className = "ms-endpoint-dropdown";
+
+    for (const ep of endpoints) {
+      const option = document.createElement("option");
+      option.value = ep.endpoint;
+      option.textContent = ep.name;
+      if (ep.endpoint === defaultEndpoint) {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    }
+
+    select.onchange = () => {
+      selectedEndpoint = select.value;
+      if (onSelect) {
+        onSelect(select.value);
+      }
+    };
+
+    container.appendChild(label);
+    container.appendChild(select);
+
+    return container;
+  }
+
+  /**
    * Remove the modal
    */
   function removeModal() {
