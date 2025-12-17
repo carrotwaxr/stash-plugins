@@ -2,7 +2,7 @@
   "use strict";
 
   const PLUGIN_ID = "tagManager";
-  const ROUTE_PATH = "/plugin/tag-manager";
+  const ROUTE_PATH = "/plugins/tag-manager";
 
   // Default settings
   const DEFAULTS = {
@@ -958,7 +958,123 @@
     console.log('[tagManager] Route registered:', ROUTE_PATH);
   }
 
+  /**
+   * Create the Tag Manager nav button SVG icon
+   * Uses a settings/gear-like icon to represent tag management
+   */
+  function createTagManagerIcon() {
+    // Using a tag with gear icon to represent "tag management"
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 512 512');
+    svg.setAttribute('class', 'svg-inline--fa fa-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    svg.style.width = '1em';
+    svg.style.height = '1em';
+
+    // Tag with settings/sync icon - represents tag management
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('fill', 'currentColor');
+    // FontAwesome "tags" icon path (fa-tags)
+    path.setAttribute('d', 'M0 80V229.5c0 17 6.7 33.3 18.7 45.3l176 176c25 25 65.5 25 90.5 0L418.7 317.3c25-25 25-65.5 0-90.5l-176-176c-12-12-28.3-18.7-45.3-18.7H48C21.5 32 0 53.5 0 80zm112 32a32 32 0 1 1 0 64 32 32 0 1 1 0-64z');
+    svg.appendChild(path);
+
+    return svg;
+  }
+
+  /**
+   * Inject Tag Manager button into Tags list page toolbar
+   */
+  function injectTagManagerButton() {
+    // Only run on Tags list page
+    if (!window.location.pathname.endsWith('/tags')) {
+      return;
+    }
+
+    // Check if we already injected the button
+    if (document.querySelector('#tm-nav-button')) {
+      return;
+    }
+
+    // Find the toolbar
+    const toolbar = document.querySelector('.filtered-list-toolbar');
+    if (!toolbar) {
+      console.debug('[tagManager] Toolbar not found yet');
+      return;
+    }
+
+    // Strategy 1: Find zoom-slider-container (always present after view mode buttons)
+    let insertionPoint = toolbar.querySelector('.zoom-slider-container');
+
+    // Strategy 2: Find display-mode-select button (dropdown version in some layouts)
+    if (!insertionPoint) {
+      insertionPoint = toolbar.querySelector('.display-mode-select');
+    }
+
+    // Strategy 3: Find the last btn-group with icon buttons
+    if (!insertionPoint) {
+      const btnGroups = toolbar.querySelectorAll('.btn-group');
+      for (const group of btnGroups) {
+        const hasIcons = group.querySelector('.fa-icon') || group.querySelector('svg');
+        if (hasIcons) {
+          insertionPoint = group;
+        }
+      }
+    }
+
+    if (!insertionPoint) {
+      console.debug('[tagManager] No suitable insertion point found in toolbar');
+      return;
+    }
+
+    // Create our button
+    const btn = document.createElement('button');
+    btn.id = 'tm-nav-button';
+    btn.className = 'btn btn-secondary';
+    btn.title = 'Tag Manager';
+    btn.style.marginLeft = '0.5rem';
+    btn.appendChild(createTagManagerIcon());
+
+    // Add click handler to navigate to Tag Manager
+    btn.addEventListener('click', () => {
+      window.location.href = ROUTE_PATH;
+    });
+
+    // Insert after the insertion point
+    insertionPoint.parentNode.insertBefore(btn, insertionPoint.nextSibling);
+    console.debug('[tagManager] Nav button injected on Tags page');
+  }
+
+  /**
+   * Watch for navigation to Tags page and inject button
+   */
+  function setupNavButtonInjection() {
+    // Try to inject immediately
+    injectTagManagerButton();
+
+    // Watch for URL changes (SPA navigation)
+    let lastUrl = window.location.href;
+    const observer = new MutationObserver(() => {
+      if (window.location.href !== lastUrl) {
+        lastUrl = window.location.href;
+        // Wait a bit for DOM to update after navigation
+        setTimeout(injectTagManagerButton, 100);
+        setTimeout(injectTagManagerButton, 500);
+        setTimeout(injectTagManagerButton, 1000);
+      }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // Also try on initial load with delays (for refresh on Tags page)
+    setTimeout(injectTagManagerButton, 100);
+    setTimeout(injectTagManagerButton, 500);
+    setTimeout(injectTagManagerButton, 1000);
+    setTimeout(injectTagManagerButton, 2000);
+  }
+
   // Initialize
   registerRoute();
+  setupNavButtonInjection();
   console.log('[tagManager] Plugin loaded');
 })();
