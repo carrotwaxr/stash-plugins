@@ -506,6 +506,50 @@ def query_scenes_by_studio(url, api_key, studio_id, plugin_settings=None):
     return scenes
 
 
+def query_scenes_by_tag(url, api_key, tag_id, plugin_settings=None):
+    """Query StashDB for all scenes with a specific tag."""
+    query = f"""
+    query QueryScenes($input: SceneQueryInput!) {{
+        queryScenes(input: $input) {{
+            count
+            scenes {{
+                {SCENE_FIELDS}
+            }}
+        }}
+    }}
+    """
+
+    def build_variables(page, per_page):
+        return {
+            "input": {
+                "tags": {
+                    "value": [tag_id],
+                    "modifier": "INCLUDES"
+                },
+                "page": page,
+                "per_page": per_page,
+                "sort": "DATE",
+                "direction": "DESC"
+            }
+        }
+
+    def extract(data):
+        query_data = data.get("queryScenes", {})
+        return query_data.get("scenes", []), query_data.get("count", 0)
+
+    # Use same max_pages as studio queries
+    max_pages = get_config(plugin_settings, "max_pages_studio")
+    scenes = paginated_query(
+        url, api_key, query, build_variables, extract,
+        plugin_settings=plugin_settings,
+        operation_name="scenes for tag",
+        max_pages=max_pages
+    )
+
+    log.LogInfo(f"StashDB: Found {len(scenes)} scenes for tag")
+    return scenes
+
+
 def search_scenes_by_text(url, api_key, search_term, limit=25, plugin_settings=None):
     """Search StashDB scenes by text query."""
     if not search_term or len(search_term) < 3:

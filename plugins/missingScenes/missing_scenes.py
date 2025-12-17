@@ -164,6 +164,36 @@ def get_stashbox_config():
     return []
 
 
+def get_available_endpoints_for_entity(entity_stash_ids):
+    """Get stash-box endpoints that both the entity is linked to AND are configured in Stash.
+
+    Args:
+        entity_stash_ids: List of {endpoint, stash_id} dicts from the entity
+
+    Returns:
+        List of {endpoint, name, stash_id} dicts for valid endpoints
+    """
+    configured_boxes = get_stashbox_config()
+    if not configured_boxes:
+        return []
+
+    # Build lookup of configured endpoints
+    configured_lookup = {box["endpoint"]: box for box in configured_boxes}
+
+    available = []
+    for sid in entity_stash_ids:
+        endpoint = sid.get("endpoint")
+        if endpoint in configured_lookup:
+            box = configured_lookup[endpoint]
+            available.append({
+                "endpoint": endpoint,
+                "name": box.get("name", endpoint),
+                "stash_id": sid.get("stash_id")
+            })
+
+    return available
+
+
 def get_local_performer(performer_id):
     """Get a performer from local Stash with their stash_ids."""
     query = """
@@ -201,6 +231,26 @@ def get_local_studio(studio_id):
     data = stash_graphql(query, {"id": studio_id})
     if data:
         return data.get("findStudio")
+    return None
+
+
+def get_local_tag(tag_id):
+    """Get a tag from local Stash with its stash_ids."""
+    query = """
+    query FindTag($id: ID!) {
+        findTag(id: $id) {
+            id
+            name
+            stash_ids {
+                endpoint
+                stash_id
+            }
+        }
+    }
+    """
+    data = stash_graphql(query, {"id": tag_id})
+    if data:
+        return data.get("findTag")
     return None
 
 
@@ -287,6 +337,21 @@ def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, plugin_se
     """
     return stashbox_api.query_scenes_by_studio(
         stashdb_url, api_key, studio_stash_id,
+        plugin_settings=plugin_settings
+    )
+
+
+def query_stashdb_tag_scenes(stashdb_url, api_key, tag_stash_id, plugin_settings=None):
+    """Query StashDB for all scenes with a tag.
+
+    Uses stashbox_api module for:
+    - Retry with exponential backoff on 504/503/connection errors
+    - Rate limit detection and pause on 429
+    - Configurable delays between paginated requests
+    - Graceful degradation with partial results on failure
+    """
+    return stashbox_api.query_scenes_by_tag(
+        stashdb_url, api_key, tag_stash_id,
         plugin_settings=plugin_settings
     )
 
@@ -631,14 +696,15 @@ def whisparr_get_status_map(whisparr_url, api_key):
 # Main Operations
 # ============================================================================
 
-def find_missing_scenes(entity_type, entity_id, plugin_settings):
+def find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=None):
     """
     Find scenes from StashDB that are not in local Stash.
 
     Args:
-        entity_type: "performer" or "studio"
-        entity_id: Local Stash ID of the performer/studio
+        entity_type: "performer", "studio", or "tag"
+        entity_id: Local Stash ID of the performer/studio/tag
         plugin_settings: Plugin configuration from Stash
+        endpoint_override: Optional endpoint URL to use instead of settings
 
     Returns:
         Dict with missing scenes and metadata
@@ -649,21 +715,24 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
     if not stashbox_configs:
         return {"error": "No stash-box endpoints configured in Stash settings"}
 
-    # Check if user specified a preferred endpoint
-    preferred_endpoint = plugin_settings.get("stashBoxEndpoint", "").strip()
+    # Determine which endpoint to use:
+    # 1. endpoint_override from frontend (user selected from dropdown)
+    # 2. stashBoxEndpoint from plugin settings (user's configured preference)
+    # 3. First configured stash-box
+    target_endpoint = endpoint_override or plugin_settings.get("stashBoxEndpoint", "").strip()
 
     # Find the matching stash-box config
     stashbox = None
-    if preferred_endpoint:
+    if target_endpoint:
         # User specified an endpoint - find it
         for config in stashbox_configs:
-            if config["endpoint"] == preferred_endpoint:
+            if config["endpoint"] == target_endpoint:
                 stashbox = config
                 break
         if not stashbox:
             # Endpoint not found in configured list
             available = ", ".join([c.get("name", c["endpoint"]) for c in stashbox_configs])
-            return {"error": f"Configured stash-box endpoint '{preferred_endpoint}' not found. Available: {available}"}
+            return {"error": f"Stash-box endpoint '{target_endpoint}' not found. Available: {available}"}
     else:
         # Use the first stash-box (usually StashDB)
         stashbox = stashbox_configs[0]
@@ -679,6 +748,8 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
         entity = get_local_performer(entity_id)
     elif entity_type == "studio":
         entity = get_local_studio(entity_id)
+    elif entity_type == "tag":
+        entity = get_local_tag(entity_id)
     else:
         return {"error": f"Unknown entity type: {entity_type}"}
 
@@ -703,8 +774,10 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings):
     # Query StashDB for all scenes (with retry/rate limit handling)
     if entity_type == "performer":
         stashdb_scenes = query_stashdb_performer_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
-    else:
+    elif entity_type == "studio":
         stashdb_scenes = query_stashdb_studio_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
+    else:  # tag
+        stashdb_scenes = query_stashdb_tag_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
 
     if not stashdb_scenes:
         return {
@@ -1277,11 +1350,12 @@ def main():
         if operation == "find_missing":
             entity_type = args.get("entity_type", "performer")
             entity_id = args.get("entity_id", "")
+            endpoint = args.get("endpoint")  # Optional endpoint override
 
             if not entity_id:
                 output = {"error": "entity_id is required"}
             else:
-                output = find_missing_scenes(entity_type, entity_id, plugin_settings)
+                output = find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=endpoint)
 
         elif operation == "add_to_whisparr":
             stash_id = args.get("stash_id", "")
@@ -1291,6 +1365,50 @@ def main():
                 output = {"error": "stash_id is required"}
             else:
                 output = add_to_whisparr(stash_id, title, plugin_settings)
+
+        elif operation == "get_endpoints":
+            entity_type = args.get("entity_type", "")
+            entity_id = args.get("entity_id", "")
+
+            if not entity_id or not entity_type:
+                output = {"error": "entity_type and entity_id are required"}
+            else:
+                # Get the entity
+                if entity_type == "performer":
+                    entity = get_local_performer(entity_id)
+                elif entity_type == "studio":
+                    entity = get_local_studio(entity_id)
+                elif entity_type == "tag":
+                    entity = get_local_tag(entity_id)
+                else:
+                    entity = None
+
+                if not entity:
+                    output = {"error": f"{entity_type.title()} not found: {entity_id}"}
+                else:
+                    stash_ids = entity.get("stash_ids", [])
+                    available = get_available_endpoints_for_entity(stash_ids)
+
+                    # Determine which endpoint to use by default
+                    preferred = plugin_settings.get("stashBoxEndpoint", "").strip()
+                    default_endpoint = None
+
+                    if preferred:
+                        # Check if preferred endpoint is in available list
+                        for ep in available:
+                            if ep["endpoint"] == preferred:
+                                default_endpoint = preferred
+                                break
+
+                    if not default_endpoint and available:
+                        default_endpoint = available[0]["endpoint"]
+
+                    output = {
+                        "entity_name": entity.get("name"),
+                        "available_endpoints": available,
+                        "default_endpoint": default_endpoint,
+                        "show_selector": len(available) > 1 and not default_endpoint
+                    }
 
         elif operation:
             output = {"error": f"Unknown operation: {operation}"}

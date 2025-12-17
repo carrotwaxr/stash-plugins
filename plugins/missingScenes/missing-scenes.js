@@ -6,12 +6,16 @@
   // State
   let modalRoot = null;
   let currentEntityId = null;
-  let currentEntityType = null; // "performer" or "studio"
+  let currentEntityType = null; // "performer", "studio", or "tag"
   let currentEntityName = null;
   let missingScenes = [];
   let isLoading = false;
   let whisparrConfigured = false;
   let stashdbUrl = "";
+
+  // Endpoint selection state (for tags with multiple stash-box links)
+  let availableEndpoints = []; // [{endpoint, name, stash_id}]
+  let selectedEndpoint = null;
 
   /**
    * Get the GraphQL endpoint URL
@@ -90,9 +94,24 @@
   /**
    * Find missing scenes for the current entity
    */
-  async function findMissingScenes(entityType, entityId) {
-    return runPluginOperation({
+  async function findMissingScenes(entityType, entityId, endpoint = null) {
+    const args = {
       operation: "find_missing",
+      entity_type: entityType,
+      entity_id: entityId,
+    };
+    if (endpoint) {
+      args.endpoint = endpoint;
+    }
+    return runPluginOperation(args);
+  }
+
+  /**
+   * Get available endpoints for an entity
+   */
+  async function getEndpoints(entityType, entityId) {
+    return runPluginOperation({
+      operation: "get_endpoints",
       entity_type: entityType,
       entity_id: entityId,
     });
@@ -218,6 +237,45 @@
   }
 
   /**
+   * Create the endpoint selector dropdown
+   */
+  function createEndpointSelector(endpoints, defaultEndpoint, onSelect) {
+    const container = document.createElement("div");
+    container.className = "ms-endpoint-selector";
+    container.id = "ms-endpoint-selector";
+
+    const label = document.createElement("label");
+    label.textContent = "Search on: ";
+    label.htmlFor = "ms-endpoint-dropdown";
+
+    const select = document.createElement("select");
+    select.id = "ms-endpoint-dropdown";
+    select.className = "ms-endpoint-dropdown";
+
+    for (const ep of endpoints) {
+      const option = document.createElement("option");
+      option.value = ep.endpoint;
+      option.textContent = ep.name;
+      if (ep.endpoint === defaultEndpoint) {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    }
+
+    select.onchange = () => {
+      selectedEndpoint = select.value;
+      if (onSelect) {
+        onSelect(select.value);
+      }
+    };
+
+    container.appendChild(label);
+    container.appendChild(select);
+
+    return container;
+  }
+
+  /**
    * Remove the modal
    */
   function removeModal() {
@@ -237,7 +295,20 @@
     const statsEl = document.getElementById("ms-stats");
     if (!statsEl) return;
 
-    const entityLabel = data.entity_type === "performer" ? "Performer" : "Studio";
+    let entityLabel;
+    switch (data.entity_type) {
+      case "performer":
+        entityLabel = "Performer";
+        break;
+      case "studio":
+        entityLabel = "Studio";
+        break;
+      case "tag":
+        entityLabel = "Tag";
+        break;
+      default:
+        entityLabel = "Entity";
+    }
 
     statsEl.innerHTML = `
       <div class="ms-stat">
@@ -622,10 +693,64 @@
     isLoading = true;
     createModal();
     showLoading();
+    setStatus("Checking endpoints...", "loading");
+
+    try {
+      // For tags, check available endpoints first
+      if (currentEntityType === "tag") {
+        const endpointInfo = await getEndpoints(currentEntityType, currentEntityId);
+        availableEndpoints = endpointInfo.available_endpoints || [];
+        selectedEndpoint = endpointInfo.default_endpoint;
+
+        if (availableEndpoints.length === 0) {
+          showError(`This tag is not linked to any configured stash-box. Please link it first.`);
+          setStatus("Tag not linked to stash-box", "error");
+          isLoading = false;
+          return;
+        }
+
+        // Show endpoint selector if multiple valid endpoints and no clear default
+        if (availableEndpoints.length > 1 && !endpointInfo.default_endpoint) {
+          // Insert selector into modal header
+          const statsEl = document.getElementById("ms-stats");
+          if (statsEl) {
+            const selector = createEndpointSelector(
+              availableEndpoints,
+              availableEndpoints[0].endpoint,
+              (newEndpoint) => {
+                // Re-run search with new endpoint
+                selectedEndpoint = newEndpoint;
+                performSearch();
+              }
+            );
+            statsEl.parentNode.insertBefore(selector, statsEl);
+          }
+          selectedEndpoint = availableEndpoints[0].endpoint;
+        }
+      } else {
+        // For performers/studios, clear endpoint state
+        availableEndpoints = [];
+        selectedEndpoint = null;
+      }
+
+      await performSearch();
+    } catch (error) {
+      console.error("[MissingScenes] Search failed:", error);
+      showError(error.message || "Failed to search for missing scenes");
+      setStatus(error.message || "Search failed", "error");
+      isLoading = false;
+    }
+  }
+
+  /**
+   * Perform the actual search (called by handleSearch and endpoint selector)
+   */
+  async function performSearch() {
+    showLoading();
     setStatus("Searching...", "loading");
 
     try {
-      const result = await findMissingScenes(currentEntityType, currentEntityId);
+      const result = await findMissingScenes(currentEntityType, currentEntityId, selectedEndpoint);
 
       missingScenes = result.missing_scenes || [];
       whisparrConfigured = result.whisparr_configured || false;
@@ -691,6 +816,17 @@
   }
 
   /**
+   * Check if we're on a tag page
+   */
+  function getTagPageInfo() {
+    const match = window.location.pathname.match(/\/tags\/(\d+)/);
+    if (match) {
+      return { type: "tag", id: match[1] };
+    }
+    return null;
+  }
+
+  /**
    * Add the search button to the page
    */
   function addSearchButton() {
@@ -702,12 +838,13 @@
     // Determine page type
     const performerInfo = getPerformerPageInfo();
     const studioInfo = getStudioPageInfo();
+    const tagInfo = getTagPageInfo();
 
-    if (!performerInfo && !studioInfo) {
+    if (!performerInfo && !studioInfo && !tagInfo) {
       return;
     }
 
-    const entityInfo = performerInfo || studioInfo;
+    const entityInfo = performerInfo || studioInfo || tagInfo;
     currentEntityType = entityInfo.type;
     currentEntityId = entityInfo.id;
 
@@ -717,7 +854,8 @@
       document.querySelector(".detail-header-buttons") ||
       document.querySelector('[class*="detail"] [class*="button"]')?.parentElement ||
       document.querySelector(".performer-head") ||
-      document.querySelector(".studio-head");
+      document.querySelector(".studio-head") ||
+      document.querySelector(".tag-head");
 
     if (!buttonContainer) {
       // Try again later - page might not be fully loaded

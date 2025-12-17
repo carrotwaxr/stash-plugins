@@ -452,3 +452,38 @@
     width: 100%;
   }
 }
+
+/* Endpoint selector for tags with multiple stash-box links */
+.ms-endpoint-selector {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--ms-bg-secondary, #1a1a1a);
+  border-bottom: 1px solid var(--ms-border, #333);
+}
+
+.ms-endpoint-selector label {
+  color: var(--ms-text-muted, #888);
+  font-size: 0.9rem;
+}
+
+.ms-endpoint-dropdown {
+  background: var(--ms-bg-tertiary, #2a2a2a);
+  color: var(--ms-text, #fff);
+  border: 1px solid var(--ms-border, #333);
+  border-radius: 4px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.ms-endpoint-dropdown:hover {
+  border-color: var(--ms-accent, #0d6efd);
+}
+
+.ms-endpoint-dropdown:focus {
+  outline: none;
+  border-color: var(--ms-accent, #0d6efd);
+  box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
+}

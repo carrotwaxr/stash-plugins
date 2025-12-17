@@ -1,10 +1,10 @@
 # Missing Scenes
 
-Discover scenes from StashDB (or other stash-box instances) that you don't have in your local Stash library. View missing scenes for performers and studios, with optional Whisparr integration for automated downloading and cleanup.
+Discover scenes from StashDB (or other stash-box instances) that you don't have in your local Stash library. View missing scenes for performers, studios, and tags, with optional Whisparr integration for automated downloading and cleanup.
 
 ## Features
 
-- **Performer & Studio Support**: Find missing scenes for any performer or studio linked to a stash-box
+- **Performer, Studio & Tag Support**: Find missing scenes for any performer, studio, or tag linked to a stash-box
 - **Visual Grid Display**: Browse missing scenes with thumbnails, titles, dates, and performer info
 - **Direct StashDB Links**: Click any scene to view it on StashDB
 - **Multi-Endpoint Support**: Works with StashDB, FansDB, or any configured stash-box endpoint
@@ -16,16 +16,26 @@ Discover scenes from StashDB (or other stash-box instances) that you don't have 
 
 - Stash v0.25.0 or later (requires `runPluginOperation` GraphQL mutation)
 - At least one stash-box endpoint configured (Settings → Metadata Providers → Stash-box Endpoints)
-- Performers/Studios must be linked to stash-box (use the Tagger to link them)
+- Performers/Studios/Tags must be linked to stash-box (use the Tagger to link them)
 
 ## Usage
 
-1. Navigate to any **Performer** or **Studio** detail page
+1. Navigate to any **Performer**, **Studio**, or **Tag** detail page
 2. Click the **Missing Scenes** button in the header
 3. The plugin will:
-   - Query the configured stash-box for all scenes featuring that performer/studio
+   - Query the configured stash-box for all scenes featuring that performer/studio/tag
    - Compare against your local Stash library
    - Display scenes you don't have
+
+### Tag Support (Stash 0.30+)
+
+Starting with Stash 0.30, tags can have Stash ID associations. Missing Scenes now supports discovering scenes by tag:
+
+1. Navigate to any Tag detail page
+2. If the tag is linked to a stash-box (e.g., StashDB), you'll see the "Missing Scenes" button
+3. Click to discover scenes with that tag that you don't have locally
+
+**Multiple Endpoints:** If a tag is linked to multiple configured stash-boxes, you'll see a dropdown to select which endpoint to search.
 
 ## Settings
 
@@ -94,7 +104,7 @@ Two tasks are available in **Settings → Tasks → Plugin Tasks**:
 
 ## How It Works
 
-1. **Get Entity**: Fetches the performer/studio from your local Stash
+1. **Get Entity**: Fetches the performer/studio/tag from your local Stash
 2. **Find Stash ID**: Looks up the stash-box ID for that entity
 3. **Query Stash-Box**: Fetches all scenes from the stash-box (paginated, up to 1000 scenes)
 4. **Get Local Scenes**: Fetches all your local scene stash IDs
@@ -103,18 +113,18 @@ Two tasks are available in **Settings → Tasks → Plugin Tasks**:
 
 ## Troubleshooting
 
-### "Performer/Studio is not linked to StashDB"
-The entity needs a stash_id for the configured stash-box endpoint. Use the Tagger (Scenes → Tagger) to match and link the performer/studio.
+### "Performer/Studio/Tag is not linked to StashDB"
+The entity needs a stash_id for the configured stash-box endpoint. Use the Tagger (Scenes → Tagger) to match and link the performer/studio/tag.
 
 ### "No stash-box endpoints configured"
 Go to Settings → Metadata Providers → Stash-box Endpoints and add at least one endpoint (e.g., StashDB).
 
 ### Results seem incomplete
-The plugin fetches up to 1000 scenes (10 pages of 100). For performers/studios with more scenes, the oldest scenes may be excluded.
+The plugin fetches up to 1000 scenes (10 pages of 100). For performers/studios/tags with more scenes, the oldest scenes may be excluded.
 
 ## Technical Details
 
-- **UI Plugin**: JavaScript + CSS injected on performer/studio pages
+- **UI Plugin**: JavaScript + CSS injected on performer/studio/tag pages
 - **Backend**: Python script called via `runPluginOperation` GraphQL mutation
 - **No External Dependencies**: Uses only Python standard library
 - **Pagination**: Fetches 100 scenes per page from stash-box
