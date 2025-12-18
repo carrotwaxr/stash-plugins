@@ -1,6 +1,6 @@
 name: Tag Manager
 description: Match and sync local tags with stash-box endpoints. Features multi-endpoint support, tag caching, layered search (exact, fuzzy, synonym), and field-by-field merge dialog.
-version: 0.2.0
+version: 0.3.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 ui:
@@ -26,8 +26,18 @@ settings:
     displayName: Tags Per Page
     description: Number of tags to show per page. Default is 25.
     type: NUMBER
+  syncDryRun:
+    displayName: Scene Tag Sync - Dry Run
+    description: Preview what tags would be added without making changes (caps at 200 scenes). Default is enabled for safety.
+    type: BOOLEAN
 
 exec:
   - python
   - "{pluginDir}/tag_manager.py"
 interface: raw
+
+tasks:
+  - name: Sync Scene Tags from StashDB
+    description: Fetch tags from StashDB for all scenes with StashIDs and merge with local tags
+    defaultArgs:
+      mode: sync_scene_tags
