@@ -32,6 +32,45 @@ DEFAULT_CONFIG = {
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
+class RateLimiter:
+    """
+    Rate limiter for API calls.
+
+    Enforces minimum interval between requests and provides
+    exponential backoff for retry scenarios.
+    """
+
+    def __init__(self, requests_per_second=2):
+        """
+        Initialize rate limiter.
+
+        Args:
+            requests_per_second: Max requests per second (default 2)
+        """
+        self.min_interval = 1.0 / requests_per_second
+        self.last_request = 0
+
+    def wait(self):
+        """Block until rate limit allows next request."""
+        now = time.time()
+        elapsed = now - self.last_request
+        if elapsed < self.min_interval:
+            time.sleep(self.min_interval - elapsed)
+        self.last_request = time.time()
+
+    def backoff(self, attempt):
+        """
+        Calculate exponential backoff delay.
+
+        Args:
+            attempt: Attempt number (0-indexed)
+
+        Returns:
+            Delay in seconds (2^attempt)
+        """
+        return float(2 ** attempt)
+
+
 class StashDBAPIError(Exception):
     """Exception for StashDB API errors."""
 

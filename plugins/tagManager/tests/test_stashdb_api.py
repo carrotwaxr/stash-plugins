@@ -85,5 +85,34 @@ class TestSearchTagsByName(unittest.TestCase):
         self.assertIn("Anklet", tags[0]["aliases"])
 
 
+class TestRateLimiter(unittest.TestCase):
+    """Test rate limiter functionality."""
+
+    def test_wait_enforces_minimum_interval(self):
+        """Should enforce minimum interval between requests."""
+        from stashdb_api import RateLimiter
+        import time
+
+        limiter = RateLimiter(requests_per_second=10)  # 0.1s interval
+
+        start = time.time()
+        limiter.wait()
+        limiter.wait()
+        elapsed = time.time() - start
+
+        # Two waits should take at least 0.1s (one interval)
+        self.assertGreaterEqual(elapsed, 0.09)
+
+    def test_backoff_calculates_exponential_delay(self):
+        """Should calculate exponential backoff delays."""
+        from stashdb_api import RateLimiter
+
+        limiter = RateLimiter()
+
+        self.assertEqual(limiter.backoff(0), 1.0)  # 2^0 = 1
+        self.assertEqual(limiter.backoff(1), 2.0)  # 2^1 = 2
+        self.assertEqual(limiter.backoff(2), 4.0)  # 2^2 = 4
+
+
 if __name__ == '__main__':
     unittest.main()
