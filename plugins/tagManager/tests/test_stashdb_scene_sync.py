@@ -102,5 +102,132 @@ class TestMatchStashdbTagToLocal(unittest.TestCase):
         self.assertEqual(result, "3")
 
 
+class TestProcessScene(unittest.TestCase):
+    """Test scene processing logic."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.endpoint = "https://stashdb.org/graphql"
+        self.local_tags = [
+            {
+                "id": "1",
+                "name": "Anal",
+                "aliases": [],
+                "stash_ids": [{"endpoint": self.endpoint, "stash_id": "stashdb-anal"}]
+            },
+            {
+                "id": "2",
+                "name": "Blonde",
+                "aliases": [],
+                "stash_ids": []
+            },
+            {
+                "id": "3",
+                "name": "Cowgirl",
+                "aliases": [],
+                "stash_ids": []
+            },
+        ]
+        self.tag_cache = TagCache.build(self.local_tags)
+
+    def test_returns_no_changes_when_no_new_tags(self):
+        """Should return no_changes when scene already has all matched tags."""
+        from stashdb_scene_sync import process_scene, ProcessResult
+
+        local_scene = {
+            "id": "scene-1",
+            "tags": [{"id": "1"}, {"id": "2"}]
+        }
+        stashdb_scene = {
+            "tags": [
+                {"id": "stashdb-anal", "name": "Anal"},
+                {"id": "stashdb-blonde", "name": "Blonde"}
+            ]
+        }
+        settings = {"dry_run": False}
+
+        result = process_scene(
+            local_scene, stashdb_scene, self.tag_cache,
+            stash=None, settings=settings, endpoint=self.endpoint
+        )
+
+        self.assertEqual(result.status, "no_changes")
+        self.assertEqual(result.tags_added, 0)
+
+    def test_identifies_new_tags_to_add(self):
+        """Should identify new tags that need to be added."""
+        from stashdb_scene_sync import process_scene, ProcessResult
+
+        local_scene = {
+            "id": "scene-1",
+            "tags": [{"id": "1"}]  # Only has Anal
+        }
+        stashdb_scene = {
+            "tags": [
+                {"id": "stashdb-anal", "name": "Anal"},
+                {"id": "stashdb-other", "name": "Blonde"},  # New tag
+                {"id": "stashdb-other2", "name": "Cowgirl"}  # New tag
+            ]
+        }
+        settings = {"dry_run": True}
+
+        result = process_scene(
+            local_scene, stashdb_scene, self.tag_cache,
+            stash=None, settings=settings, endpoint=self.endpoint
+        )
+
+        self.assertEqual(result.status, "dry_run")
+        self.assertEqual(result.tags_added, 2)
+
+    def test_skips_unmatched_tags(self):
+        """Should skip StashDB tags with no local match."""
+        from stashdb_scene_sync import process_scene, ProcessResult
+
+        local_scene = {
+            "id": "scene-1",
+            "tags": []
+        }
+        stashdb_scene = {
+            "tags": [
+                {"id": "stashdb-unknown", "name": "Unknown Tag"},
+                {"id": "stashdb-other", "name": "Blonde"}
+            ]
+        }
+        settings = {"dry_run": True}
+
+        result = process_scene(
+            local_scene, stashdb_scene, self.tag_cache,
+            stash=None, settings=settings, endpoint=self.endpoint
+        )
+
+        self.assertEqual(result.tags_added, 1)  # Only Blonde
+        self.assertEqual(result.tags_skipped, 1)  # Unknown Tag
+
+    def test_preserves_existing_tags_in_merge(self):
+        """Should preserve existing tags when calculating merge."""
+        from stashdb_scene_sync import process_scene, ProcessResult
+
+        local_scene = {
+            "id": "scene-1",
+            "tags": [{"id": "99"}]  # Existing tag not in StashDB
+        }
+        stashdb_scene = {
+            "tags": [
+                {"id": "stashdb-other", "name": "Blonde"}
+            ]
+        }
+        settings = {"dry_run": True}
+
+        result = process_scene(
+            local_scene, stashdb_scene, self.tag_cache,
+            stash=None, settings=settings, endpoint=self.endpoint
+        )
+
+        # Should add Blonde (id=2) but preserve existing (id=99)
+        self.assertEqual(result.tags_added, 1)
+        self.assertIn("99", result.merged_tag_ids)
+        self.assertIn("2", result.merged_tag_ids)
+
+
 if __name__ == '__main__':
     unittest.main()
