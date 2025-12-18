@@ -375,21 +375,24 @@ def handle_clear_cache(stashdb_url):
     return {"success": success, "endpoint": stashdb_url}
 
 
-def handle_sync_scene_tags(server_connection, stash_config):
+def handle_sync_scene_tags(server_connection, stash_config, api_key):
     """
     Handle sync_scene_tags mode - sync tags from StashDB to local scenes.
 
     Args:
         server_connection: Stash server connection info
         stash_config: Full Stash configuration
+        api_key: Stash API key for authentication
 
     Returns:
         Dict with sync results
     """
     from stashdb_scene_sync import sync_scene_tags
 
-    # Initialize Stash interface
-    stash = StashInterface(server_connection)
+    # Initialize Stash interface with API key for long-running operations
+    # Session cookies can expire during long sync operations (see stash#5332)
+    connection_with_api_key = {**server_connection, "ApiKey": api_key}
+    stash = StashInterface(connection_with_api_key)
 
     # Get StashDB configuration from Stash
     try:
@@ -493,7 +496,7 @@ def main():
 
     if mode == "sync_scene_tags":
         log.LogInfo("Starting scene tag sync task")
-        # Get stash config for stash-box credentials
+        # Get stash config for stash-box credentials and API key
         stash = StashInterface(server_connection)
         try:
             stash_config = stash.get_configuration()
@@ -501,7 +504,14 @@ def main():
             log.LogError(f"Failed to get Stash configuration: {e}")
             print(json.dumps({"output": {"error": f"Failed to get configuration: {e}"}}))
             return
-        result = handle_sync_scene_tags(server_connection, stash_config)
+
+        # Get the Stash API key for long-running sync operations
+        # Session cookies can expire during multi-hour syncs (stash#5332)
+        api_key = stash_config.get("general", {}).get("apiKey", "")
+        if not api_key:
+            log.LogWarning("No Stash API key configured - using session cookie (may timeout)")
+
+        result = handle_sync_scene_tags(server_connection, stash_config, api_key)
         print(json.dumps({"output": result}))
         return
 
