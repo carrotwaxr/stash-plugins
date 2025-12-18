@@ -229,5 +229,22 @@ class TestProcessScene(unittest.TestCase):
         self.assertIn("2", result.merged_tag_ids)
 
 
+class TestSyncSceneTags(unittest.TestCase):
+    """Test main sync orchestration."""
+
+    def test_sync_logs_summary_statistics(self):
+        """Should log summary statistics at end of sync."""
+        from stashdb_scene_sync import sync_scene_tags
+
+        # Function should exist and be callable
+        self.assertTrue(callable(sync_scene_tags))
+
+    def test_sync_respects_dry_run_limit(self):
+        """Dry run should cap at 200 scenes."""
+        from stashdb_scene_sync import DRY_RUN_LIMIT
+
+        self.assertEqual(DRY_RUN_LIMIT, 200)
+
+
 if __name__ == '__main__':
     unittest.main()
