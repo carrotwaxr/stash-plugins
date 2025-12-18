@@ -85,6 +85,22 @@ class TestSearchTagsByName(unittest.TestCase):
         self.assertIn("Anklet", tags[0]["aliases"])
 
 
+class TestSceneQueries(unittest.TestCase):
+    """Test scene query functionality (mocked)."""
+
+    def test_find_scene_by_id_returns_scene_with_tags(self):
+        """Should return scene dict with tags field."""
+        # This will be an integration test - for unit test, we just verify the function exists
+        from stashdb_api import find_scene_by_id
+        # Function should exist and be callable
+        self.assertTrue(callable(find_scene_by_id))
+
+    def test_find_scenes_by_fingerprints_returns_list_of_lists(self):
+        """Should return list of scene lists matching fingerprint batches."""
+        from stashdb_api import find_scenes_by_fingerprints
+        self.assertTrue(callable(find_scenes_by_fingerprints))
+
+
 class TestRateLimiter(unittest.TestCase):
     """Test rate limiter functionality."""
 

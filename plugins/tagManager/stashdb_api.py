@@ -298,3 +298,107 @@ def search_tags_by_name(url, api_key, search_term, limit=50):
     tags = data.get("queryTags", {}).get("tags", [])
     log.LogDebug(f"Search '{search_term}': found {len(tags)} tags")
     return tags
+
+
+# GraphQL fragment for scene with tags
+SCENE_WITH_TAGS_FIELDS = """
+    id
+    title
+    tags {
+        id
+        name
+        aliases
+    }
+"""
+
+
+def find_scene_by_id(url, api_key, scene_id, rate_limiter=None):
+    """
+    Query StashDB for a single scene by its ID.
+
+    Args:
+        url: StashDB GraphQL endpoint
+        api_key: StashDB API key
+        scene_id: StashDB scene UUID
+        rate_limiter: Optional RateLimiter instance
+
+    Returns:
+        Scene dict with tags, or None if not found
+    """
+    query = f"""
+    query FindScene($id: ID!) {{
+        findScene(id: $id) {{
+            {SCENE_WITH_TAGS_FIELDS}
+        }}
+    }}
+    """
+
+    variables = {"id": scene_id}
+
+    if rate_limiter:
+        rate_limiter.wait()
+
+    try:
+        data = graphql_request(url, query, variables, api_key)
+    except StashDBAPIError as e:
+        log.LogError(f"Error fetching scene {scene_id}: {e}")
+        return None
+
+    if not data:
+        return None
+
+    return data.get("findScene")
+
+
+def find_scenes_by_fingerprints(url, api_key, fingerprint_batches, rate_limiter=None):
+    """
+    Batch query StashDB for scenes by fingerprints.
+
+    Args:
+        url: StashDB GraphQL endpoint
+        api_key: StashDB API key
+        fingerprint_batches: List of fingerprint lists (max 40 batches)
+            Each fingerprint: {'hash': str, 'algorithm': 'MD5'|'OSHASH'|'PHASH'}
+        rate_limiter: Optional RateLimiter instance
+
+    Returns:
+        List of lists of scene dicts (one list per input batch)
+    """
+    if len(fingerprint_batches) > 40:
+        log.LogWarning(f"Fingerprint batch size {len(fingerprint_batches)} exceeds limit of 40")
+        fingerprint_batches = fingerprint_batches[:40]
+
+    query = f"""
+    query FindScenesByFingerprints($fingerprints: [[FingerprintQueryInput!]!]!) {{
+        findScenesBySceneFingerprints(fingerprints: $fingerprints) {{
+            {SCENE_WITH_TAGS_FIELDS}
+        }}
+    }}
+    """
+
+    # Convert to GraphQL input format
+    gql_fingerprints = []
+    for batch in fingerprint_batches:
+        gql_batch = []
+        for fp in batch:
+            gql_batch.append({
+                "hash": fp["hash"],
+                "algorithm": fp["algorithm"]
+            })
+        gql_fingerprints.append(gql_batch)
+
+    variables = {"fingerprints": gql_fingerprints}
+
+    if rate_limiter:
+        rate_limiter.wait()
+
+    try:
+        data = graphql_request(url, query, variables, api_key)
+    except StashDBAPIError as e:
+        log.LogError(f"Error fetching scenes by fingerprints: {e}")
+        return [[] for _ in fingerprint_batches]
+
+    if not data:
+        return [[] for _ in fingerprint_batches]
+
+    return data.get("findScenesBySceneFingerprints", [])
