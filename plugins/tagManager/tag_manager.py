@@ -18,6 +18,7 @@ import sys
 import time
 
 import log
+from stashapi.stashapp import StashInterface
 from stashdb_api import search_tags_by_name, query_all_tags
 from matcher import TagMatcher, load_synonyms
 
@@ -374,6 +375,77 @@ def handle_clear_cache(stashdb_url):
     return {"success": success, "endpoint": stashdb_url}
 
 
+def handle_sync_scene_tags(server_connection, stash_config):
+    """
+    Handle sync_scene_tags mode - sync tags from StashDB to local scenes.
+
+    Args:
+        server_connection: Stash server connection info
+        stash_config: Full Stash configuration
+
+    Returns:
+        Dict with sync results
+    """
+    from stashdb_scene_sync import sync_scene_tags
+
+    # Initialize Stash interface
+    stash = StashInterface(server_connection)
+
+    # Get StashDB configuration from Stash
+    try:
+        stash_boxes = stash_config.get("general", {}).get("stashBoxes", [])
+    except Exception as e:
+        log.LogError(f"Failed to get Stash configuration: {e}")
+        return {"error": f"Failed to get Stash configuration: {e}"}
+
+    if not stash_boxes:
+        log.LogWarning("No stash-box endpoints configured in Stash")
+        return {"error": "No stash-box endpoints configured. Go to Settings > Metadata Providers to add StashDB."}
+
+    # Use first stash-box (typically StashDB)
+    stashdb_config = stash_boxes[0]
+    stashdb_url = stashdb_config.get("endpoint", "")
+    stashdb_api_key = stashdb_config.get("api_key", "")
+
+    if not stashdb_url or not stashdb_api_key:
+        log.LogError("StashDB endpoint or API key not configured")
+        return {"error": "StashDB endpoint or API key not configured"}
+
+    log.LogInfo(f"Using stash-box endpoint: {stashdb_url}")
+
+    # Get dry_run setting from plugin config
+    try:
+        plugin_config = stash_config.get("plugins", {}).get(PLUGIN_ID, {})
+        dry_run = plugin_config.get("syncDryRun", True)  # Default to safe mode
+    except Exception:
+        dry_run = True
+
+    sync_settings = {
+        "dry_run": dry_run
+    }
+
+    # Run sync
+    try:
+        stats = sync_scene_tags(stash, stashdb_url, stashdb_api_key, sync_settings)
+        return {
+            "success": True,
+            "dry_run": dry_run,
+            "total_scenes": stats.total_scenes,
+            "processed": stats.processed,
+            "updated": stats.updated,
+            "no_changes": stats.no_changes,
+            "skipped": stats.skipped,
+            "errors": stats.errors,
+            "tags_added": stats.tags_added_total,
+            "tags_skipped": stats.tags_skipped_total
+        }
+    except Exception as e:
+        log.LogError(f"Sync failed: {e}")
+        import traceback
+        log.LogDebug(traceback.format_exc())
+        return {"error": str(e)}
+
+
 def main():
     """Main entry point - reads input from stdin, routes to handler, outputs result."""
     try:
@@ -416,6 +488,20 @@ def main():
             print(json.dumps({"output": {"error": "No endpoint URL provided"}}))
             return
         result = handle_clear_cache(stashdb_url)
+        print(json.dumps({"output": result}))
+        return
+
+    if mode == "sync_scene_tags":
+        log.LogInfo("Starting scene tag sync task")
+        # Get stash config for stash-box credentials
+        stash = StashInterface(server_connection)
+        try:
+            stash_config = stash.get_configuration()
+        except Exception as e:
+            log.LogError(f"Failed to get Stash configuration: {e}")
+            print(json.dumps({"output": {"error": f"Failed to get configuration: {e}"}}))
+            return
+        result = handle_sync_scene_tags(server_connection, stash_config)
         print(json.dumps({"output": result}))
         return
 
