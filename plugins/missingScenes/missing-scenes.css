@@ -257,6 +257,11 @@
   text-overflow: ellipsis;
 }
 
+.ms-performer-favorite {
+  color: #e9345d;
+  font-weight: 600;
+}
+
 /* Scene Actions */
 .ms-scene-actions {
   display: flex;
@@ -523,6 +528,33 @@
   outline: none;
   border-color: var(--ms-accent, #0d6efd);
   box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
+}
+
+/* Favorite Filter Checkbox */
+.ms-filter-favorites {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ms-filter-favorites input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: #0d6efd;
+}
+
+.ms-filter-favorites span {
+  color: #fff;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.ms-filter-favorites:hover span {
+  color: #ccc;
 }
 
 /* Load More Button */

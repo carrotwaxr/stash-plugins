@@ -7,7 +7,6 @@
   let modalRoot = null;
   let currentEntityId = null;
   let currentEntityType = null; // "performer", "studio", or "tag"
-  let currentEntityName = null;
   let missingScenes = [];
   let isLoading = false;
   let whisparrConfigured = false;
@@ -25,6 +24,11 @@
   let totalLocal = 0;
   let sortField = "DATE";
   let sortDirection = "DESC";
+
+  // Favorite performers filter state
+  let favoritePerformerStashIds = new Set(); // Set of stash_ids for quick lookup
+  let favoritePerformerNames = new Set(); // Set of names for fallback comparison
+  let filterFavoritesOnly = false;
 
   /**
    * Get the GraphQL endpoint URL
@@ -180,6 +184,138 @@
   }
 
   /**
+   * Fetch favorite performers from Stash instance (with pagination support)
+   */
+  async function fetchFavoritePerformers() {
+    const query = `
+      query FindFavoritePerformers($filter: FindFilterType) {
+        findPerformers(
+          filter: $filter
+          performer_filter: { filter_favorites: true }
+        ) {
+          count
+          performers {
+            name
+            stash_ids {
+              endpoint
+              stash_id
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const allPerformers = [];
+      let page = 1;
+      const perPage = 100;
+      let totalCount = 0;
+      let hasMore = true;
+
+      // Fetch all pages of favorite performers
+      while (hasMore) {
+        const data = await graphqlRequest(query, {
+          filter: {
+            per_page: perPage,
+            page: page
+          }
+        });
+
+        const result = data?.findPerformers;
+        if (!result) {
+          break;
+        }
+
+        // Get total count from first page
+        if (page === 1) {
+          totalCount = result.count || 0;
+        }
+
+        const performers = result.performers || [];
+        allPerformers.push(...performers);
+
+        // Check if we've fetched all performers
+        if (performers.length < perPage || allPerformers.length >= totalCount) {
+          hasMore = false;
+        } else {
+          page++;
+        }
+      }
+
+      // Build lookup sets for quick filtering
+      favoritePerformerStashIds.clear();
+      favoritePerformerNames.clear();
+
+      allPerformers.forEach((performer) => {
+        if (performer.name) {
+          favoritePerformerNames.add(performer.name);
+        }
+        // Add all stash_ids from all endpoints
+        performer.stash_ids?.forEach((sid) => {
+          if (sid?.stash_id) {
+            favoritePerformerStashIds.add(sid.stash_id);
+          }
+        });
+      });
+
+      console.log(`[MissingScenes] Loaded ${allPerformers.length} favorite performers (${page} page${page > 1 ? 's' : ''})`);
+      return allPerformers;
+    } catch (error) {
+      console.error("[MissingScenes] Failed to fetch favorite performers:", error);
+      favoritePerformerStashIds.clear();
+      favoritePerformerNames.clear();
+      return [];
+    }
+  }
+
+  /**
+   * Check if a specific performer is a favorite
+   */
+  function isFavoritePerformer(performer) {
+    if (favoritePerformerStashIds.size === 0 && favoritePerformerNames.size === 0) {
+      return false; // No favorites loaded yet
+    }
+
+    const stashId = performer.id; // StashDB performer ID
+    const name = performer.name;
+
+    // First try matching by stash_id (most reliable)
+    if (stashId && favoritePerformerStashIds.has(stashId)) {
+      return true;
+    }
+
+    // Fallback to name matching
+    if (name && favoritePerformerNames.has(name)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Check if a scene has any favorite performers
+   */
+  function sceneHasFavoritePerformer(scene) {
+    if (!filterFavoritesOnly || favoritePerformerStashIds.size === 0) {
+      return true; // No filter or no favorites loaded, show all
+    }
+
+    const performers = scene.performers || [];
+    if (performers.length === 0) {
+      return false; // No performers, can't match
+    }
+
+    // Check each performer in the scene
+    for (const perf of performers) {
+      if (isFavoritePerformer(perf)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * Create the modal UI
    */
   function createModal() {
@@ -226,9 +362,13 @@
         <option value="UPDATED_AT">Last Updated</option>
       </select>
       <select id="ms-sort-direction" class="ms-sort-select">
-        <option value="DESC">Newest First</option>
-        <option value="ASC">Oldest First</option>
+        <option value="DESC">Desc ↓</option>
+        <option value="ASC">Asc ↑</option>
       </select>
+      <label class="ms-filter-favorites">
+        <input type="checkbox" id="ms-filter-favorites" />
+        <span>Only favorite performers</span>
+      </label>
     `;
 
     // Body (results)
@@ -264,6 +404,21 @@
     const sortDirSelect = sortControls.querySelector("#ms-sort-direction");
     sortFieldSelect.onchange = handleSortChange;
     sortDirSelect.onchange = handleSortChange;
+
+    // Favorite filter handler
+    const filterCheckbox = sortControls.querySelector("#ms-filter-favorites");
+    filterCheckbox.checked = filterFavoritesOnly;
+    filterCheckbox.onchange = () => {
+      filterFavoritesOnly = filterCheckbox.checked;
+      renderResults(); // Re-render with filter applied
+      // Update status to show filter state
+      if (filterFavoritesOnly) {
+        const filteredCount = missingScenes.filter(sceneHasFavoritePerformer).length;
+        setStatus(`Showing ${filteredCount} scenes with favorite performers`, "success");
+      } else {
+        setStatus(`Showing all ${missingScenes.length} missing scenes`, "success");
+      }
+    };
 
     // Keyboard handler for escape
     const keyHandler = (e) => {
@@ -414,13 +569,28 @@
     const container = document.getElementById("ms-results");
     if (!container) return;
 
-    if (missingScenes.length === 0) {
-      container.innerHTML = `
-        <div class="ms-placeholder ms-success">
-          <div class="ms-success-icon">&#10003;</div>
-          <div>You have all available scenes!</div>
-        </div>
-      `;
+    // Apply favorite filter if enabled
+    let filteredMissingScenes = missingScenes;
+    if (filterFavoritesOnly) {
+      filteredMissingScenes = missingScenes.filter(sceneHasFavoritePerformer);
+    }
+
+    if (filteredMissingScenes.length === 0) {
+      if (missingScenes.length === 0) {
+        container.innerHTML = `
+          <div class="ms-placeholder ms-success">
+            <div class="ms-success-icon">&#10003;</div>
+            <div>You have all available scenes!</div>
+          </div>
+        `;
+      } else {
+        container.innerHTML = `
+          <div class="ms-placeholder">
+            <div>No scenes found matching the current filter.</div>
+            ${filterFavoritesOnly ? '<div style="margin-top: 0.5em; font-size: 0.9em; opacity: 0.8;">Try disabling the "Only favorite performers" filter.</div>' : ''}
+          </div>
+        `;
+      }
       updateLoadMoreButton();
       return;
     }
@@ -429,7 +599,7 @@
     const grid = document.createElement("div");
     grid.className = "ms-results-grid";
 
-    for (const scene of missingScenes) {
+    for (const scene of filteredMissingScenes) {
       const item = createSceneCard(scene);
       grid.appendChild(item);
     }
@@ -440,7 +610,7 @@
     // Show "Add All" button if Whisparr is configured
     const addAllBtn = document.getElementById("ms-add-all-btn");
     if (addAllBtn && whisparrConfigured) {
-      const notInWhisparr = missingScenes.filter((s) => !s.in_whisparr);
+      const notInWhisparr = filteredMissingScenes.filter((s) => !s.in_whisparr);
       if (notInWhisparr.length > 0) {
         addAllBtn.style.display = "inline-block";
         addAllBtn.textContent = `Add All to Whisparr (${notInWhisparr.length})`;
@@ -535,10 +705,31 @@
     const performers = document.createElement("div");
     performers.className = "ms-scene-performers";
     if (scene.performers && scene.performers.length > 0) {
-      const names = scene.performers.map((p) => p.name).slice(0, 3);
-      performers.textContent = names.join(", ");
-      if (scene.performers.length > 3) {
-        performers.textContent += ` +${scene.performers.length - 3}`;
+      const displayPerformers = scene.performers.slice(0, 3);
+      const remainingCount = scene.performers.length - 3;
+      
+      displayPerformers.forEach((perf, index) => {
+        const isFavorite = isFavoritePerformer(perf);
+        const nameSpan = document.createElement("span");
+        
+        nameSpan.textContent = perf.name;
+        
+        if (isFavorite) {
+          nameSpan.className = "ms-performer-favorite";
+        }
+        
+        performers.appendChild(nameSpan);
+        
+        // Add comma separator (except for last item)
+        if (index < displayPerformers.length - 1 || remainingCount > 0) {
+          const separator = document.createTextNode(", ");
+          performers.appendChild(separator);
+        }
+      });
+      
+      if (remainingCount > 0) {
+        const moreText = document.createTextNode(` +${remainingCount}`);
+        performers.appendChild(moreText);
       }
     }
 
@@ -802,6 +993,11 @@
     setStatus("Checking endpoints...", "loading");
 
     try {
+      // Fetch favorite performers in the background (non-blocking)
+      fetchFavoritePerformers().catch((err) => {
+        console.warn("[MissingScenes] Failed to load favorite performers:", err);
+      });
+
       // For tags, check available endpoints first
       if (currentEntityType === "tag") {
         const endpointInfo = await getEndpoints(currentEntityType, currentEntityId);
