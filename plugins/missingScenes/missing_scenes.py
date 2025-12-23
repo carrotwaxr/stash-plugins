@@ -343,6 +343,124 @@ def get_local_scene_stash_ids(endpoint):
     return all_stash_ids
 
 
+def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
+    """Get stash_ids for all favorited entities of a given type.
+
+    Fetches all favorited performers/studios/tags from local Stash and returns
+    the set of their StashDB stash_ids for the specified endpoint.
+
+    Args:
+        entity_type: "performer", "studio", or "tag"
+        endpoint: StashDB endpoint URL to match stash_ids against
+
+    Returns:
+        Set of StashDB IDs for favorites linked to that endpoint
+    """
+    # Build query based on entity type
+    if entity_type == "performer":
+        query = """
+        query FindFavoritePerformers($filter: FindFilterType) {
+            findPerformers(
+                filter: $filter
+                performer_filter: { filter_favorites: true }
+            ) {
+                count
+                performers {
+                    id
+                    name
+                    stash_ids {
+                        endpoint
+                        stash_id
+                    }
+                }
+            }
+        }
+        """
+        result_key = "findPerformers"
+        items_key = "performers"
+    elif entity_type == "studio":
+        query = """
+        query FindFavoriteStudios($filter: FindFilterType) {
+            findStudios(
+                filter: $filter
+                studio_filter: { filter_favorites: true }
+            ) {
+                count
+                studios {
+                    id
+                    name
+                    stash_ids {
+                        endpoint
+                        stash_id
+                    }
+                }
+            }
+        }
+        """
+        result_key = "findStudios"
+        items_key = "studios"
+    elif entity_type == "tag":
+        query = """
+        query FindFavoriteTags($filter: FindFilterType) {
+            findTags(
+                filter: $filter
+                tag_filter: { filter_favorites: true }
+            ) {
+                count
+                tags {
+                    id
+                    name
+                    stash_ids {
+                        endpoint
+                        stash_id
+                    }
+                }
+            }
+        }
+        """
+        result_key = "findTags"
+        items_key = "tags"
+    else:
+        log.LogWarning(f"Unknown entity type for favorites: {entity_type}")
+        return set()
+
+    stash_ids = set()
+    page = 1
+    per_page = 100
+
+    while True:
+        data = stash_graphql(query, {
+            "filter": {
+                "page": page,
+                "per_page": per_page
+            }
+        })
+
+        if not data or result_key not in data:
+            break
+
+        result = data[result_key]
+        items = result.get(items_key, [])
+
+        if not items:
+            break
+
+        for item in items:
+            for sid in item.get("stash_ids", []):
+                if sid.get("endpoint") == endpoint:
+                    stash_ids.add(sid.get("stash_id"))
+
+        # Check if we've fetched all items
+        total = result.get("count", 0)
+        if page * per_page >= total:
+            break
+
+        page += 1
+
+    log.LogInfo(f"Found {len(stash_ids)} favorite {entity_type}s linked to {endpoint}")
+    return stash_ids
+
+
 # ============================================================================
 # StashDB API (using resilient stashbox_api module)
 # ============================================================================
@@ -875,9 +993,52 @@ PAGE_SIZE_MAX = 100
 PAGE_SIZE_DEFAULT = 50
 
 
+def scene_passes_favorite_filters(scene, favorite_performer_ids, favorite_studio_ids, favorite_tag_ids):
+    """Check if a scene passes all enabled favorite filters.
+
+    Args:
+        scene: Scene object from StashDB
+        favorite_performer_ids: Set of favorite performer stash_ids, or None if not filtering
+        favorite_studio_ids: Set of favorite studio stash_ids, or None if not filtering
+        favorite_tag_ids: Set of favorite tag stash_ids, or None if not filtering
+
+    Returns:
+        True if scene passes all enabled filters (AND logic)
+    """
+    # If no filters enabled, pass
+    if favorite_performer_ids is None and favorite_studio_ids is None and favorite_tag_ids is None:
+        return True
+
+    # Check performer filter (scene must have at least one favorite performer)
+    if favorite_performer_ids is not None:
+        scene_performer_ids = set()
+        for p in scene.get("performers", []):
+            performer = p.get("performer", {})
+            if performer.get("id"):
+                scene_performer_ids.add(performer["id"])
+        if not scene_performer_ids & favorite_performer_ids:
+            return False
+
+    # Check studio filter (scene's studio must be a favorite)
+    if favorite_studio_ids is not None:
+        studio = scene.get("studio")
+        if not studio or studio.get("id") not in favorite_studio_ids:
+            return False
+
+    # Check tag filter (scene must have at least one favorite tag)
+    if favorite_tag_ids is not None:
+        scene_tag_ids = {t.get("id") for t in scene.get("tags", []) if t.get("id")}
+        if not scene_tag_ids & favorite_tag_ids:
+            return False
+
+    return True
+
+
 def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
                      page_size=PAGE_SIZE_DEFAULT, stashdb_page=1, offset=0,
-                     sort="DATE", direction="DESC", plugin_settings=None):
+                     sort="DATE", direction="DESC", plugin_settings=None,
+                     favorite_performer_ids=None, favorite_studio_ids=None,
+                     favorite_tag_ids=None):
     """
     Fetch scenes from StashDB until we have page_size missing scenes.
 
@@ -897,6 +1058,9 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
         sort: Sort field for StashDB query
         direction: Sort direction
         plugin_settings: Plugin configuration
+        favorite_performer_ids: Set of favorite performer stash_ids to filter by, or None
+        favorite_studio_ids: Set of favorite studio stash_ids to filter by, or None
+        favorite_tag_ids: Set of favorite tag stash_ids to filter by, or None
 
     Returns:
         dict with:
@@ -951,8 +1115,11 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
                 continue
 
             scene_id = scene.get("id")
+            # Check if scene is missing locally AND passes favorite filters
             if scene_id and scene_id not in local_ids:
-                collected.append(scene)
+                if scene_passes_favorite_filters(scene, favorite_performer_ids,
+                                                  favorite_studio_ids, favorite_tag_ids):
+                    collected.append(scene)
                 if len(collected) >= page_size:
                     # Save position for next request
                     # We've processed up to index i (inclusive), so next starts at i+1
@@ -1156,7 +1323,10 @@ def find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_overri
 
 def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
                                    endpoint_override=None, page_size=PAGE_SIZE_DEFAULT,
-                                   cursor=None, sort="DATE", direction="DESC"):
+                                   cursor=None, sort="DATE", direction="DESC",
+                                   filter_favorite_performers=False,
+                                   filter_favorite_studios=False,
+                                   filter_favorite_tags=False):
     """
     Find missing scenes with pagination support.
 
@@ -1172,6 +1342,9 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         cursor: Pagination cursor from previous request (None for first page)
         sort: Sort field - "DATE", "TITLE", "CREATED_AT", "UPDATED_AT"
         direction: Sort direction - "ASC" or "DESC"
+        filter_favorite_performers: If True, only show scenes with favorite performers
+        filter_favorite_studios: If True, only show scenes from favorite studios
+        filter_favorite_tags: If True, only show scenes with favorite tags
 
     Returns:
         Dict with:
@@ -1265,6 +1438,51 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         stashdb_page = 1
         offset = 0
 
+    # Fetch favorite stash_ids if any filters are enabled
+    favorite_performer_ids = None
+    favorite_studio_ids = None
+    favorite_tag_ids = None
+
+    # Build list of enabled filters that have no favorites (for early return)
+    empty_filters = []
+
+    if filter_favorite_performers:
+        favorite_performer_ids = get_favorite_stash_ids("performer", stashdb_url)
+        if not favorite_performer_ids:
+            empty_filters.append("performers")
+
+    if filter_favorite_studios:
+        favorite_studio_ids = get_favorite_stash_ids("studio", stashdb_url)
+        if not favorite_studio_ids:
+            empty_filters.append("studios")
+
+    if filter_favorite_tags:
+        favorite_tag_ids = get_favorite_stash_ids("tag", stashdb_url)
+        if not favorite_tag_ids:
+            empty_filters.append("tags")
+
+    # Early return if any filter is enabled but has no favorites
+    # (AND logic means if any filter can't match, no results are possible)
+    if empty_filters:
+        log.LogInfo(f"Filters enabled but no favorites found for: {', '.join(empty_filters)}")
+        return {
+            "entity_name": entity.get("name"),
+            "entity_type": entity_type,
+            "stashdb_name": stashdb_name,
+            "stashdb_url": stashdb_url.replace("/graphql", ""),
+            "total_on_stashdb": 0,
+            "total_local": total_local,
+            "missing_count_estimate": None,
+            "missing_count_loaded": 0,
+            "cursor": None,
+            "has_more": False,
+            "is_complete": True,
+            "missing_scenes": [],
+            "whisparr_configured": bool(plugin_settings.get("whisparrUrl") and
+                                        plugin_settings.get("whisparrApiKey")),
+            "empty_filter_types": empty_filters  # Frontend can use this for messaging
+        }
+
     # Fetch missing scenes
     result = fetch_until_full(
         url=stashdb_url,
@@ -1277,7 +1495,10 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         offset=offset,
         sort=sort,
         direction=direction,
-        plugin_settings=plugin_settings
+        plugin_settings=plugin_settings,
+        favorite_performer_ids=favorite_performer_ids,
+        favorite_studio_ids=favorite_studio_ids,
+        favorite_tag_ids=favorite_tag_ids
     )
 
     # Format scenes
@@ -1833,6 +2054,11 @@ def main():
             sort = args.get("sort", "DATE")
             direction = args.get("direction", "DESC")
 
+            # Favorite entity filters
+            filter_favorite_performers = args.get("filter_favorite_performers", False)
+            filter_favorite_studios = args.get("filter_favorite_studios", False)
+            filter_favorite_tags = args.get("filter_favorite_tags", False)
+
             if not entity_id:
                 output = {"error": "entity_id is required"}
             elif page_size is not None or cursor is not None:
@@ -1843,7 +2069,10 @@ def main():
                     page_size=page_size or PAGE_SIZE_DEFAULT,
                     cursor=cursor,
                     sort=sort,
-                    direction=direction
+                    direction=direction,
+                    filter_favorite_performers=filter_favorite_performers,
+                    filter_favorite_studios=filter_favorite_studios,
+                    filter_favorite_tags=filter_favorite_tags
                 )
             else:
                 # Backward compatible - use original version

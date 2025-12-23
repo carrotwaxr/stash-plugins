@@ -723,6 +723,316 @@ class TestCountLocalScenesForEntity(unittest.TestCase):
         self.assertEqual(result, 0)
 
 
+class TestGetFavoriteStashIds(unittest.TestCase):
+    """Test the get_favorite_stash_ids function."""
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_get_favorite_performers_single_page(self, mock_graphql):
+        """Test fetching favorite performers with a single page."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findPerformers": {
+                "count": 2,
+                "performers": [
+                    {"id": "1", "name": "Performer 1", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "stashdb-perf-1"}
+                    ]},
+                    {"id": "2", "name": "Performer 2", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "stashdb-perf-2"},
+                        {"endpoint": "https://other.com/graphql", "stash_id": "other-1"}
+                    ]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids("performer", endpoint)
+
+        self.assertEqual(result, {"stashdb-perf-1", "stashdb-perf-2"})
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_get_favorite_studios(self, mock_graphql):
+        """Test fetching favorite studios."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findStudios": {
+                "count": 1,
+                "studios": [
+                    {"id": "1", "name": "Studio 1", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "stashdb-studio-1"}
+                    ]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids("studio", endpoint)
+
+        self.assertEqual(result, {"stashdb-studio-1"})
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_get_favorite_tags(self, mock_graphql):
+        """Test fetching favorite tags."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findTags": {
+                "count": 1,
+                "tags": [
+                    {"id": "1", "name": "Tag 1", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "stashdb-tag-1"}
+                    ]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids("tag", endpoint)
+
+        self.assertEqual(result, {"stashdb-tag-1"})
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_get_favorite_filters_by_endpoint(self, mock_graphql):
+        """Test that only stash_ids matching the endpoint are returned."""
+        endpoint = "https://stashdb.org/graphql"
+        other_endpoint = "https://fansdb.cc/graphql"
+        mock_graphql.return_value = {
+            "findPerformers": {
+                "count": 2,
+                "performers": [
+                    {"id": "1", "name": "Performer 1", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "stashdb-1"},
+                        {"endpoint": other_endpoint, "stash_id": "fansdb-1"}
+                    ]},
+                    {"id": "2", "name": "Performer 2", "stash_ids": [
+                        {"endpoint": other_endpoint, "stash_id": "fansdb-2"}
+                    ]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids("performer", endpoint)
+
+        # Only stashdb ID should be returned
+        self.assertEqual(result, {"stashdb-1"})
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_get_favorite_empty_result(self, mock_graphql):
+        """Test that empty result returns empty set."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findPerformers": {
+                "count": 0,
+                "performers": []
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids("performer", endpoint)
+
+        self.assertEqual(result, set())
+
+    def test_get_favorite_unknown_entity_type(self):
+        """Test that unknown entity type returns empty set."""
+        result = missing_scenes.get_favorite_stash_ids("unknown", "https://stashdb.org/graphql")
+        self.assertEqual(result, set())
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_get_favorite_pagination(self, mock_graphql):
+        """Test fetching favorites with pagination."""
+        endpoint = "https://stashdb.org/graphql"
+        # First page returns 100 items, second page returns 50
+        mock_graphql.side_effect = [
+            {
+                "findPerformers": {
+                    "count": 150,
+                    "performers": [
+                        {"id": str(i), "name": f"Performer {i}", "stash_ids": [
+                            {"endpoint": endpoint, "stash_id": f"id-{i}"}
+                        ]} for i in range(100)
+                    ]
+                }
+            },
+            {
+                "findPerformers": {
+                    "count": 150,
+                    "performers": [
+                        {"id": str(i), "name": f"Performer {i}", "stash_ids": [
+                            {"endpoint": endpoint, "stash_id": f"id-{i}"}
+                        ]} for i in range(100, 150)
+                    ]
+                }
+            }
+        ]
+
+        result = missing_scenes.get_favorite_stash_ids("performer", endpoint)
+
+        self.assertEqual(len(result), 150)
+        self.assertIn("id-0", result)
+        self.assertIn("id-149", result)
+
+
+class TestScenePassesFavoriteFilters(unittest.TestCase):
+    """Test the scene_passes_favorite_filters function."""
+
+    def test_no_filters_passes_all(self):
+        """Test that scenes pass when no filters are enabled."""
+        scene = {"id": "scene-1", "performers": [], "studio": None, "tags": []}
+        result = missing_scenes.scene_passes_favorite_filters(scene, None, None, None)
+        self.assertTrue(result)
+
+    def test_performer_filter_passes_with_match(self):
+        """Test scene passes when it has a favorite performer."""
+        scene = {
+            "performers": [
+                {"performer": {"id": "perf-1"}},
+                {"performer": {"id": "perf-2"}},
+            ]
+        }
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, {"perf-1", "perf-3"}, None, None
+        )
+        self.assertTrue(result)
+
+    def test_performer_filter_fails_without_match(self):
+        """Test scene fails when it has no favorite performers."""
+        scene = {"performers": [{"performer": {"id": "perf-2"}}]}
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, {"perf-1", "perf-3"}, None, None
+        )
+        self.assertFalse(result)
+
+    def test_performer_filter_fails_with_no_performers(self):
+        """Test scene fails when it has no performers."""
+        scene = {"performers": []}
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, {"perf-1"}, None, None
+        )
+        self.assertFalse(result)
+
+    def test_studio_filter_passes_with_match(self):
+        """Test scene passes when studio is a favorite."""
+        scene = {"studio": {"id": "studio-1"}}
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, None, {"studio-1", "studio-2"}, None
+        )
+        self.assertTrue(result)
+
+    def test_studio_filter_fails_without_match(self):
+        """Test scene fails when studio is not a favorite."""
+        scene = {"studio": {"id": "studio-3"}}
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, None, {"studio-1", "studio-2"}, None
+        )
+        self.assertFalse(result)
+
+    def test_studio_filter_fails_without_studio(self):
+        """Test scene fails when it has no studio."""
+        scene = {"studio": None}
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, None, {"studio-1"}, None
+        )
+        self.assertFalse(result)
+
+    def test_tag_filter_passes_with_match(self):
+        """Test scene passes when it has a favorite tag."""
+        scene = {"tags": [{"id": "tag-1"}, {"id": "tag-2"}]}
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, None, None, {"tag-1", "tag-3"}
+        )
+        self.assertTrue(result)
+
+    def test_tag_filter_fails_without_match(self):
+        """Test scene fails when it has no favorite tags."""
+        scene = {"tags": [{"id": "tag-2"}]}
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, None, None, {"tag-1", "tag-3"}
+        )
+        self.assertFalse(result)
+
+    def test_tag_filter_fails_with_no_tags(self):
+        """Test scene fails when it has no tags."""
+        scene = {"tags": []}
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, None, None, {"tag-1"}
+        )
+        self.assertFalse(result)
+
+    def test_and_logic_all_match(self):
+        """Test that multiple filters require ALL to match (AND logic)."""
+        scene = {
+            "performers": [{"performer": {"id": "perf-1"}}],
+            "studio": {"id": "studio-1"},
+            "tags": [{"id": "tag-1"}]
+        }
+
+        # All match - should pass
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, {"perf-1"}, {"studio-1"}, {"tag-1"}
+        )
+        self.assertTrue(result)
+
+    def test_and_logic_performer_fails(self):
+        """Test that scene fails when performer filter doesn't match."""
+        scene = {
+            "performers": [{"performer": {"id": "perf-2"}}],
+            "studio": {"id": "studio-1"},
+            "tags": [{"id": "tag-1"}]
+        }
+
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, {"perf-1"}, {"studio-1"}, {"tag-1"}
+        )
+        self.assertFalse(result)
+
+    def test_and_logic_studio_fails(self):
+        """Test that scene fails when studio filter doesn't match."""
+        scene = {
+            "performers": [{"performer": {"id": "perf-1"}}],
+            "studio": {"id": "studio-2"},
+            "tags": [{"id": "tag-1"}]
+        }
+
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, {"perf-1"}, {"studio-1"}, {"tag-1"}
+        )
+        self.assertFalse(result)
+
+    def test_and_logic_tag_fails(self):
+        """Test that scene fails when tag filter doesn't match."""
+        scene = {
+            "performers": [{"performer": {"id": "perf-1"}}],
+            "studio": {"id": "studio-1"},
+            "tags": [{"id": "tag-2"}]
+        }
+
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, {"perf-1"}, {"studio-1"}, {"tag-1"}
+        )
+        self.assertFalse(result)
+
+    def test_partial_filters_performer_only(self):
+        """Test that partial filters work (only performer enabled)."""
+        scene = {
+            "performers": [{"performer": {"id": "perf-1"}}],
+            "studio": {"id": "studio-999"},  # Doesn't matter
+            "tags": [{"id": "tag-999"}]  # Doesn't matter
+        }
+
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, {"perf-1"}, None, None
+        )
+        self.assertTrue(result)
+
+    def test_partial_filters_studio_only(self):
+        """Test that partial filters work (only studio enabled)."""
+        scene = {
+            "performers": [],  # Doesn't matter
+            "studio": {"id": "studio-1"},
+            "tags": []  # Doesn't matter
+        }
+
+        result = missing_scenes.scene_passes_favorite_filters(
+            scene, None, {"studio-1"}, None
+        )
+        self.assertTrue(result)
+
+
 class TestFetchUntilFull(unittest.TestCase):
     """Test the fetch_until_full pagination logic."""
 
@@ -1004,6 +1314,9 @@ def run_all_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestLocalStashIdCache))
     suite.addTests(loader.loadTestsFromTestCase(TestQueryScenesPage))
     suite.addTests(loader.loadTestsFromTestCase(TestCacheBuildingFunction))
+    suite.addTests(loader.loadTestsFromTestCase(TestCountLocalScenesForEntity))
+    suite.addTests(loader.loadTestsFromTestCase(TestGetFavoriteStashIds))
+    suite.addTests(loader.loadTestsFromTestCase(TestScenePassesFavoriteFilters))
     suite.addTests(loader.loadTestsFromTestCase(TestFetchUntilFull))
     suite.addTests(loader.loadTestsFromTestCase(TestCursorEncoding))
     suite.addTests(loader.loadTestsFromTestCase(TestEndpointMatching))

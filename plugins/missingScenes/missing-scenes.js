@@ -26,6 +26,11 @@
   let sortField = "DATE";
   let sortDirection = "DESC";
 
+  // Favorite entity filter state (persists within session)
+  let filterFavoritePerformers = false;
+  let filterFavoriteStudios = false;
+  let filterFavoriteTags = false;
+
   /**
    * Get the GraphQL endpoint URL
    */
@@ -117,6 +122,16 @@
     }
     if (options.cursor) {
       args.cursor = options.cursor;
+    }
+    // Favorite entity filters
+    if (options.filterFavoritePerformers) {
+      args.filter_favorite_performers = true;
+    }
+    if (options.filterFavoriteStudios) {
+      args.filter_favorite_studios = true;
+    }
+    if (options.filterFavoriteTags) {
+      args.filter_favorite_tags = true;
     }
     return runPluginOperation(args);
   }
@@ -231,6 +246,11 @@
       </select>
     `;
 
+    // Filter controls - show 2 checkboxes for the entity types NOT being searched
+    const filterControls = document.createElement("div");
+    filterControls.className = "ms-filter-controls";
+    filterControls.id = "ms-filter-controls";
+
     // Body (results)
     const body = document.createElement("div");
     body.className = "ms-modal-body";
@@ -252,6 +272,7 @@
     modal.appendChild(header);
     modal.appendChild(stats);
     modal.appendChild(sortControls);
+    modal.appendChild(filterControls);
     modal.appendChild(body);
     modal.appendChild(footer);
     backdrop.appendChild(modal);
@@ -264,6 +285,9 @@
     const sortDirSelect = sortControls.querySelector("#ms-sort-direction");
     sortFieldSelect.onchange = handleSortChange;
     sortDirSelect.onchange = handleSortChange;
+
+    // Populate filter checkboxes based on entity type (will be called after entity type is set)
+    updateFilterControls();
 
     // Keyboard handler for escape
     const keyHandler = (e) => {
@@ -289,6 +313,84 @@
       // Reset pagination and re-search
       performSearch(true);
     }
+  }
+
+  /**
+   * Update filter controls based on current entity type
+   * Shows 2 checkboxes for the entity types NOT being searched
+   */
+  function updateFilterControls() {
+    const filterControls = document.getElementById("ms-filter-controls");
+    if (!filterControls) return;
+
+    // Clear existing content
+    filterControls.innerHTML = "";
+
+    // Determine which checkboxes to show based on entity type
+    const checkboxes = [];
+
+    if (currentEntityType !== "performer") {
+      checkboxes.push({
+        id: "ms-filter-performers",
+        label: "Favorite Performers",
+        checked: filterFavoritePerformers,
+        onChange: (checked) => {
+          filterFavoritePerformers = checked;
+          handleFilterChange();
+        }
+      });
+    }
+
+    if (currentEntityType !== "studio") {
+      checkboxes.push({
+        id: "ms-filter-studios",
+        label: "Favorite Studios",
+        checked: filterFavoriteStudios,
+        onChange: (checked) => {
+          filterFavoriteStudios = checked;
+          handleFilterChange();
+        }
+      });
+    }
+
+    if (currentEntityType !== "tag") {
+      checkboxes.push({
+        id: "ms-filter-tags",
+        label: "Favorite Tags",
+        checked: filterFavoriteTags,
+        onChange: (checked) => {
+          filterFavoriteTags = checked;
+          handleFilterChange();
+        }
+      });
+    }
+
+    // Create checkbox elements
+    for (const cb of checkboxes) {
+      const label = document.createElement("label");
+      label.className = "ms-filter-checkbox";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.id = cb.id;
+      input.checked = cb.checked;
+      input.onchange = () => cb.onChange(input.checked);
+
+      const span = document.createElement("span");
+      span.textContent = cb.label;
+
+      label.appendChild(input);
+      label.appendChild(span);
+      filterControls.appendChild(label);
+    }
+  }
+
+  /**
+   * Handle filter checkbox changes
+   */
+  function handleFilterChange() {
+    // Reset pagination and re-search with new filters
+    performSearch(true);
   }
 
   /**
@@ -871,6 +973,9 @@
         cursor: currentCursor,
         sort: sortField,
         direction: sortDirection,
+        filterFavoritePerformers: filterFavoritePerformers,
+        filterFavoriteStudios: filterFavoriteStudios,
+        filterFavoriteTags: filterFavoriteTags,
       });
 
       // Append new scenes to existing list

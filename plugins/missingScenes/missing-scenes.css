@@ -525,6 +525,41 @@
   box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
 }
 
+/* Filter Controls */
+.ms-filter-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 15px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #333;
+}
+
+.ms-filter-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ms-filter-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--ms-accent, #0d6efd);
+}
+
+.ms-filter-checkbox span {
+  color: #ccc;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.ms-filter-checkbox:hover span {
+  color: #fff;
+}
+
 /* Load More Button */
 .ms-btn-secondary {
   background: #444;
