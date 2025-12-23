@@ -1528,6 +1528,22 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
     total_on_stashdb = result["total_on_stashdb"]
     is_complete = result["is_complete"]
 
+    # Determine which filters are active (for frontend display)
+    active_filters = []
+    if filter_favorite_performers:
+        active_filters.append("performers")
+    if filter_favorite_studios:
+        active_filters.append("studios")
+    if filter_favorite_tags:
+        active_filters.append("tags")
+
+    # When filters are active, the estimate is not meaningful
+    # (we'd have to scan all pages to know the filtered count)
+    filters_active = len(active_filters) > 0
+    missing_count_estimate = None
+    if not filters_active and not is_complete:
+        missing_count_estimate = total_on_stashdb - total_local
+
     return {
         "entity_name": entity.get("name"),
         "entity_type": entity_type,
@@ -1535,13 +1551,15 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "stashdb_url": stashdb_url.replace("/graphql", ""),
         "total_on_stashdb": total_on_stashdb,
         "total_local": total_local,
-        "missing_count_estimate": total_on_stashdb - total_local if not is_complete else None,
+        "missing_count_estimate": missing_count_estimate,
         "missing_count_loaded": len(formatted_scenes),
         "cursor": result["next_cursor"],
         "has_more": result["next_cursor"] is not None,
         "is_complete": is_complete,
         "missing_scenes": formatted_scenes,
-        "whisparr_configured": whisparr_configured
+        "whisparr_configured": whisparr_configured,
+        "filters_active": filters_active,
+        "active_filters": active_filters
     }
 
 

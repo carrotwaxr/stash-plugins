@@ -467,6 +467,9 @@
         entityLabel = "Entity";
     }
 
+    // Check if filters are active
+    const filtersActive = data.filters_active || false;
+
     // Handle both legacy (missing_count) and paginated (missing_count_estimate/loaded) responses
     let missingDisplay;
     if (data.is_complete !== undefined) {
@@ -478,11 +481,19 @@
       } else if (estimate !== null) {
         missingDisplay = `~${estimate} (${loaded} loaded)`;
       } else {
+        // When filters are active or no estimate, just show loaded count
         missingDisplay = `${loaded} loaded`;
       }
     } else {
       // Legacy response
       missingDisplay = `${data.missing_count || 0}`;
+    }
+
+    // Build stats HTML - when filters are active, indicate filtered results
+    let stashdbLabel = `On ${data.stashdb_name || "StashDB"}:`;
+    let stashdbValue = `${data.total_on_stashdb || 0}`;
+    if (filtersActive) {
+      stashdbLabel = `Total on ${data.stashdb_name || "StashDB"}:`;
     }
 
     statsEl.innerHTML = `
@@ -491,15 +502,15 @@
         <span class="ms-stat-value">${data.entity_name || "Unknown"}</span>
       </div>
       <div class="ms-stat">
-        <span class="ms-stat-label">On ${data.stashdb_name || "StashDB"}:</span>
-        <span class="ms-stat-value">${data.total_on_stashdb || 0}</span>
+        <span class="ms-stat-label">${stashdbLabel}</span>
+        <span class="ms-stat-value">${stashdbValue}</span>
       </div>
       <div class="ms-stat">
         <span class="ms-stat-label">You Have:</span>
         <span class="ms-stat-value">${data.total_local || 0}</span>
       </div>
       <div class="ms-stat ms-stat-highlight">
-        <span class="ms-stat-label">Missing:</span>
+        <span class="ms-stat-label">Missing${filtersActive ? " (filtered)" : ""}:</span>
         <span class="ms-stat-value">${missingDisplay}</span>
       </div>
     `;
