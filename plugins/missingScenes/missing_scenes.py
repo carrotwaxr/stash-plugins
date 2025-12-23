@@ -383,7 +383,7 @@ def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
         query FindFavoriteStudios($filter: FindFilterType) {
             findStudios(
                 filter: $filter
-                studio_filter: { filter_favorites: true }
+                studio_filter: { favorite: true }
             ) {
                 count
                 studios {
@@ -404,7 +404,7 @@ def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
         query FindFavoriteTags($filter: FindFilterType) {
             findTags(
                 filter: $filter
-                tag_filter: { filter_favorites: true }
+                tag_filter: { favorite: true }
             ) {
                 count
                 tags {

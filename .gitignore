@@ -5,3 +5,9 @@
 **/node_modules
 CLAUDE.md
 scripts/
+
+# Environment files with secrets
+.env
+.env.local
+**/.env
+**/.env.local
