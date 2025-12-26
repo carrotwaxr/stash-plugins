@@ -1876,14 +1876,16 @@ def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", dire
             is_complete = True
             break
 
-        # Filter out owned scenes
+        # Filter out owned scenes and apply favorite filters
         for i, scene in enumerate(scenes):
             if i < current_offset:
                 continue
 
             scene_id = scene.get("id")
             if scene_id and scene_id not in local_ids:
-                collected.append(scene)
+                # Apply favorite filters client-side (StashDB query only handles excludes)
+                if scene_passes_favorite_filters(scene, performer_ids, studio_ids, tag_ids):
+                    collected.append(scene)
 
             if len(collected) >= page_size:
                 # Save position for next request
