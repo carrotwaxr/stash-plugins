@@ -1365,6 +1365,58 @@ class TestEndpointMatching(unittest.TestCase):
         self.assertIsNone(stash_id)
 
 
+class TestBrowseStashdb(unittest.TestCase):
+    """Test the browse_stashdb operation."""
+
+    def setUp(self):
+        missing_scenes._local_stash_id_cache.clear()
+        missing_scenes._cache_metadata.clear()
+
+    @patch.object(missing_scenes, 'get_stashbox_config')
+    @patch.object(missing_scenes, 'get_or_build_cache')
+    @patch.object(stashbox_api, 'query_scenes_browse')
+    @patch.object(missing_scenes, 'whisparr_get_status_map')
+    def test_browse_basic(self, mock_whisparr, mock_browse, mock_cache, mock_config):
+        """Test basic browse without filters."""
+        mock_config.return_value = [
+            {"endpoint": "https://stashdb.org/graphql", "api_key": "key", "name": "StashDB"}
+        ]
+        mock_cache.return_value = {"owned-1", "owned-2"}
+        mock_browse.return_value = {
+            "scenes": [
+                {"id": "scene-1"},
+                {"id": "owned-1"},  # Should be filtered out
+                {"id": "scene-2"},
+            ],
+            "count": 1000,
+            "page": 1,
+            "has_more": True
+        }
+        mock_whisparr.return_value = {}
+
+        result = missing_scenes.browse_stashdb(
+            plugin_settings={},
+            page_size=50
+        )
+
+        self.assertNotIn("error", result)
+        self.assertEqual(result["stashdb_name"], "StashDB")
+        # owned-1 should be filtered out
+        scene_ids = [s["stash_id"] for s in result["missing_scenes"]]
+        self.assertIn("scene-1", scene_ids)
+        self.assertNotIn("owned-1", scene_ids)
+
+    @patch.object(missing_scenes, 'get_stashbox_config')
+    def test_browse_no_stashbox_config(self, mock_config):
+        """Test error when no stash-box configured."""
+        mock_config.return_value = []
+
+        result = missing_scenes.browse_stashdb(plugin_settings={})
+
+        self.assertIn("error", result)
+        self.assertIn("No stash-box", result["error"])
+
+
 class TestQueryScenesBrowse(unittest.TestCase):
     """Test the query_scenes_browse function for general browsing."""
 
