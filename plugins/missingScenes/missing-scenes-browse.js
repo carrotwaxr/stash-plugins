@@ -2,7 +2,7 @@
   "use strict";
 
   const PLUGIN_ID = "missingScenes";
-  const BROWSE_PATH = "/plugin/missingScenes/browse";
+  const BROWSE_PATH = "/plugins/missing-scenes";
 
   /**
    * Get the GraphQL endpoint URL
