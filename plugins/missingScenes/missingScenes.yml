@@ -73,6 +73,16 @@ settings:
     description: Maximum pages to fetch when querying studio scenes (100 scenes per page). Default is 25 (2500 scenes max). Reduce for faster results.
     type: NUMBER
 
+  # Content filtering
+  excludedTags:
+    displayName: Excluded Tags
+    description: Comma-separated list of StashDB Tag UUIDs to exclude from all Missing Scenes results. Find tag UUIDs on StashDB tag pages (e.g., https://stashdb.org/tags/uuid).
+    type: STRING
+  favoriteLimit:
+    displayName: Favorite Limit
+    description: Maximum number of favorites to use per filter type (default 100). Favorites are sorted by engagement (performers by last activity, studios/tags by scene count).
+    type: NUMBER
+
 # Tasks that can be run manually or scheduled
 tasks:
   - name: Scan for New Scenes
