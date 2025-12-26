@@ -584,3 +584,126 @@
 #ms-load-more-btn {
   margin-right: 10px;
 }
+
+/* ============================================
+   Browse Page Styles
+   ============================================ */
+
+.ms-browse-page {
+  padding: 20px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.ms-browse-header {
+  margin-bottom: 20px;
+}
+
+.ms-browse-header h1 {
+  margin: 0 0 8px 0;
+  font-size: 24px;
+  color: #fff;
+}
+
+.ms-browse-header p {
+  margin: 0;
+  color: #999;
+}
+
+.ms-browse-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin-bottom: 20px;
+  padding: 15px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  align-items: center;
+}
+
+.ms-filter-controls {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+
+.ms-filter-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: #ccc;
+}
+
+.ms-filter-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.ms-sort-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.ms-sort-controls label {
+  color: #999;
+}
+
+.ms-sort-select {
+  background: #333;
+  border: 1px solid #555;
+  color: #fff;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ms-sort-select:hover {
+  border-color: #777;
+}
+
+.ms-browse-stats {
+  margin-bottom: 15px;
+  padding: 10px 15px;
+  background: rgba(0, 123, 255, 0.1);
+  border-radius: 6px;
+  font-size: 14px;
+  color: #ccc;
+}
+
+.ms-browse-results {
+  min-height: 200px;
+}
+
+.ms-browse-footer {
+  text-align: center;
+  margin-top: 20px;
+  padding: 20px;
+}
+
+/* Browse button on Scenes page */
+.ms-browse-button {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 10px;
+}
+
+.ms-browse-button svg {
+  vertical-align: middle;
+}
+
+/* Responsive adjustments for browse page */
+@media (max-width: 768px) {
+  .ms-browse-controls {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .ms-sort-controls {
+    margin-left: 0;
+    margin-top: 10px;
+  }
+}
