@@ -2439,6 +2439,26 @@ def main():
                 # Backward compatible - use original version
                 output = find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=endpoint)
 
+        elif operation == "browse_stashdb":
+            page_size = args.get("page_size", PAGE_SIZE_DEFAULT)
+            cursor = args.get("cursor")
+            sort = args.get("sort", "DATE")
+            direction = args.get("direction", "DESC")
+            filter_favorite_performers = args.get("filter_favorite_performers", False)
+            filter_favorite_studios = args.get("filter_favorite_studios", False)
+            filter_favorite_tags = args.get("filter_favorite_tags", False)
+
+            output = browse_stashdb(
+                plugin_settings=plugin_settings,
+                page_size=page_size,
+                cursor=cursor,
+                sort=sort,
+                direction=direction,
+                filter_favorite_performers=filter_favorite_performers,
+                filter_favorite_studios=filter_favorite_studios,
+                filter_favorite_tags=filter_favorite_tags
+            )
+
         elif operation == "add_to_whisparr":
             stash_id = args.get("stash_id", "")
             title = args.get("title", "Unknown")
