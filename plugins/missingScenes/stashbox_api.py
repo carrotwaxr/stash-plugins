@@ -332,6 +332,10 @@ SCENE_FIELDS = """
         }
         as
     }
+    tags {
+        id
+        name
+    }
 """
 
 
