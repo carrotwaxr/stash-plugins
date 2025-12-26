@@ -7,6 +7,7 @@ url: https://github.com/carrotwaxr/stash-plugins
 ui:
   javascript:
     - missing-scenes.js
+    - missing-scenes-browse.js
   css:
     - missing-scenes.css
 
