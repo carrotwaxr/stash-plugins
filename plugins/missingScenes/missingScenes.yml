@@ -6,6 +6,7 @@ url: https://github.com/carrotwaxr/stash-plugins
 # UI plugin - injects button and modal on performer/studio pages
 ui:
   javascript:
+    - missing-scenes-core.js
     - missing-scenes.js
     - missing-scenes-browse.js
   css:
