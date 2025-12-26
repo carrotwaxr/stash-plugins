@@ -1,12 +1,13 @@
 name: Missing Scenes
 description: Discover scenes from StashDB that you don't have locally. View missing scenes for performers and studios, with optional Whisparr integration for automated downloading and cleanup.
-version: 1.2.0
+version: 1.3.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer/studio pages
 ui:
   javascript:
     - missing-scenes.js
+    - missing-scenes-browse.js
   css:
     - missing-scenes.css
 
@@ -71,6 +72,16 @@ settings:
   stashbox_max_pages_studio:
     displayName: Max Pages (Studio)
     description: Maximum pages to fetch when querying studio scenes (100 scenes per page). Default is 25 (2500 scenes max). Reduce for faster results.
+    type: NUMBER
+
+  # Content filtering
+  excludedTags:
+    displayName: Excluded Tags
+    description: Comma-separated list of StashDB Tag UUIDs to exclude from all Missing Scenes results. Find tag UUIDs on StashDB tag pages (e.g., https://stashdb.org/tags/uuid).
+    type: STRING
+  favoriteLimit:
+    displayName: Favorite Limit
+    description: Maximum number of favorites to use per filter type (default 100). Favorites are sorted by engagement (performers by last activity, studios/tags by scene count).
     type: NUMBER
 
 # Tasks that can be run manually or scheduled

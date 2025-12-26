@@ -867,6 +867,78 @@ class TestGetFavoriteStashIds(unittest.TestCase):
         self.assertIn("id-149", result)
 
 
+class TestGetFavoriteStashIdsWithLimit(unittest.TestCase):
+    """Test the get_favorite_stash_ids_limited function."""
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_performers_sorted_by_last_o_at(self, mock_graphql):
+        """Test that performers are sorted by last_o_at DESC."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findPerformers": {
+                "count": 3,
+                "performers": [
+                    {"id": "1", "name": "Recent", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "perf-recent"}
+                    ]},
+                    {"id": "2", "name": "Old", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "perf-old"}
+                    ]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids_limited("performer", endpoint, limit=100)
+
+        self.assertIn("perf-recent", result)
+        # Verify query used correct sort
+        call_args = mock_graphql.call_args
+        variables = call_args[0][1]
+        self.assertEqual(variables["filter"]["sort"], "last_o_at")
+        self.assertEqual(variables["filter"]["direction"], "DESC")
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_studios_sorted_by_scenes_count(self, mock_graphql):
+        """Test that studios are sorted by scenes_count DESC."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findStudios": {
+                "count": 1,
+                "studios": [
+                    {"id": "1", "name": "Studio", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "studio-1"}
+                    ]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids_limited("studio", endpoint, limit=100)
+
+        call_args = mock_graphql.call_args
+        variables = call_args[0][1]
+        self.assertEqual(variables["filter"]["sort"], "scenes_count")
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_respects_limit(self, mock_graphql):
+        """Test that limit is respected."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findPerformers": {
+                "count": 200,
+                "performers": [
+                    {"id": str(i), "name": f"Performer {i}", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": f"perf-{i}"}
+                    ]} for i in range(100)
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids_limited("performer", endpoint, limit=50)
+
+        # Should only return first 50, not all 100 from page
+        self.assertEqual(len(result), 50)
+
+
 class TestScenePassesFavoriteFilters(unittest.TestCase):
     """Test the scene_passes_favorite_filters function."""
 
@@ -1291,6 +1363,119 @@ class TestEndpointMatching(unittest.TestCase):
                 break
 
         self.assertIsNone(stash_id)
+
+
+class TestBrowseStashdb(unittest.TestCase):
+    """Test the browse_stashdb operation."""
+
+    def setUp(self):
+        missing_scenes._local_stash_id_cache.clear()
+        missing_scenes._cache_metadata.clear()
+
+    @patch.object(missing_scenes, 'get_stashbox_config')
+    @patch.object(missing_scenes, 'get_or_build_cache')
+    @patch.object(stashbox_api, 'query_scenes_browse')
+    @patch.object(missing_scenes, 'whisparr_get_status_map')
+    def test_browse_basic(self, mock_whisparr, mock_browse, mock_cache, mock_config):
+        """Test basic browse without filters."""
+        mock_config.return_value = [
+            {"endpoint": "https://stashdb.org/graphql", "api_key": "key", "name": "StashDB"}
+        ]
+        mock_cache.return_value = {"owned-1", "owned-2"}
+        mock_browse.return_value = {
+            "scenes": [
+                {"id": "scene-1"},
+                {"id": "owned-1"},  # Should be filtered out
+                {"id": "scene-2"},
+            ],
+            "count": 1000,
+            "page": 1,
+            "has_more": True
+        }
+        mock_whisparr.return_value = {}
+
+        result = missing_scenes.browse_stashdb(
+            plugin_settings={},
+            page_size=50
+        )
+
+        self.assertNotIn("error", result)
+        self.assertEqual(result["stashdb_name"], "StashDB")
+        # owned-1 should be filtered out
+        scene_ids = [s["stash_id"] for s in result["missing_scenes"]]
+        self.assertIn("scene-1", scene_ids)
+        self.assertNotIn("owned-1", scene_ids)
+
+    @patch.object(missing_scenes, 'get_stashbox_config')
+    def test_browse_no_stashbox_config(self, mock_config):
+        """Test error when no stash-box configured."""
+        mock_config.return_value = []
+
+        result = missing_scenes.browse_stashdb(plugin_settings={})
+
+        self.assertIn("error", result)
+        self.assertIn("No stash-box", result["error"])
+
+
+class TestQueryScenesBrowse(unittest.TestCase):
+    """Test the query_scenes_browse function for general browsing."""
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_browse_no_filters(self, mock_request):
+        """Test browsing with no filters returns all scenes."""
+        mock_request.return_value = {
+            "queryScenes": {
+                "count": 1000,
+                "scenes": [{"id": f"scene-{i}"} for i in range(100)]
+            }
+        }
+
+        result = stashbox_api.query_scenes_browse(
+            "https://stashdb.org/graphql",
+            "api-key",
+            page=1,
+            per_page=100
+        )
+
+        self.assertEqual(result["count"], 1000)
+        self.assertEqual(len(result["scenes"]), 100)
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_browse_with_excluded_tags(self, mock_request):
+        """Test that excluded tags are passed to query."""
+        mock_request.return_value = {
+            "queryScenes": {"count": 500, "scenes": []}
+        }
+
+        stashbox_api.query_scenes_browse(
+            "https://stashdb.org/graphql",
+            "api-key",
+            excluded_tag_ids=["tag-1", "tag-2"]
+        )
+
+        call_args = mock_request.call_args
+        variables = call_args[0][2]
+        self.assertIn("tags", variables["input"])
+        self.assertEqual(variables["input"]["tags"]["modifier"], "EXCLUDES")
+        self.assertEqual(variables["input"]["tags"]["value"], ["tag-1", "tag-2"])
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_browse_with_performer_filter(self, mock_request):
+        """Test filtering by performer IDs."""
+        mock_request.return_value = {
+            "queryScenes": {"count": 50, "scenes": []}
+        }
+
+        stashbox_api.query_scenes_browse(
+            "https://stashdb.org/graphql",
+            "api-key",
+            performer_ids=["perf-1", "perf-2"]
+        )
+
+        call_args = mock_request.call_args
+        variables = call_args[0][2]
+        self.assertIn("performers", variables["input"])
+        self.assertEqual(variables["input"]["performers"]["modifier"], "INCLUDES")
 
 
 def run_all_tests():

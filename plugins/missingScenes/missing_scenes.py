@@ -461,6 +461,131 @@ def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
     return stash_ids
 
 
+def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int = 100) -> set[str]:
+    """Get stash_ids for favorited entities, sorted by engagement with a limit.
+
+    Args:
+        entity_type: "performer", "studio", or "tag"
+        endpoint: StashDB endpoint URL
+        limit: Maximum number of favorites to return
+
+    Returns:
+        Set of StashDB IDs for top favorites
+    """
+    # Determine sort field based on entity type
+    if entity_type == "performer":
+        sort_field = "last_o_at"
+        query = """
+        query FindFavoritePerformers($filter: FindFilterType) {
+            findPerformers(
+                filter: $filter
+                performer_filter: { filter_favorites: true }
+            ) {
+                count
+                performers {
+                    id
+                    name
+                    stash_ids {
+                        endpoint
+                        stash_id
+                    }
+                }
+            }
+        }
+        """
+        result_key = "findPerformers"
+        items_key = "performers"
+    elif entity_type == "studio":
+        sort_field = "scenes_count"
+        query = """
+        query FindFavoriteStudios($filter: FindFilterType) {
+            findStudios(
+                filter: $filter
+                studio_filter: { favorite: true }
+            ) {
+                count
+                studios {
+                    id
+                    name
+                    stash_ids {
+                        endpoint
+                        stash_id
+                    }
+                }
+            }
+        }
+        """
+        result_key = "findStudios"
+        items_key = "studios"
+    elif entity_type == "tag":
+        sort_field = "scenes_count"
+        query = """
+        query FindFavoriteTags($filter: FindFilterType) {
+            findTags(
+                filter: $filter
+                tag_filter: { favorite: true }
+            ) {
+                count
+                tags {
+                    id
+                    name
+                    stash_ids {
+                        endpoint
+                        stash_id
+                    }
+                }
+            }
+        }
+        """
+        result_key = "findTags"
+        items_key = "tags"
+    else:
+        log.LogWarning(f"Unknown entity type for favorites: {entity_type}")
+        return set()
+
+    stash_ids = set()
+    collected = 0
+    page = 1
+    per_page = min(100, limit)  # Don't fetch more than needed
+
+    while collected < limit:
+        data = stash_graphql(query, {
+            "filter": {
+                "page": page,
+                "per_page": per_page,
+                "sort": sort_field,
+                "direction": "DESC"
+            }
+        })
+
+        if not data or result_key not in data:
+            break
+
+        result = data[result_key]
+        items = result.get(items_key, [])
+
+        if not items:
+            break
+
+        for item in items:
+            if collected >= limit:
+                break
+            for sid in item.get("stash_ids", []):
+                if sid.get("endpoint") == endpoint:
+                    stash_ids.add(sid.get("stash_id"))
+                    collected += 1
+                    break  # Only count once per entity
+
+        total = result.get("count", 0)
+        if page * per_page >= total:
+            break
+
+        page += 1
+
+    log.LogInfo(f"Found {len(stash_ids)} favorite {entity_type}s (limit: {limit}) linked to {endpoint}")
+    return stash_ids
+
+
 # ============================================================================
 # StashDB API (using resilient stashbox_api module)
 # ============================================================================
@@ -1617,6 +1742,237 @@ def format_scene(scene, stash_id):
     }
 
 
+def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", direction="DESC",
+                   filter_favorite_performers=False, filter_favorite_studios=False,
+                   filter_favorite_tags=False):
+    """
+    Browse all StashDB scenes without entity context.
+
+    Args:
+        plugin_settings: Plugin configuration
+        page_size: Number of missing scenes per page
+        cursor: Pagination cursor
+        sort: Sort field
+        direction: Sort direction
+        filter_favorite_performers: Filter by favorite performers
+        filter_favorite_studios: Filter by favorite studios
+        filter_favorite_tags: Filter by favorite tags
+
+    Returns:
+        Dict with missing scenes and metadata
+    """
+    page_size = min(max(1, page_size), PAGE_SIZE_MAX)
+
+    # Validate sort and direction
+    valid_sorts = {"DATE", "TITLE", "CREATED_AT", "UPDATED_AT", "TRENDING"}
+    valid_directions = {"ASC", "DESC"}
+    if sort not in valid_sorts:
+        sort = "DATE"
+    if direction not in valid_directions:
+        direction = "DESC"
+
+    # Get stash-box configuration
+    stashbox_configs = get_stashbox_config()
+    if not stashbox_configs:
+        return {"error": "No stash-box endpoints configured in Stash settings"}
+
+    # Use configured or first endpoint
+    target_endpoint = plugin_settings.get("stashBoxEndpoint", "").strip()
+    stashbox = None
+
+    if target_endpoint:
+        for config in stashbox_configs:
+            if config["endpoint"] == target_endpoint:
+                stashbox = config
+                break
+        if not stashbox:
+            return {"error": f"Stash-box endpoint '{target_endpoint}' not found"}
+    else:
+        stashbox = stashbox_configs[0]
+
+    stashdb_url = stashbox["endpoint"]
+    stashdb_api_key = stashbox.get("api_key", "")
+    stashdb_name = stashbox.get("name", "StashDB")
+
+    # Decode cursor if provided
+    cursor_state = decode_cursor(cursor) if cursor else None
+    if cursor_state:
+        stashdb_page = cursor_state.get("stashdb_page", 1)
+        offset = cursor_state.get("offset", 0)
+        # Validate cursor values
+        if not isinstance(stashdb_page, int) or stashdb_page < 1:
+            stashdb_page = 1
+        if not isinstance(offset, int) or offset < 0:
+            offset = 0
+    else:
+        stashdb_page = 1
+        offset = 0
+
+    # Get local stash_id cache
+    local_ids = get_or_build_cache(stashdb_url)
+
+    # Parse excluded tags from settings
+    excluded_tags_str = plugin_settings.get("excludedTags", "").strip()
+    excluded_tag_ids = []
+    if excluded_tags_str:
+        excluded_tag_ids = [t.strip() for t in excluded_tags_str.split(",") if t.strip()]
+
+    # Get favorite limit
+    favorite_limit = int(plugin_settings.get("favoriteLimit") or 100)
+
+    # Fetch favorite IDs if filters enabled
+    performer_ids = None
+    studio_ids = None
+    tag_ids = None
+
+    if filter_favorite_performers:
+        performer_ids = get_favorite_stash_ids_limited("performer", stashdb_url, limit=favorite_limit)
+        if not performer_ids:
+            return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["performers"])
+
+    if filter_favorite_studios:
+        studio_ids = get_favorite_stash_ids_limited("studio", stashdb_url, limit=favorite_limit)
+        if not studio_ids:
+            return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["studios"])
+
+    if filter_favorite_tags:
+        tag_ids = get_favorite_stash_ids_limited("tag", stashdb_url, limit=favorite_limit)
+        if not tag_ids:
+            return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["tags"])
+
+    # Fetch scenes using browse query
+    collected = []
+    pages_fetched = 0
+    total_on_stashdb = 0
+    is_complete = False
+    current_page = stashdb_page
+    current_offset = offset
+    resume_page = current_page
+    resume_offset = current_offset
+
+    while len(collected) < page_size and pages_fetched < MAX_PAGES_PER_REQUEST:
+        result = stashbox_api.query_scenes_browse(
+            stashdb_url, stashdb_api_key,
+            page=current_page,
+            per_page=100,
+            sort=sort,
+            direction=direction,
+            performer_ids=list(performer_ids) if performer_ids else None,
+            studio_ids=list(studio_ids) if studio_ids else None,
+            tag_ids=list(tag_ids) if tag_ids else None,
+            excluded_tag_ids=excluded_tag_ids if excluded_tag_ids else None,
+            plugin_settings=plugin_settings
+        )
+
+        if not result:
+            log.LogWarning(f"Failed to fetch browse page {current_page}")
+            break
+
+        pages_fetched += 1
+        total_on_stashdb = result["count"]
+        scenes = result["scenes"]
+
+        if not scenes:
+            is_complete = True
+            break
+
+        # Filter out owned scenes
+        for i, scene in enumerate(scenes):
+            if i < current_offset:
+                continue
+
+            scene_id = scene.get("id")
+            if scene_id and scene_id not in local_ids:
+                collected.append(scene)
+
+            if len(collected) >= page_size:
+                # Save position for next request
+                resume_offset = i + 1
+                if resume_offset >= len(scenes):
+                    resume_page = current_page + 1
+                    resume_offset = 0
+                else:
+                    resume_page = current_page
+                break
+
+        if len(collected) >= page_size:
+            break
+
+        if not result["has_more"]:
+            is_complete = True
+            break
+
+        current_page += 1
+        current_offset = 0
+
+    # Build cursor for continuation
+    next_cursor = None
+    if not is_complete and len(collected) >= page_size:
+        cursor_state = {
+            "stashdb_page": resume_page,
+            "offset": resume_offset,
+            "sort": sort,
+            "direction": direction
+        }
+        next_cursor = encode_cursor(cursor_state)
+
+    # Format scenes and add Whisparr status
+    formatted_scenes = []
+    whisparr_status_map = {}
+    whisparr_configured = False
+    whisparr_url = plugin_settings.get("whisparrUrl", "")
+    whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
+
+    if whisparr_url and whisparr_api_key:
+        whisparr_configured = True
+        try:
+            whisparr_status_map = whisparr_get_status_map(whisparr_url, whisparr_api_key)
+        except Exception as e:
+            log.LogWarning(f"Could not fetch Whisparr status: {e}")
+
+    for scene in collected:
+        scene_stash_id = scene.get("id")
+        formatted = format_scene(scene, scene_stash_id)
+        formatted["whisparr_status"] = whisparr_status_map.get(scene_stash_id)
+        formatted["in_whisparr"] = scene_stash_id in whisparr_status_map
+        formatted_scenes.append(formatted)
+
+    filters_active = filter_favorite_performers or filter_favorite_studios or filter_favorite_tags
+
+    return {
+        "stashdb_name": stashdb_name,
+        "stashdb_url": stashdb_url.replace("/graphql", ""),
+        "total_on_stashdb": total_on_stashdb,
+        "missing_count_loaded": len(formatted_scenes),
+        "cursor": next_cursor,
+        "has_more": next_cursor is not None,
+        "is_complete": is_complete,
+        "missing_scenes": formatted_scenes,
+        "whisparr_configured": whisparr_configured,
+        "filters_active": filters_active,
+        "excluded_tags_applied": len(excluded_tag_ids) > 0
+    }
+
+
+def _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, empty_filter_types):
+    """Return empty result when a filter has no favorites."""
+    return {
+        "stashdb_name": stashdb_name,
+        "stashdb_url": stashdb_url.replace("/graphql", ""),
+        "total_on_stashdb": 0,
+        "missing_count_loaded": 0,
+        "cursor": None,
+        "has_more": False,
+        "is_complete": True,
+        "missing_scenes": [],
+        "whisparr_configured": bool(plugin_settings.get("whisparrUrl") and
+                                    plugin_settings.get("whisparrApiKey")),
+        "filters_active": True,
+        "excluded_tags_applied": False,
+        "empty_filter_types": empty_filter_types
+    }
+
+
 def add_to_whisparr(stash_id, title, plugin_settings, studio_name=None):
     """Add a scene to Whisparr by its StashDB ID.
 
@@ -2095,6 +2451,26 @@ def main():
             else:
                 # Backward compatible - use original version
                 output = find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=endpoint)
+
+        elif operation == "browse_stashdb":
+            page_size = args.get("page_size", PAGE_SIZE_DEFAULT)
+            cursor = args.get("cursor")
+            sort = args.get("sort", "DATE")
+            direction = args.get("direction", "DESC")
+            filter_favorite_performers = args.get("filter_favorite_performers", False)
+            filter_favorite_studios = args.get("filter_favorite_studios", False)
+            filter_favorite_tags = args.get("filter_favorite_tags", False)
+
+            output = browse_stashdb(
+                plugin_settings=plugin_settings,
+                page_size=page_size,
+                cursor=cursor,
+                sort=sort,
+                direction=direction,
+                filter_favorite_performers=filter_favorite_performers,
+                filter_favorite_studios=filter_favorite_studios,
+                filter_favorite_tags=filter_favorite_tags
+            )
 
         elif operation == "add_to_whisparr":
             stash_id = args.get("stash_id", "")
