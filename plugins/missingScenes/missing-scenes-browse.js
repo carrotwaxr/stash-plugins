@@ -4,20 +4,6 @@
   const PLUGIN_ID = "missingScenes";
   const BROWSE_PATH = "/plugin/missingScenes/browse";
 
-  // State
-  let browsePageRoot = null;
-  let missingScenes = [];
-  let isLoading = false;
-  let currentCursor = null;
-  let hasMore = true;
-  let sortField = "DATE";
-  let sortDirection = "DESC";
-  let filterFavoritePerformers = false;
-  let filterFavoriteStudios = false;
-  let filterFavoriteTags = false;
-  let whisparrConfigured = false;
-  let stashdbUrl = "";
-
   /**
    * Get the GraphQL endpoint URL
    */
@@ -94,275 +80,28 @@
     });
   }
 
-  /**
-   * Check if we're on the browse page
-   */
-  function isOnBrowsePage() {
-    return window.location.pathname === BROWSE_PATH;
-  }
+  // Page state (module-scoped for persistence)
+  let missingScenes = [];
+  let isLoading = false;
+  let currentCursor = null;
+  let hasMore = true;
+  let sortField = "DATE";
+  let sortDirection = "DESC";
+  let filterFavoritePerformers = false;
+  let filterFavoriteStudios = false;
+  let filterFavoriteTags = false;
+  let whisparrConfigured = false;
+  let stashdbUrl = "";
 
   /**
-   * Initialize browse page if on correct route
+   * Set page title with retry to overcome Stash's title management
    */
-  function initBrowsePage() {
-    if (!isOnBrowsePage()) return;
-    if (browsePageRoot) return; // Already initialized
-
-    // Create the browse page
-    createBrowsePage();
-
-    // Load initial results
-    performSearch(true);
-  }
-
-  /**
-   * Create the browse page structure
-   */
-  function createBrowsePage() {
-    // Clear existing content
-    const mainContainer = document.querySelector(".main > div") ||
-                          document.querySelector("#root > div > div");
-
-    if (!mainContainer) {
-      console.error("[MissingScenes] Could not find main container");
-      return;
-    }
-
-    // Create browse page container
-    const page = document.createElement("div");
-    page.className = "ms-browse-page";
-    page.innerHTML = `
-      <div class="ms-browse-header">
-        <h1>Missing Scenes</h1>
-        <p>Browse StashDB scenes you don't have locally</p>
-      </div>
-
-      <div class="ms-browse-controls">
-        <div class="ms-filter-controls">
-          <label class="ms-filter-checkbox">
-            <input type="checkbox" id="ms-filter-performers">
-            <span>Favorite Performers</span>
-          </label>
-          <label class="ms-filter-checkbox">
-            <input type="checkbox" id="ms-filter-studios">
-            <span>Favorite Studios</span>
-          </label>
-          <label class="ms-filter-checkbox">
-            <input type="checkbox" id="ms-filter-tags">
-            <span>Favorite Tags</span>
-          </label>
-        </div>
-
-        <div class="ms-sort-controls">
-          <label>Sort by:</label>
-          <select id="ms-sort-field" class="ms-sort-select">
-            <option value="DATE">Release Date</option>
-            <option value="TITLE">Title</option>
-            <option value="CREATED_AT">Added to StashDB</option>
-            <option value="UPDATED_AT">Last Updated</option>
-            <option value="TRENDING">Trending</option>
-          </select>
-          <select id="ms-sort-direction" class="ms-sort-select">
-            <option value="DESC">Newest First</option>
-            <option value="ASC">Oldest First</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="ms-browse-stats" id="ms-browse-stats"></div>
-
-      <div class="ms-browse-results" id="ms-browse-results">
-        <div class="ms-placeholder">Loading...</div>
-      </div>
-
-      <div class="ms-browse-footer">
-        <button class="ms-btn ms-btn-secondary" id="ms-load-more-btn" style="display: none;">
-          Load More
-        </button>
-      </div>
-    `;
-
-    // Replace content
-    mainContainer.innerHTML = "";
-    mainContainer.appendChild(page);
-    browsePageRoot = page;
-
-    // Add event listeners
-    setupEventListeners();
-  }
-
-  /**
-   * Setup event listeners for controls
-   */
-  function setupEventListeners() {
-    // Filter checkboxes
-    document.getElementById("ms-filter-performers")?.addEventListener("change", (e) => {
-      filterFavoritePerformers = e.target.checked;
-      performSearch(true);
-    });
-
-    document.getElementById("ms-filter-studios")?.addEventListener("change", (e) => {
-      filterFavoriteStudios = e.target.checked;
-      performSearch(true);
-    });
-
-    document.getElementById("ms-filter-tags")?.addEventListener("change", (e) => {
-      filterFavoriteTags = e.target.checked;
-      performSearch(true);
-    });
-
-    // Sort controls
-    document.getElementById("ms-sort-field")?.addEventListener("change", (e) => {
-      sortField = e.target.value;
-      performSearch(true);
-    });
-
-    document.getElementById("ms-sort-direction")?.addEventListener("change", (e) => {
-      sortDirection = e.target.value;
-      performSearch(true);
-    });
-
-    // Load more button
-    document.getElementById("ms-load-more-btn")?.addEventListener("click", () => {
-      performSearch(false);
-    });
-  }
-
-  /**
-   * Perform search/browse
-   */
-  async function performSearch(reset = true) {
-    if (isLoading) return;
-
-    if (reset) {
-      currentCursor = null;
-      missingScenes = [];
-      hasMore = true;
-    }
-
-    isLoading = true;
-    updateLoadingState(true);
-
-    try {
-      const result = await browseStashdb({
-        pageSize: 50,
-        cursor: currentCursor,
-        sort: sortField,
-        direction: sortDirection,
-        filterFavoritePerformers,
-        filterFavoriteStudios,
-        filterFavoriteTags,
-      });
-
-      missingScenes = reset ? result.missing_scenes : [...missingScenes, ...result.missing_scenes];
-      currentCursor = result.cursor;
-      hasMore = result.has_more;
-      whisparrConfigured = result.whisparr_configured;
-      stashdbUrl = result.stashdb_url || "https://stashdb.org";
-
-      updateStats(result);
-      renderResults();
-    } catch (error) {
-      console.error("[MissingScenes] Browse failed:", error);
-      showError(error.message);
-    } finally {
-      isLoading = false;
-      updateLoadingState(false);
-    }
-  }
-
-  /**
-   * Update stats display
-   */
-  function updateStats(result) {
-    const statsEl = document.getElementById("ms-browse-stats");
-    if (!statsEl) return;
-
-    const loaded = missingScenes.length;
-    const total = result.total_on_stashdb;
-    const filtersActive = result.filters_active;
-    const excludedApplied = result.excluded_tags_applied;
-
-    let text = `Showing ${loaded}`;
-    if (!result.is_complete) {
-      text += ` of ~${total.toLocaleString()}`;
-    }
-    text += " missing scenes";
-
-    if (filtersActive) text += " (filtered)";
-    if (excludedApplied) text += " (content filtered)";
-
-    statsEl.textContent = text;
-  }
-
-  /**
-   * Render scene results
-   */
-  function renderResults() {
-    const container = document.getElementById("ms-browse-results");
-    if (!container) return;
-
-    if (missingScenes.length === 0) {
-      container.innerHTML = `
-        <div class="ms-placeholder ms-success">
-          <div class="ms-success-icon">&#10003;</div>
-          <div>No missing scenes found!</div>
-        </div>
-      `;
-      updateLoadMoreButton();
-      return;
-    }
-
-    // Create grid - reuse scene card structure from main plugin
-    const grid = document.createElement("div");
-    grid.className = "ms-results-grid";
-
-    for (const scene of missingScenes) {
-      const card = createSceneCard(scene);
-      grid.appendChild(card);
-    }
-
-    container.innerHTML = "";
-    container.appendChild(grid);
-    updateLoadMoreButton();
-  }
-
-  /**
-   * Create a scene card (matches existing modal style)
-   */
-  function createSceneCard(scene) {
-    const card = document.createElement("div");
-    card.className = "ms-scene-card";
-    card.dataset.stashId = scene.stash_id;
-
-    // Build card HTML
-    const thumbUrl = scene.thumbnail || "";
-    const title = scene.title || "Unknown";
-    const studio = scene.studio?.name || "";
-    const date = scene.release_date ? formatDate(scene.release_date) : "";
-    const performers = (scene.performers || []).slice(0, 3).map(p => p.name).join(", ");
-
-    card.innerHTML = `
-      <div class="ms-scene-thumb ${thumbUrl ? '' : 'ms-no-image'}">
-        ${thumbUrl ? `<img src="${thumbUrl}" alt="${escapeHtml(title)}" loading="lazy">` : '<span class="ms-no-image-icon">&#128247;</span>'}
-      </div>
-      <div class="ms-scene-info">
-        <div class="ms-scene-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
-        <div class="ms-scene-meta">${escapeHtml([studio, date].filter(Boolean).join(" - "))}</div>
-        <div class="ms-scene-performers">${escapeHtml(performers)}</div>
-      </div>
-      <div class="ms-scene-actions">
-        <a class="ms-btn ms-btn-small" href="${stashdbUrl}/scenes/${scene.stash_id}" target="_blank" rel="noopener">View</a>
-      </div>
-    `;
-
-    card.onclick = (e) => {
-      // Don't navigate if clicking the View button
-      if (e.target.closest('.ms-scene-actions')) return;
-      window.open(`${stashdbUrl}/scenes/${scene.stash_id}`, "_blank");
-    };
-
-    return card;
+  function setPageTitle(title) {
+    const doSet = () => { document.title = title; };
+    doSet();
+    setTimeout(doSet, 50);
+    setTimeout(doSet, 200);
+    setTimeout(doSet, 500);
   }
 
   /**
@@ -390,66 +129,324 @@
   }
 
   /**
-   * Update load more button
+   * Create a scene card HTML (for use in renderPage)
    */
-  function updateLoadMoreButton() {
-    const btn = document.getElementById("ms-load-more-btn");
-    if (!btn) return;
+  function createSceneCardHtml(scene) {
+    const thumbUrl = scene.thumbnail || "";
+    const title = scene.title || "Unknown";
+    const studio = scene.studio?.name || "";
+    const date = scene.release_date ? formatDate(scene.release_date) : "";
+    const performers = (scene.performers || []).slice(0, 3).map(p => p.name).join(", ");
+    const baseUrl = stashdbUrl || "https://stashdb.org";
 
-    if (hasMore && missingScenes.length > 0) {
-      btn.style.display = "inline-block";
-      btn.disabled = isLoading;
-    } else {
-      btn.style.display = "none";
-    }
+    return `
+      <div class="ms-scene-card" data-stash-id="${escapeHtml(scene.stash_id)}" data-url="${escapeHtml(baseUrl)}/scenes/${escapeHtml(scene.stash_id)}">
+        <div class="ms-scene-thumb ${thumbUrl ? '' : 'ms-no-image'}">
+          ${thumbUrl ? `<img src="${escapeHtml(thumbUrl)}" alt="${escapeHtml(title)}" loading="lazy">` : '<span class="ms-no-image-icon">&#128247;</span>'}
+        </div>
+        <div class="ms-scene-info">
+          <div class="ms-scene-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+          <div class="ms-scene-meta">${escapeHtml([studio, date].filter(Boolean).join(" - "))}</div>
+          <div class="ms-scene-performers">${escapeHtml(performers)}</div>
+        </div>
+        <div class="ms-scene-actions">
+          <a class="ms-btn ms-btn-small" href="${escapeHtml(baseUrl)}/scenes/${escapeHtml(scene.stash_id)}" target="_blank" rel="noopener">View</a>
+        </div>
+      </div>
+    `;
   }
 
   /**
-   * Update loading state
+   * Render the browse page content into the container
    */
-  function updateLoadingState(loading) {
-    const btn = document.getElementById("ms-load-more-btn");
-    if (btn) btn.disabled = loading;
+  function renderPage(container, state) {
+    const { loading, error, scenes, stats } = state;
 
-    const resultsContainer = document.getElementById("ms-browse-results");
-    if (resultsContainer && loading && missingScenes.length === 0) {
-      resultsContainer.innerHTML = '<div class="ms-placeholder">Loading...</div>';
+    // Build filter checkboxes
+    const filterPerformersChecked = filterFavoritePerformers ? 'checked' : '';
+    const filterStudiosChecked = filterFavoriteStudios ? 'checked' : '';
+    const filterTagsChecked = filterFavoriteTags ? 'checked' : '';
+
+    // Build sort options
+    const sortOptions = [
+      { value: "DATE", label: "Release Date" },
+      { value: "TITLE", label: "Title" },
+      { value: "CREATED_AT", label: "Added to StashDB" },
+      { value: "UPDATED_AT", label: "Last Updated" },
+      { value: "TRENDING", label: "Trending" },
+    ].map(opt => `<option value="${opt.value}" ${sortField === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('');
+
+    const directionOptions = [
+      { value: "DESC", label: "Newest First" },
+      { value: "ASC", label: "Oldest First" },
+    ].map(opt => `<option value="${opt.value}" ${sortDirection === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('');
+
+    // Build stats text
+    let statsText = '';
+    if (stats) {
+      statsText = `Showing ${scenes.length}`;
+      if (!stats.is_complete) {
+        statsText += ` of ~${stats.total_on_stashdb.toLocaleString()}`;
+      }
+      statsText += " missing scenes";
+      if (stats.filters_active) statsText += " (filtered)";
+      if (stats.excluded_tags_applied) statsText += " (content filtered)";
     }
-  }
 
-  /**
-   * Show error message
-   */
-  function showError(message) {
-    const container = document.getElementById("ms-browse-results");
-    if (container) {
-      container.innerHTML = `
+    // Build results content
+    let resultsContent;
+    if (loading && scenes.length === 0) {
+      resultsContent = '<div class="ms-placeholder">Loading...</div>';
+    } else if (error) {
+      resultsContent = `
         <div class="ms-placeholder ms-error">
           <div class="ms-error-icon">!</div>
-          <div>${escapeHtml(message)}</div>
+          <div>${escapeHtml(error)}</div>
         </div>
       `;
+    } else if (scenes.length === 0) {
+      resultsContent = `
+        <div class="ms-placeholder ms-success">
+          <div class="ms-success-icon">&#10003;</div>
+          <div>No missing scenes found!</div>
+        </div>
+      `;
+    } else {
+      const cardsHtml = scenes.map(s => createSceneCardHtml(s)).join('');
+      resultsContent = `<div class="ms-results-grid">${cardsHtml}</div>`;
+    }
+
+    // Load more button visibility
+    const showLoadMore = hasMore && scenes.length > 0;
+
+    container.innerHTML = `
+      <div class="ms-browse-page">
+        <div class="ms-browse-header">
+          <h1>Missing Scenes</h1>
+          <p>Browse StashDB scenes you don't have locally</p>
+        </div>
+
+        <div class="ms-browse-controls">
+          <div class="ms-filter-controls">
+            <label class="ms-filter-checkbox">
+              <input type="checkbox" id="ms-filter-performers" ${filterPerformersChecked}>
+              <span>Favorite Performers</span>
+            </label>
+            <label class="ms-filter-checkbox">
+              <input type="checkbox" id="ms-filter-studios" ${filterStudiosChecked}>
+              <span>Favorite Studios</span>
+            </label>
+            <label class="ms-filter-checkbox">
+              <input type="checkbox" id="ms-filter-tags" ${filterTagsChecked}>
+              <span>Favorite Tags</span>
+            </label>
+          </div>
+
+          <div class="ms-sort-controls">
+            <label>Sort by:</label>
+            <select id="ms-sort-field" class="ms-sort-select">
+              ${sortOptions}
+            </select>
+            <select id="ms-sort-direction" class="ms-sort-select">
+              ${directionOptions}
+            </select>
+          </div>
+        </div>
+
+        <div class="ms-browse-stats">${statsText}</div>
+
+        <div class="ms-browse-results">
+          ${resultsContent}
+        </div>
+
+        <div class="ms-browse-footer">
+          <button class="ms-btn ms-btn-secondary" id="ms-load-more-btn" style="display: ${showLoadMore ? 'inline-block' : 'none'};" ${loading ? 'disabled' : ''}>
+            Load More
+          </button>
+        </div>
+      </div>
+    `;
+
+    // Attach event handlers
+    attachEventHandlers(container);
+  }
+
+  /**
+   * Attach event handlers after rendering
+   */
+  function attachEventHandlers(container) {
+    // Click handler for scene cards (open in new tab)
+    container.querySelectorAll('.ms-scene-card').forEach(card => {
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('.ms-scene-actions')) return;
+        const url = card.dataset.url;
+        if (url) window.open(url, '_blank');
+      });
+    });
+  }
+
+  /**
+   * Perform search/browse and update state
+   */
+  async function performSearch(container, reset = true) {
+    if (isLoading) return;
+
+    if (reset) {
+      currentCursor = null;
+      missingScenes = [];
+      hasMore = true;
+    }
+
+    isLoading = true;
+    renderPage(container, { loading: true, error: null, scenes: missingScenes, stats: null });
+
+    try {
+      const result = await browseStashdb({
+        pageSize: 50,
+        cursor: currentCursor,
+        sort: sortField,
+        direction: sortDirection,
+        filterFavoritePerformers,
+        filterFavoriteStudios,
+        filterFavoriteTags,
+      });
+
+      missingScenes = reset ? result.missing_scenes : [...missingScenes, ...result.missing_scenes];
+      currentCursor = result.cursor;
+      hasMore = result.has_more;
+      whisparrConfigured = result.whisparr_configured;
+      stashdbUrl = result.stashdb_url || "https://stashdb.org";
+
+      isLoading = false;
+      renderPage(container, {
+        loading: false,
+        error: null,
+        scenes: missingScenes,
+        stats: {
+          total_on_stashdb: result.total_on_stashdb,
+          is_complete: result.is_complete,
+          filters_active: result.filters_active,
+          excluded_tags_applied: result.excluded_tags_applied,
+        }
+      });
+
+      // Re-attach filter/sort handlers after render
+      setupControlHandlers(container);
+    } catch (error) {
+      console.error("[MissingScenes] Browse failed:", error);
+      isLoading = false;
+      renderPage(container, { loading: false, error: error.message, scenes: [], stats: null });
+      setupControlHandlers(container);
     }
   }
 
   /**
-   * Add "Missing Scenes" button to Scenes page
+   * Setup control handlers (filters, sort, load more)
+   */
+  function setupControlHandlers(container) {
+    // Filter checkboxes
+    container.querySelector('#ms-filter-performers')?.addEventListener('change', (e) => {
+      filterFavoritePerformers = e.target.checked;
+      performSearch(container, true);
+    });
+
+    container.querySelector('#ms-filter-studios')?.addEventListener('change', (e) => {
+      filterFavoriteStudios = e.target.checked;
+      performSearch(container, true);
+    });
+
+    container.querySelector('#ms-filter-tags')?.addEventListener('change', (e) => {
+      filterFavoriteTags = e.target.checked;
+      performSearch(container, true);
+    });
+
+    // Sort controls
+    container.querySelector('#ms-sort-field')?.addEventListener('change', (e) => {
+      sortField = e.target.value;
+      performSearch(container, true);
+    });
+
+    container.querySelector('#ms-sort-direction')?.addEventListener('change', (e) => {
+      sortDirection = e.target.value;
+      performSearch(container, true);
+    });
+
+    // Load more button
+    container.querySelector('#ms-load-more-btn')?.addEventListener('click', () => {
+      performSearch(container, false);
+    });
+  }
+
+  /**
+   * Missing Scenes Browse Page component (React-based for PluginApi.register.route)
+   */
+  function MissingScenesBrowsePage() {
+    const React = PluginApi.React;
+    const containerRef = React.useRef(null);
+
+    React.useEffect(() => {
+      async function init() {
+        if (!containerRef.current) return;
+
+        console.debug("[MissingScenes] Initializing browse page...");
+        setPageTitle("Missing Scenes | Stash");
+
+        // Reset state for fresh page load
+        missingScenes = [];
+        currentCursor = null;
+        hasMore = true;
+        isLoading = false;
+
+        // Initial render and load
+        renderPage(containerRef.current, { loading: true, error: null, scenes: [], stats: null });
+        setupControlHandlers(containerRef.current);
+        performSearch(containerRef.current, true);
+      }
+
+      init();
+    }, []);
+
+    return React.createElement('div', {
+      ref: containerRef,
+      className: 'ms-browse-container'
+    });
+  }
+
+  /**
+   * Add "Missing Scenes" button to Scenes page toolbar
    */
   function addScenesPageButton() {
     if (!window.location.pathname.startsWith("/scenes")) return;
     if (document.querySelector(".ms-browse-button")) return;
 
-    // Find the header area - Stash uses different class names in different versions
-    const header = document.querySelector(".scenes-header") ||
-                   document.querySelector('[class*="ListHeader"]') ||
-                   document.querySelector(".content-header") ||
-                   document.querySelector(".btn-toolbar");
+    // Find the toolbar - Stash uses different class names in different versions
+    const toolbar = document.querySelector(".filtered-list-toolbar") ||
+                    document.querySelector(".scenes-header") ||
+                    document.querySelector('[class*="ListHeader"]') ||
+                    document.querySelector(".content-header") ||
+                    document.querySelector(".btn-toolbar");
 
-    if (!header) return;
+    if (!toolbar) return;
+
+    // Find insertion point (similar to TagManager approach)
+    let insertionPoint = toolbar.querySelector('.zoom-slider-container') ||
+                         toolbar.querySelector('.display-mode-select');
+
+    if (!insertionPoint) {
+      const btnGroups = toolbar.querySelectorAll('.btn-group');
+      for (const group of btnGroups) {
+        const hasIcons = group.querySelector('.fa-icon') || group.querySelector('svg');
+        if (hasIcons) {
+          insertionPoint = group;
+        }
+      }
+    }
 
     const btn = document.createElement("button");
     btn.className = "ms-browse-button btn btn-secondary";
     btn.type = "button";
+    btn.title = "Missing Scenes";
+    btn.style.marginLeft = "0.5rem";
     btn.innerHTML = `
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 1em; height: 1em; margin-right: 0.5em;">
         <circle cx="11" cy="11" r="8"></circle>
@@ -461,56 +458,53 @@
       window.location.href = BROWSE_PATH;
     };
 
-    header.appendChild(btn);
+    if (insertionPoint) {
+      insertionPoint.parentNode.insertBefore(btn, insertionPoint.nextSibling);
+    } else {
+      toolbar.appendChild(btn);
+    }
+
+    console.debug('[MissingScenes] Nav button injected on Scenes page');
   }
 
   /**
-   * Watch for navigation changes
+   * Watch for navigation to Scenes page and inject button
    */
-  function watchNavigation() {
-    // Check on page load
-    initBrowsePage();
+  function setupNavButtonInjection() {
+    // Try to inject immediately
     addScenesPageButton();
 
-    // Watch for SPA navigation
+    // Watch for URL changes (SPA navigation)
+    let lastUrl = window.location.href;
     const observer = new MutationObserver(() => {
-      setTimeout(() => {
-        // Reset state when leaving browse page
-        if (!isOnBrowsePage() && browsePageRoot) {
-          browsePageRoot = null;
-          missingScenes = [];
-          currentCursor = null;
-        }
-        initBrowsePage();
-        addScenesPageButton();
-      }, 100);
+      if (window.location.href !== lastUrl) {
+        lastUrl = window.location.href;
+        // Wait a bit for DOM to update after navigation
+        setTimeout(addScenesPageButton, 100);
+        setTimeout(addScenesPageButton, 500);
+        setTimeout(addScenesPageButton, 1000);
+      }
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
 
-    window.addEventListener("popstate", () => {
-      setTimeout(() => {
-        if (!isOnBrowsePage() && browsePageRoot) {
-          browsePageRoot = null;
-          missingScenes = [];
-          currentCursor = null;
-        }
-        initBrowsePage();
-        addScenesPageButton();
-      }, 100);
-    });
+    // Also try on initial load with delays (for refresh on Scenes page)
+    setTimeout(addScenesPageButton, 100);
+    setTimeout(addScenesPageButton, 500);
+    setTimeout(addScenesPageButton, 1000);
+    setTimeout(addScenesPageButton, 2000);
   }
 
   /**
-   * Initialize
+   * Register the route with Stash's plugin API
    */
-  function init() {
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", watchNavigation);
-    } else {
-      watchNavigation();
-    }
+  function registerRoute() {
+    PluginApi.register.route(BROWSE_PATH, MissingScenesBrowsePage);
+    console.log('[MissingScenes] Route registered:', BROWSE_PATH);
   }
 
-  init();
+  // Initialize
+  registerRoute();
+  setupNavButtonInjection();
+  console.log('[MissingScenes] Browse plugin loaded');
 })();
