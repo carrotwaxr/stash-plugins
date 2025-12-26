@@ -4,65 +4,13 @@
   const PLUGIN_ID = "missingScenes";
   const BROWSE_PATH = "/plugins/missing-scenes";
 
-  /**
-   * Get the GraphQL endpoint URL
-   */
-  function getGraphQLUrl() {
-    const baseEl = document.querySelector("base");
-    const baseURL = baseEl ? baseEl.getAttribute("href") : "/";
-    return `${baseURL}graphql`;
-  }
-
-  /**
-   * Make a GraphQL request
-   */
-  async function graphqlRequest(query, variables = {}) {
-    const response = await fetch(getGraphQLUrl(), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, variables }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`GraphQL request failed: ${response.status}`);
-    }
-
-    const result = await response.json();
-    if (result.errors && result.errors.length > 0) {
-      throw new Error(result.errors[0].message);
-    }
-
-    return result.data;
-  }
-
-  /**
-   * Run a plugin operation
-   */
-  async function runPluginOperation(args) {
-    const query = `
-      mutation RunPluginOperation($plugin_id: ID!, $args: Map) {
-        runPluginOperation(plugin_id: $plugin_id, args: $args)
-      }
-    `;
-
-    const data = await graphqlRequest(query, {
-      plugin_id: PLUGIN_ID,
-      args: args,
-    });
-
-    const rawOutput = data?.runPluginOperation;
-    if (!rawOutput) throw new Error("No response from plugin");
-
-    let output;
-    try {
-      output = typeof rawOutput === "string" ? JSON.parse(rawOutput) : rawOutput;
-    } catch (e) {
-      throw new Error("Invalid response from plugin");
-    }
-
-    if (output.error) throw new Error(output.error);
-    return output;
-  }
+  // Use shared core module
+  const Core = window.MissingScenesCore;
+  const {
+    runPluginOperation,
+    escapeHtml,
+    createSceneCard,
+  } = Core;
 
   /**
    * Browse StashDB for missing scenes
@@ -105,58 +53,6 @@
   }
 
   /**
-   * Escape HTML to prevent XSS
-   */
-  function escapeHtml(text) {
-    if (!text) return "";
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
-  }
-
-  /**
-   * Format date for display
-   */
-  function formatDate(dateStr) {
-    if (!dateStr) return "";
-    try {
-      const [year, month, day] = dateStr.split("-").map(Number);
-      const date = new Date(year, month - 1, day);
-      return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    } catch {
-      return dateStr;
-    }
-  }
-
-  /**
-   * Create a scene card HTML (for use in renderPage)
-   */
-  function createSceneCardHtml(scene) {
-    const thumbUrl = scene.thumbnail || "";
-    const title = scene.title || "Unknown";
-    const studio = scene.studio?.name || "";
-    const date = scene.release_date ? formatDate(scene.release_date) : "";
-    const performers = (scene.performers || []).slice(0, 3).map(p => p.name).join(", ");
-    const baseUrl = stashdbUrl || "https://stashdb.org";
-
-    return `
-      <div class="ms-scene-card" data-stash-id="${escapeHtml(scene.stash_id)}" data-url="${escapeHtml(baseUrl)}/scenes/${escapeHtml(scene.stash_id)}">
-        <div class="ms-scene-thumb ${thumbUrl ? '' : 'ms-no-image'}">
-          ${thumbUrl ? `<img src="${escapeHtml(thumbUrl)}" alt="${escapeHtml(title)}" loading="lazy">` : '<span class="ms-no-image-icon">&#128247;</span>'}
-        </div>
-        <div class="ms-scene-info">
-          <div class="ms-scene-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
-          <div class="ms-scene-meta">${escapeHtml([studio, date].filter(Boolean).join(" - "))}</div>
-          <div class="ms-scene-performers">${escapeHtml(performers)}</div>
-        </div>
-        <div class="ms-scene-actions">
-          <a class="ms-btn ms-btn-small" href="${escapeHtml(baseUrl)}/scenes/${escapeHtml(scene.stash_id)}" target="_blank" rel="noopener">View</a>
-        </div>
-      </div>
-    `;
-  }
-
-  /**
    * Render the browse page content into the container
    */
   function renderPage(container, state) {
@@ -193,27 +89,26 @@
       if (stats.excluded_tags_applied) statsText += " (content filtered)";
     }
 
-    // Build results content
-    let resultsContent;
+    // Build results content - placeholder for now, will be replaced with DOM elements
+    let resultsPlaceholder;
     if (loading && scenes.length === 0) {
-      resultsContent = '<div class="ms-placeholder">Loading...</div>';
+      resultsPlaceholder = '<div class="ms-placeholder">Loading...</div>';
     } else if (error) {
-      resultsContent = `
+      resultsPlaceholder = `
         <div class="ms-placeholder ms-error">
           <div class="ms-error-icon">!</div>
           <div>${escapeHtml(error)}</div>
         </div>
       `;
     } else if (scenes.length === 0) {
-      resultsContent = `
+      resultsPlaceholder = `
         <div class="ms-placeholder ms-success">
           <div class="ms-success-icon">&#10003;</div>
           <div>No missing scenes found!</div>
         </div>
       `;
     } else {
-      const cardsHtml = scenes.map(s => createSceneCardHtml(s)).join('');
-      resultsContent = `<div class="ms-results-grid">${cardsHtml}</div>`;
+      resultsPlaceholder = ''; // Will be filled with DOM elements below
     }
 
     // Load more button visibility
@@ -256,7 +151,7 @@
         <div class="ms-browse-stats">${statsText}</div>
 
         <div class="ms-browse-results">
-          ${resultsContent}
+          ${resultsPlaceholder}
         </div>
 
         <div class="ms-browse-footer">
@@ -267,22 +162,25 @@
       </div>
     `;
 
-    // Attach event handlers
-    attachEventHandlers(container);
-  }
+    // If we have scenes, render them using the shared createSceneCard component
+    if (scenes.length > 0 && !error) {
+      const resultsDiv = container.querySelector('.ms-browse-results');
+      if (resultsDiv) {
+        resultsDiv.innerHTML = '';
+        const grid = document.createElement('div');
+        grid.className = 'ms-results-grid';
 
-  /**
-   * Attach event handlers after rendering
-   */
-  function attachEventHandlers(container) {
-    // Click handler for scene cards (open in new tab)
-    container.querySelectorAll('.ms-scene-card').forEach(card => {
-      card.addEventListener('click', (e) => {
-        if (e.target.closest('.ms-scene-actions')) return;
-        const url = card.dataset.url;
-        if (url) window.open(url, '_blank');
-      });
-    });
+        for (const scene of scenes) {
+          const card = createSceneCard(scene, {
+            stashdbUrl: stashdbUrl || "https://stashdb.org",
+            whisparrConfigured: whisparrConfigured,
+          });
+          grid.appendChild(card);
+        }
+
+        resultsDiv.appendChild(grid);
+      }
+    }
   }
 
   /**
