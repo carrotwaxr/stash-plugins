@@ -461,6 +461,131 @@ def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
     return stash_ids
 
 
+def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int = 100) -> set[str]:
+    """Get stash_ids for favorited entities, sorted by engagement with a limit.
+
+    Args:
+        entity_type: "performer", "studio", or "tag"
+        endpoint: StashDB endpoint URL
+        limit: Maximum number of favorites to return
+
+    Returns:
+        Set of StashDB IDs for top favorites
+    """
+    # Determine sort field based on entity type
+    if entity_type == "performer":
+        sort_field = "last_o_at"
+        query = """
+        query FindFavoritePerformers($filter: FindFilterType) {
+            findPerformers(
+                filter: $filter
+                performer_filter: { filter_favorites: true }
+            ) {
+                count
+                performers {
+                    id
+                    name
+                    stash_ids {
+                        endpoint
+                        stash_id
+                    }
+                }
+            }
+        }
+        """
+        result_key = "findPerformers"
+        items_key = "performers"
+    elif entity_type == "studio":
+        sort_field = "scenes_count"
+        query = """
+        query FindFavoriteStudios($filter: FindFilterType) {
+            findStudios(
+                filter: $filter
+                studio_filter: { favorite: true }
+            ) {
+                count
+                studios {
+                    id
+                    name
+                    stash_ids {
+                        endpoint
+                        stash_id
+                    }
+                }
+            }
+        }
+        """
+        result_key = "findStudios"
+        items_key = "studios"
+    elif entity_type == "tag":
+        sort_field = "scenes_count"
+        query = """
+        query FindFavoriteTags($filter: FindFilterType) {
+            findTags(
+                filter: $filter
+                tag_filter: { favorite: true }
+            ) {
+                count
+                tags {
+                    id
+                    name
+                    stash_ids {
+                        endpoint
+                        stash_id
+                    }
+                }
+            }
+        }
+        """
+        result_key = "findTags"
+        items_key = "tags"
+    else:
+        log.LogWarning(f"Unknown entity type for favorites: {entity_type}")
+        return set()
+
+    stash_ids = set()
+    collected = 0
+    page = 1
+    per_page = min(100, limit)  # Don't fetch more than needed
+
+    while collected < limit:
+        data = stash_graphql(query, {
+            "filter": {
+                "page": page,
+                "per_page": per_page,
+                "sort": sort_field,
+                "direction": "DESC"
+            }
+        })
+
+        if not data or result_key not in data:
+            break
+
+        result = data[result_key]
+        items = result.get(items_key, [])
+
+        if not items:
+            break
+
+        for item in items:
+            if collected >= limit:
+                break
+            for sid in item.get("stash_ids", []):
+                if sid.get("endpoint") == endpoint:
+                    stash_ids.add(sid.get("stash_id"))
+                    collected += 1
+                    break  # Only count once per entity
+
+        total = result.get("count", 0)
+        if page * per_page >= total:
+            break
+
+        page += 1
+
+    log.LogInfo(f"Found {len(stash_ids)} favorite {entity_type}s (limit: {limit}) linked to {endpoint}")
+    return stash_ids
+
+
 # ============================================================================
 # StashDB API (using resilient stashbox_api module)
 # ============================================================================

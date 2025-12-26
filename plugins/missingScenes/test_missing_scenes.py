@@ -867,6 +867,78 @@ class TestGetFavoriteStashIds(unittest.TestCase):
         self.assertIn("id-149", result)
 
 
+class TestGetFavoriteStashIdsWithLimit(unittest.TestCase):
+    """Test the get_favorite_stash_ids_limited function."""
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_performers_sorted_by_last_o_at(self, mock_graphql):
+        """Test that performers are sorted by last_o_at DESC."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findPerformers": {
+                "count": 3,
+                "performers": [
+                    {"id": "1", "name": "Recent", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "perf-recent"}
+                    ]},
+                    {"id": "2", "name": "Old", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "perf-old"}
+                    ]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids_limited("performer", endpoint, limit=100)
+
+        self.assertIn("perf-recent", result)
+        # Verify query used correct sort
+        call_args = mock_graphql.call_args
+        variables = call_args[0][1]
+        self.assertEqual(variables["filter"]["sort"], "last_o_at")
+        self.assertEqual(variables["filter"]["direction"], "DESC")
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_studios_sorted_by_scenes_count(self, mock_graphql):
+        """Test that studios are sorted by scenes_count DESC."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findStudios": {
+                "count": 1,
+                "studios": [
+                    {"id": "1", "name": "Studio", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": "studio-1"}
+                    ]},
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids_limited("studio", endpoint, limit=100)
+
+        call_args = mock_graphql.call_args
+        variables = call_args[0][1]
+        self.assertEqual(variables["filter"]["sort"], "scenes_count")
+
+    @patch.object(missing_scenes, 'stash_graphql')
+    def test_respects_limit(self, mock_graphql):
+        """Test that limit is respected."""
+        endpoint = "https://stashdb.org/graphql"
+        mock_graphql.return_value = {
+            "findPerformers": {
+                "count": 200,
+                "performers": [
+                    {"id": str(i), "name": f"Performer {i}", "stash_ids": [
+                        {"endpoint": endpoint, "stash_id": f"perf-{i}"}
+                    ]} for i in range(100)
+                ]
+            }
+        }
+
+        result = missing_scenes.get_favorite_stash_ids_limited("performer", endpoint, limit=50)
+
+        # Should only return first 50, not all 100 from page
+        self.assertEqual(len(result), 50)
+
+
 class TestScenePassesFavoriteFilters(unittest.TestCase):
     """Test the scene_passes_favorite_filters function."""
 
