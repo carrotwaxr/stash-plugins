@@ -1365,6 +1365,67 @@ class TestEndpointMatching(unittest.TestCase):
         self.assertIsNone(stash_id)
 
 
+class TestQueryScenesBrowse(unittest.TestCase):
+    """Test the query_scenes_browse function for general browsing."""
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_browse_no_filters(self, mock_request):
+        """Test browsing with no filters returns all scenes."""
+        mock_request.return_value = {
+            "queryScenes": {
+                "count": 1000,
+                "scenes": [{"id": f"scene-{i}"} for i in range(100)]
+            }
+        }
+
+        result = stashbox_api.query_scenes_browse(
+            "https://stashdb.org/graphql",
+            "api-key",
+            page=1,
+            per_page=100
+        )
+
+        self.assertEqual(result["count"], 1000)
+        self.assertEqual(len(result["scenes"]), 100)
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_browse_with_excluded_tags(self, mock_request):
+        """Test that excluded tags are passed to query."""
+        mock_request.return_value = {
+            "queryScenes": {"count": 500, "scenes": []}
+        }
+
+        stashbox_api.query_scenes_browse(
+            "https://stashdb.org/graphql",
+            "api-key",
+            excluded_tag_ids=["tag-1", "tag-2"]
+        )
+
+        call_args = mock_request.call_args
+        variables = call_args[0][2]
+        self.assertIn("tags", variables["input"])
+        self.assertEqual(variables["input"]["tags"]["modifier"], "EXCLUDES")
+        self.assertEqual(variables["input"]["tags"]["value"], ["tag-1", "tag-2"])
+
+    @patch.object(stashbox_api, 'graphql_request_with_retry')
+    def test_browse_with_performer_filter(self, mock_request):
+        """Test filtering by performer IDs."""
+        mock_request.return_value = {
+            "queryScenes": {"count": 50, "scenes": []}
+        }
+
+        stashbox_api.query_scenes_browse(
+            "https://stashdb.org/graphql",
+            "api-key",
+            performer_ids=["perf-1", "perf-2"]
+        )
+
+        call_args = mock_request.call_args
+        variables = call_args[0][2]
+        self.assertIn("performers", variables["input"])
+        self.assertEqual(variables["input"]["performers"]["modifier"], "INCLUDES")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)

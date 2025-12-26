@@ -784,3 +784,110 @@ def query_scenes_page(url, api_key, entity_type, entity_stash_id, page=1,
     except StashBoxAPIError as e:
         log.LogError(f"Error fetching scenes page {page}: {e}")
         return None
+
+
+def query_scenes_browse(url, api_key, page=1, per_page=100, sort="DATE", direction="DESC",
+                        performer_ids=None, studio_ids=None, tag_ids=None,
+                        excluded_tag_ids=None, plugin_settings=None):
+    """
+    Browse all scenes on StashDB with optional filters.
+
+    Unlike entity-specific queries, this allows querying without a specific
+    performer/studio/tag context.
+
+    Args:
+        url: StashDB GraphQL endpoint URL
+        api_key: API key for authentication
+        page: Page number (1-indexed)
+        per_page: Results per page
+        sort: Sort field - "DATE", "TITLE", "CREATED_AT", "UPDATED_AT", "TRENDING"
+        direction: Sort direction - "ASC" or "DESC"
+        performer_ids: List of performer StashDB IDs to filter by (INCLUDES)
+        studio_ids: List of studio StashDB IDs to filter by (INCLUDES)
+        tag_ids: List of tag StashDB IDs to filter by (INCLUDES)
+        excluded_tag_ids: List of tag StashDB IDs to exclude (EXCLUDES)
+        plugin_settings: Plugin configuration
+
+    Returns:
+        dict with scenes, count, page, has_more
+    """
+    valid_sorts = {"DATE", "TITLE", "CREATED_AT", "UPDATED_AT", "TRENDING"}
+    if sort not in valid_sorts:
+        log.LogWarning(f"Invalid sort field '{sort}', using DATE")
+        sort = "DATE"
+
+    if direction not in {"ASC", "DESC"}:
+        log.LogWarning(f"Invalid direction '{direction}', using DESC")
+        direction = "DESC"
+
+    # Build filter input
+    filter_input = {
+        "page": page,
+        "per_page": per_page,
+        "sort": sort,
+        "direction": direction
+    }
+
+    # Add performer filter
+    if performer_ids:
+        filter_input["performers"] = {
+            "value": list(performer_ids),
+            "modifier": "INCLUDES"
+        }
+
+    # Add studio filter
+    if studio_ids:
+        filter_input["studios"] = {
+            "value": list(studio_ids),
+            "modifier": "INCLUDES"
+        }
+
+    # Add tag filters (INCLUDES for positive, EXCLUDES for negative)
+    # Note: StashDB doesn't support multiple tag filters in one query,
+    # so we prioritize excludes if both are provided
+    if excluded_tag_ids:
+        filter_input["tags"] = {
+            "value": list(excluded_tag_ids),
+            "modifier": "EXCLUDES"
+        }
+    elif tag_ids:
+        filter_input["tags"] = {
+            "value": list(tag_ids),
+            "modifier": "INCLUDES"
+        }
+
+    query = f"""
+    query QueryScenes($input: SceneQueryInput!) {{
+        queryScenes(input: $input) {{
+            count
+            scenes {{
+                {SCENE_FIELDS}
+            }}
+        }}
+    }}
+    """
+
+    try:
+        data = graphql_request_with_retry(
+            url, query, {"input": filter_input}, api_key,
+            plugin_settings=plugin_settings,
+            operation_name=f"browse scenes page {page}"
+        )
+
+        if not data:
+            return None
+
+        query_data = data.get("queryScenes", {})
+        scenes = query_data.get("scenes", [])
+        count = query_data.get("count", 0)
+
+        return {
+            "scenes": scenes,
+            "count": count,
+            "page": page,
+            "has_more": page * per_page < count
+        }
+
+    except StashBoxAPIError as e:
+        log.LogError(f"Error browsing scenes page {page}: {e}")
+        return None
