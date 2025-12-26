@@ -1763,6 +1763,14 @@ def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", dire
     """
     page_size = min(max(1, page_size), PAGE_SIZE_MAX)
 
+    # Validate sort and direction
+    valid_sorts = {"DATE", "TITLE", "CREATED_AT", "UPDATED_AT", "TRENDING"}
+    valid_directions = {"ASC", "DESC"}
+    if sort not in valid_sorts:
+        sort = "DATE"
+    if direction not in valid_directions:
+        direction = "DESC"
+
     # Get stash-box configuration
     stashbox_configs = get_stashbox_config()
     if not stashbox_configs:
@@ -1791,6 +1799,11 @@ def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", dire
     if cursor_state:
         stashdb_page = cursor_state.get("stashdb_page", 1)
         offset = cursor_state.get("offset", 0)
+        # Validate cursor values
+        if not isinstance(stashdb_page, int) or stashdb_page < 1:
+            stashdb_page = 1
+        if not isinstance(offset, int) or offset < 0:
+            offset = 0
     else:
         stashdb_page = 1
         offset = 0
