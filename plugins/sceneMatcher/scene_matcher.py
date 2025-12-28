@@ -85,9 +85,13 @@ def get_stash_connection():
         if _input_data is None:
             _input_data = json.loads(sys.stdin.read())
         server_connection = _input_data.get("server_connection", {})
+        # Handle 0.0.0.0 binding - can't connect TO 0.0.0.0, use localhost instead
+        host = server_connection.get("Host", "localhost")
+        if host == "0.0.0.0":
+            host = "localhost"
         _stash_connection = {
             "url": server_connection.get("Scheme", "http") + "://" +
-                   server_connection.get("Host", "localhost") + ":" +
+                   host + ":" +
                    str(server_connection.get("Port", 9999)) + "/graphql",
             "api_key": server_connection.get("SessionCookie", {}).get("Value"),
         }
