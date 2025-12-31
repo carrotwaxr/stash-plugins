@@ -1159,11 +1159,28 @@ def scene_passes_favorite_filters(scene, favorite_performer_ids, favorite_studio
     return True
 
 
+def scene_has_excluded_tags(scene, excluded_tag_ids):
+    """Check if a scene has any excluded tags.
+
+    Args:
+        scene: Scene object from StashDB
+        excluded_tag_ids: Set of tag stash_ids to exclude, or None/empty if not filtering
+
+    Returns:
+        True if scene has at least one excluded tag (should be filtered out)
+    """
+    if not excluded_tag_ids:
+        return False
+
+    scene_tag_ids = {t.get("id") for t in scene.get("tags", []) if t.get("id")}
+    return bool(scene_tag_ids & excluded_tag_ids)
+
+
 def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
                      page_size=PAGE_SIZE_DEFAULT, stashdb_page=1, offset=0,
                      sort="DATE", direction="DESC", plugin_settings=None,
                      favorite_performer_ids=None, favorite_studio_ids=None,
-                     favorite_tag_ids=None):
+                     favorite_tag_ids=None, excluded_tag_ids=None):
     """
     Fetch scenes from StashDB until we have page_size missing scenes.
 
@@ -1186,6 +1203,7 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
         favorite_performer_ids: Set of favorite performer stash_ids to filter by, or None
         favorite_studio_ids: Set of favorite studio stash_ids to filter by, or None
         favorite_tag_ids: Set of favorite tag stash_ids to filter by, or None
+        excluded_tag_ids: Set of tag stash_ids to exclude, or None
 
     Returns:
         dict with:
@@ -1240,10 +1258,11 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
                 continue
 
             scene_id = scene.get("id")
-            # Check if scene is missing locally AND passes favorite filters
+            # Check if scene is missing locally, passes favorite filters, and has no excluded tags
             if scene_id and scene_id not in local_ids:
-                if scene_passes_favorite_filters(scene, favorite_performer_ids,
-                                                  favorite_studio_ids, favorite_tag_ids):
+                if (scene_passes_favorite_filters(scene, favorite_performer_ids,
+                                                  favorite_studio_ids, favorite_tag_ids)
+                        and not scene_has_excluded_tags(scene, excluded_tag_ids)):
                     collected.append(scene)
                 if len(collected) >= page_size:
                     # Save position for next request
@@ -1550,6 +1569,12 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
     # Get or build local stash_id cache (for filtering)
     local_ids = get_or_build_cache(stashdb_url)
 
+    # Parse excluded tags from settings (for client-side filtering)
+    excluded_tags_str = plugin_settings.get("excludedTags", "").strip()
+    excluded_tag_ids = set()
+    if excluded_tags_str:
+        excluded_tag_ids = {t.strip() for t in excluded_tags_str.split(",") if t.strip()}
+
     # Count local scenes matching this specific entity (for accurate "You Have" display)
     total_local = count_local_scenes_for_entity(stashdb_url, entity_type, entity_id)
 
@@ -1623,7 +1648,8 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         plugin_settings=plugin_settings,
         favorite_performer_ids=favorite_performer_ids,
         favorite_studio_ids=favorite_studio_ids,
-        favorite_tag_ids=favorite_tag_ids
+        favorite_tag_ids=favorite_tag_ids,
+        excluded_tag_ids=excluded_tag_ids
     )
 
     # Format scenes
@@ -1684,7 +1710,8 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "missing_scenes": formatted_scenes,
         "whisparr_configured": whisparr_configured,
         "filters_active": filters_active,
-        "active_filters": active_filters
+        "active_filters": active_filters,
+        "excluded_tags_applied": len(excluded_tag_ids) > 0
     }
 
 
