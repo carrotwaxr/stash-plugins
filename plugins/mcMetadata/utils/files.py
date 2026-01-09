@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import urllib.request
 import urllib.error
@@ -102,8 +103,8 @@ def download_image(url, dest_filepath, settings):
         if dest_dir and not os.path.exists(dest_dir):
             os.makedirs(dest_dir)
 
-        # Move temp file to destination
-        os.replace(temp_path, dest_filepath)
+        # Move temp file to destination (shutil.move handles cross-filesystem moves)
+        shutil.move(temp_path, dest_filepath)
         log.debug(f"Saved image to {dest_filepath}")
         return True
 
@@ -135,7 +136,7 @@ def rename_file(filepath, dest_filepath, settings):
             os.makedirs(dir)  # pragma: no cover
         try:
             if settings["dry_run"] is False:
-                os.rename(filepath, dest_filepath)  # pragma: no cover
+                shutil.move(filepath, dest_filepath)  # pragma: no cover
                 log.debug(f"Renamed {filepath} to {dest_filepath}")  # pragma: no cover
             return dest_filepath
         except Exception as err:  # pragma: no cover

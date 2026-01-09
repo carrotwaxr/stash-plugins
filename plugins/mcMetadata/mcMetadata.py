@@ -15,6 +15,44 @@ import utils.logger as log
 from performer import process_all_performers
 from scene import process_all_scenes, process_scene
 
+# Minimum stashapp-tools version required for schema 72+ compatibility
+MIN_STASHAPP_TOOLS_VERSION = "0.2.59"
+
+
+def _parse_version(version_str):
+    """Parse version string into tuple of integers for comparison."""
+    try:
+        return tuple(int(x) for x in version_str.split('.'))
+    except (ValueError, AttributeError):
+        return (0,)
+
+
+def check_stashapp_tools_version():
+    """Check if stashapp-tools is at minimum required version.
+
+    Older versions have a bug with auto-generated GraphQL fragments that
+    causes "Cannot spread fragment 'Folder' within itself" errors on
+    Stash schema 72+. Version 0.2.59 includes the fix.
+    """
+    try:
+        import importlib.metadata
+        version = importlib.metadata.version("stashapp-tools")
+        if _parse_version(version) < _parse_version(MIN_STASHAPP_TOOLS_VERSION):
+            log.warning(
+                f"stashapp-tools version {version} is outdated. "
+                f"Version {MIN_STASHAPP_TOOLS_VERSION}+ is required for Stash schema 72+. "
+                f"Run: pip install --upgrade stashapp-tools"
+            )
+            return False
+        log.debug(f"stashapp-tools version: {version}")
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        log.debug("stashapp-tools package not found, skipping version check")
+        return True
+    except Exception as e:
+        log.debug(f"Could not check stashapp-tools version: {e}")
+        return True
+
 # Parse JSON context passed from Stash
 json_input = json.loads(sys.stdin.read())
 
@@ -96,6 +134,9 @@ def main():
         # Initialize file logging if configured
         if SETTINGS.get("log_file_path"):
             init_file_logger(SETTINGS["log_file_path"])
+
+        # Check stashapp-tools version for schema compatibility
+        check_stashapp_tools_version()
 
         log.debug(f"Plugin mode: {mode}")
         log.debug(f"Dry run: {SETTINGS['dry_run']}")
