@@ -184,6 +184,12 @@ def main():
                 log.debug(f"Scene {scene_id} has no StashID, skipping (requireStashId is enabled)")
                 return
 
+            # Early exit if scene is already organized (prevents cascading hook invocations)
+            # When renamer marks scenes as organized, this acts as a "already processed" flag
+            if SETTINGS.get("renamer_enable_mark_organized", False) and scene.get("organized", False):
+                log.debug(f"Scene {scene_id} already organized, skipping to prevent hook cascade")
+                return
+
             log.info(f"Processing scene {scene_id}")
             process_scene(scene, stash, SETTINGS, api_key)
 

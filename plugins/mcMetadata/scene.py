@@ -170,6 +170,7 @@ def __rename_videos(scene, stash, settings):
     primary_path = None
     original_primary_path = files_to_process[0]["path"]  # Store before loop
     used_paths = set()  # Track paths we've used to detect conflicts
+    files_moved = False  # Track if any files were actually moved
 
     for idx, file_info in enumerate(files_to_process):
         video_path = file_info["path"]
@@ -250,6 +251,7 @@ def __rename_videos(scene, stash, settings):
                 continue
 
             log.info(f"Moved file {idx + 1} to: {expected_path}")
+            files_moved = True
             if idx == 0:
                 primary_path = expected_path
 
@@ -259,8 +261,8 @@ def __rename_videos(scene, stash, settings):
                 primary_path = video_path
             continue
 
-    # Mark as organized if enabled (only once per scene)
-    if settings.get("renamer_enable_mark_organized", False) and not settings["dry_run"]:
+    # Mark as organized if enabled and files were actually moved
+    if files_moved and settings.get("renamer_enable_mark_organized", False) and not settings["dry_run"]:
         try:
             stash.update_scene({"id": scene["id"], "organized": True})
             log.debug(f"Marked Scene {scene['id']} as organized")
