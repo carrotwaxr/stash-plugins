@@ -839,6 +839,20 @@
       });
     }
 
+    // Function to update visual selection indicators
+    function updateSelectionVisuals() {
+      // Name selection - local_add_alias means keeping local name (so local is "selected")
+      const nameChoice = modal.querySelector('input[name="tm-name"]:checked')?.value;
+      const localNameSelected = nameChoice === 'local' || nameChoice === 'local_add_alias';
+      modal.querySelector('#tm-name-local')?.classList.toggle('selected', localNameSelected);
+      modal.querySelector('#tm-name-stashdb')?.classList.toggle('selected', nameChoice === 'stashdb');
+
+      // Description selection
+      const descChoice = modal.querySelector('input[name="tm-desc"]:checked')?.value;
+      modal.querySelector('#tm-desc-local')?.classList.toggle('selected', descChoice === 'local');
+      modal.querySelector('#tm-desc-stashdb')?.classList.toggle('selected', descChoice === 'stashdb');
+    }
+
     const modal = document.createElement('div');
     modal.className = 'tm-modal-backdrop';
     modal.innerHTML = `
@@ -866,8 +880,8 @@
             <tbody>
               <tr>
                 <td>Name</td>
-                <td>${escapeHtml(tag.name) || '<em>empty</em>'}</td>
-                <td>${escapeHtml(stashdbTag.name)}</td>
+                <td><div class="tm-diff-value" id="tm-name-local">${escapeHtml(tag.name) || '<em>empty</em>'}</div></td>
+                <td><div class="tm-diff-value" id="tm-name-stashdb">${escapeHtml(stashdbTag.name)}</div></td>
                 <td>
                   <label><input type="radio" name="tm-name" value="local_add_alias" ${nameDefault === 'local_add_alias' ? 'checked' : ''}> Keep + Add stash-box alias</label>
                   <label><input type="radio" name="tm-name" value="local" ${nameDefault === 'local' ? 'checked' : ''}> Keep</label>
@@ -876,8 +890,8 @@
               </tr>
               <tr>
                 <td>Description</td>
-                <td>${escapeHtml(tag.description) || '<em>empty</em>'}</td>
-                <td>${escapeHtml(stashdbTag.description) || '<em>empty</em>'}</td>
+                <td><div class="tm-diff-value" id="tm-desc-local">${escapeHtml(tag.description) || '<em>empty</em>'}</div></td>
+                <td><div class="tm-diff-value" id="tm-desc-stashdb">${escapeHtml(stashdbTag.description) || '<em>empty</em>'}</div></td>
                 <td>
                   <label><input type="radio" name="tm-desc" value="local" ${descDefault === 'local' ? 'checked' : ''}> Keep</label>
                   <label><input type="radio" name="tm-desc" value="stashdb" ${descDefault === 'stashdb' ? 'checked' : ''}> StashDB</label>
@@ -940,6 +954,14 @@
         renderAliasPills();
       }
     }
+
+    // Initialize selection visuals
+    updateSelectionVisuals();
+
+    // Update visuals when radio buttons change
+    modal.querySelectorAll('input[type="radio"]').forEach(radio => {
+      radio.addEventListener('change', updateSelectionVisuals);
+    });
 
     // Event handlers
     modal.querySelector('.tm-close-btn').addEventListener('click', () => modal.remove());

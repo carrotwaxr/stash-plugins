@@ -756,3 +756,31 @@
   padding: 40px;
   color: var(--bs-secondary-color, #aaa);
 }
+
+/* Match dialog selection indicators */
+.tm-diff-value {
+  padding: 8px 12px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.tm-diff-value.selected {
+  background: rgba(25, 135, 84, 0.15);
+  outline: 2px solid var(--bs-success, #198754);
+  outline-offset: -2px;
+}
+
+.tm-diff-value.selected::after {
+  content: '\2713';
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--bs-success, #198754);
+  font-weight: bold;
+}
+
+.tm-diff-value:not(.selected) {
+  opacity: 0.6;
+}
