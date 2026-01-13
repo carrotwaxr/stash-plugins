@@ -468,6 +468,20 @@
   border-left: 3px solid var(--bs-danger, #dc3545);
 }
 
+.tm-error-message {
+  margin-bottom: 10px;
+}
+
+.tm-error-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tm-error-actions .btn {
+  font-size: 0.85em;
+}
+
 /* Alias pill editing */
 .tm-alias-pills {
   display: flex;
