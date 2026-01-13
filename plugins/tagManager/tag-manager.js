@@ -532,6 +532,56 @@
   }
 
   /**
+   * Find local tags that could be parent tags for a given category name.
+   * Searches by exact match, alias match, and fuzzy match.
+   *
+   * @param {string} categoryName - The StashDB category name to match
+   * @returns {object[]} - Array of { tag, matchType, score } sorted by relevance
+   */
+  function findLocalParentMatches(categoryName) {
+    if (!categoryName) return [];
+
+    const lowerCategoryName = categoryName.toLowerCase();
+    const matches = [];
+
+    for (const tag of localTags) {
+      // Skip tags that are children (have parents) - they're less likely to be category tags
+      // But don't skip completely, just deprioritize
+      const isChild = tag.parent_count > 0;
+
+      // Exact name match
+      if (tag.name.toLowerCase() === lowerCategoryName) {
+        matches.push({ tag, matchType: 'exact', score: isChild ? 95 : 100 });
+        continue;
+      }
+
+      // Name contains category (e.g., "CATEGORY: Action" contains "Action")
+      if (tag.name.toLowerCase().includes(lowerCategoryName)) {
+        matches.push({ tag, matchType: 'contains', score: isChild ? 85 : 90 });
+        continue;
+      }
+
+      // Alias match
+      if (tag.aliases?.some(a => a.toLowerCase() === lowerCategoryName)) {
+        matches.push({ tag, matchType: 'alias', score: isChild ? 80 : 85 });
+        continue;
+      }
+
+      // Fuzzy match on name (simple: starts with same letters)
+      if (tag.name.toLowerCase().startsWith(lowerCategoryName.slice(0, 3)) &&
+          tag.name.length < categoryName.length + 5) {
+        matches.push({ tag, matchType: 'fuzzy', score: isChild ? 60 : 70 });
+      }
+    }
+
+    // Sort by score descending
+    matches.sort((a, b) => b.score - a.score);
+
+    // Limit to top 5
+    return matches.slice(0, 5);
+  }
+
+  /**
    * Get filtered tags based on current filter setting
    */
   function getFilteredTags() {
