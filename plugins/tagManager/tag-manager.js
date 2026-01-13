@@ -1461,8 +1461,201 @@
    * Show tag search dialog for adding parent/child
    */
   function showTagSearchDialog(mode, targetTag) {
-    // Placeholder - will be implemented in Task 3
-    console.log(`[tagManager] Would show ${mode} search dialog for "${targetTag.name}"`);
+    // mode: 'parent' or 'child'
+    const backdrop = document.createElement('div');
+    backdrop.className = 'th-search-dialog-backdrop';
+    backdrop.id = 'th-search-backdrop';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'th-search-dialog';
+    dialog.id = 'th-search-dialog';
+
+    const title = mode === 'parent'
+      ? `Add parent for "${escapeHtml(targetTag.name)}"`
+      : `Add child to "${escapeHtml(targetTag.name)}"`;
+
+    dialog.innerHTML = `
+      <h3>${title}</h3>
+      <input type="text" class="th-search-input" placeholder="Search tags..." autofocus>
+      <div class="th-search-results">
+        <div class="th-search-empty">Type to search...</div>
+      </div>
+    `;
+
+    document.body.appendChild(backdrop);
+    document.body.appendChild(dialog);
+
+    const input = dialog.querySelector('.th-search-input');
+    const results = dialog.querySelector('.th-search-results');
+
+    // Debounced search
+    let searchTimeout;
+    input.addEventListener('input', () => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        performTagSearch(input.value, mode, targetTag, results);
+      }, 200);
+    });
+
+    // Close on backdrop click or escape
+    backdrop.addEventListener('click', closeTagSearchDialog);
+    document.addEventListener('keydown', function escHandler(e) {
+      if (e.key === 'Escape') {
+        closeTagSearchDialog();
+        document.removeEventListener('keydown', escHandler);
+      }
+    });
+
+    input.focus();
+  }
+
+  /**
+   * Close the tag search dialog
+   */
+  function closeTagSearchDialog() {
+    document.getElementById('th-search-backdrop')?.remove();
+    document.getElementById('th-search-dialog')?.remove();
+  }
+
+  /**
+   * Perform tag search and render results
+   */
+  function performTagSearch(query, mode, targetTag, resultsContainer) {
+    if (!query.trim()) {
+      resultsContainer.innerHTML = '<div class="th-search-empty">Type to search...</div>';
+      return;
+    }
+
+    const lowerQuery = query.toLowerCase();
+
+    // Filter local tags
+    let matches = hierarchyTags.filter(t => {
+      // Don't show the target tag itself
+      if (t.id === targetTag.id) return false;
+
+      // Check name and aliases
+      if (t.name.toLowerCase().includes(lowerQuery)) return true;
+      if (t.aliases?.some(a => a.toLowerCase().includes(lowerQuery))) return true;
+      return false;
+    });
+
+    // Sort by relevance (exact match first, then starts with, then contains)
+    matches.sort((a, b) => {
+      const aLower = a.name.toLowerCase();
+      const bLower = b.name.toLowerCase();
+      const aExact = aLower === lowerQuery;
+      const bExact = bLower === lowerQuery;
+      if (aExact && !bExact) return -1;
+      if (bExact && !aExact) return 1;
+      const aStarts = aLower.startsWith(lowerQuery);
+      const bStarts = bLower.startsWith(lowerQuery);
+      if (aStarts && !bStarts) return -1;
+      if (bStarts && !aStarts) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    // Limit results
+    matches = matches.slice(0, 20);
+
+    if (matches.length === 0) {
+      resultsContainer.innerHTML = '<div class="th-search-empty">No tags found</div>';
+      return;
+    }
+
+    resultsContainer.innerHTML = matches.map(tag => {
+      // Check for circular reference (will be implemented in Task 4)
+      const wouldCreateCircle = mode === 'parent'
+        ? wouldCreateCircularRef(targetTag.id, tag.id)
+        : wouldCreateCircularRef(tag.id, targetTag.id);
+
+      const isAlreadyRelated = mode === 'parent'
+        ? targetTag.parents?.some(p => p.id === tag.id)
+        : tag.parents?.some(p => p.id === targetTag.id);
+
+      const disabled = wouldCreateCircle || isAlreadyRelated;
+      const badge = wouldCreateCircle ? 'circular' : isAlreadyRelated ? 'already linked' : '';
+
+      return `
+        <div class="th-search-result ${disabled ? 'disabled' : ''}"
+             data-tag-id="${tag.id}"
+             data-mode="${mode}"
+             data-target-id="${targetTag.id}">
+          <span class="th-search-result-name">${escapeHtml(tag.name)}</span>
+          ${badge ? `<span class="th-search-result-badge">${badge}</span>` : ''}
+        </div>
+      `;
+    }).join('');
+
+    // Click handlers
+    resultsContainer.querySelectorAll('.th-search-result:not(.disabled)').forEach(item => {
+      item.addEventListener('click', handleSearchResultClick);
+    });
+  }
+
+  /**
+   * Handle click on a search result
+   */
+  async function handleSearchResultClick(e) {
+    const tagId = e.currentTarget.dataset.tagId;
+    const mode = e.currentTarget.dataset.mode;
+    const targetId = e.currentTarget.dataset.targetId;
+
+    closeTagSearchDialog();
+
+    if (mode === 'parent') {
+      await addParent(targetId, tagId);
+    } else {
+      await addChild(targetId, tagId);
+    }
+  }
+
+  /**
+   * Add a parent to a tag
+   */
+  async function addParent(tagId, newParentId) {
+    const tag = hierarchyTags.find(t => t.id === tagId);
+    if (!tag) return;
+
+    const newParentIds = [...(tag.parents?.map(p => p.id) || []), newParentId];
+
+    try {
+      await updateTagParents(tagId, newParentIds);
+      await refreshHierarchy();
+      const parent = hierarchyTags.find(t => t.id === newParentId);
+      showToast(`Added "${tag.name}" as child of "${parent?.name || 'parent'}"`);
+    } catch (err) {
+      console.error('[tagManager] Failed to add parent:', err);
+      showToast(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  /**
+   * Add a child to a tag (by adding the target as the child's parent)
+   */
+  async function addChild(parentId, childId) {
+    const child = hierarchyTags.find(t => t.id === childId);
+    if (!child) return;
+
+    const newParentIds = [...(child.parents?.map(p => p.id) || []), parentId];
+
+    try {
+      await updateTagParents(childId, newParentIds);
+      await refreshHierarchy();
+      const parent = hierarchyTags.find(t => t.id === parentId);
+      showToast(`Added "${child.name}" as child of "${parent?.name || 'parent'}"`);
+    } catch (err) {
+      console.error('[tagManager] Failed to add child:', err);
+      showToast(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  /**
+   * Check if adding a parent would create a circular reference
+   * Placeholder - will be properly implemented in Task 4
+   */
+  function wouldCreateCircularRef(potentialParentId, tagId) {
+    // Placeholder - will be implemented in Task 4
+    return false;
   }
 
   /**
