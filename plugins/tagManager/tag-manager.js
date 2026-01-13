@@ -133,6 +133,59 @@
   }
 
   /**
+   * Load category mappings from plugin settings
+   */
+  async function loadCategoryMappings() {
+    try {
+      const query = `
+        query Configuration {
+          configuration {
+            plugins
+          }
+        }
+      `;
+      const data = await graphqlRequest(query);
+      const pluginConfig = data?.configuration?.plugins?.[PLUGIN_ID] || {};
+
+      // Parse JSON string from settings
+      if (pluginConfig.categoryMappings) {
+        try {
+          categoryMappings = JSON.parse(pluginConfig.categoryMappings);
+          console.debug("[tagManager] Loaded category mappings:", Object.keys(categoryMappings).length);
+        } catch (e) {
+          console.warn("[tagManager] Failed to parse category mappings:", e);
+          categoryMappings = {};
+        }
+      }
+    } catch (e) {
+      console.error("[tagManager] Failed to load category mappings:", e);
+    }
+  }
+
+  /**
+   * Save category mappings to plugin settings
+   */
+  async function saveCategoryMappings() {
+    try {
+      const query = `
+        mutation ConfigurePlugin($plugin_id: ID!, $input: Map!) {
+          configurePlugin(plugin_id: $plugin_id, input: $input)
+        }
+      `;
+
+      await graphqlRequest(query, {
+        plugin_id: PLUGIN_ID,
+        input: {
+          categoryMappings: JSON.stringify(categoryMappings)
+        }
+      });
+      console.debug("[tagManager] Saved category mappings");
+    } catch (e) {
+      console.error("[tagManager] Failed to save category mappings:", e);
+    }
+  }
+
+  /**
    * Fetch local tags from Stash
    */
   async function fetchLocalTags() {
