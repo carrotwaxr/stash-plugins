@@ -550,6 +550,12 @@
           </div>
         </div>
 
+        <div class="tm-tabs">
+          <button class="tm-tab ${activeTab === 'match' ? 'tm-tab-active' : ''}" data-tab="match">Match Local Tags</button>
+          <button class="tm-tab ${activeTab === 'browse' ? 'tm-tab-active' : ''}" data-tab="browse">Browse StashDB</button>
+        </div>
+
+        ${activeTab === 'match' ? `
         ${!hasStashBox ? `
           <div class="tag-manager-error">
             <h3>No Stash-Box Configured</h3>
@@ -592,6 +598,9 @@
             <span>Page ${currentPage} of ${totalPages || 1}</span>
             <button class="btn btn-secondary" id="tm-next" ${currentPage >= totalPages ? 'disabled' : ''}>Next</button>
           </div>
+        `}
+        ` : `
+          ${renderBrowseView()}
         `}
 
         <div id="tm-status" class="tag-manager-status"></div>
