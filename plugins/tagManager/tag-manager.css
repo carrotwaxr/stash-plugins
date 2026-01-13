@@ -128,7 +128,7 @@
 
 .tm-tag-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* Changed from center - allows multi-line aliases */
   justify-content: space-between;
   padding: 12px 16px;
   background: var(--bs-secondary-bg, #2d2d44);
@@ -141,6 +141,8 @@
   flex-direction: column;
   gap: 4px;
   min-width: 200px;
+  flex: 1; /* Take available space */
+  max-width: 50%; /* Don't push match section off */
 }
 
 .tm-tag-name {
@@ -158,13 +160,16 @@
 .tm-tag-aliases {
   font-size: 0.85em;
   color: var(--bs-secondary-color, #888);
+  word-break: break-word; /* Allow long aliases to wrap */
+  line-height: 1.4;
 }
 
 .tm-tag-match {
   display: flex;
   align-items: center;
   gap: 12px;
-  flex-wrap: wrap;
+  flex-shrink: 0; /* Don't shrink - keep buttons full size */
+  flex-wrap: nowrap; /* Keep match info and buttons on same line */
 }
 
 .tm-match {
@@ -207,7 +212,8 @@
 
 .tm-actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
+  flex-shrink: 0; /* Keep buttons full size */
 }
 
 .tm-no-match {
