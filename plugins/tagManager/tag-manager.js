@@ -421,6 +421,24 @@
   }
 
   /**
+   * Find a local tag that conflicts with a given name (as name or alias).
+   * Used for pre-validation before saving.
+   *
+   * @param {string} name - The name to check for conflicts
+   * @param {string} excludeTagId - Tag ID to exclude from search (the tag being edited)
+   * @returns {object|null} - The conflicting tag or null
+   */
+  function findConflictingTag(name, excludeTagId) {
+    const lowerName = name.toLowerCase();
+    return localTags.find(t =>
+      t.id !== excludeTagId && (
+        t.name.toLowerCase() === lowerName ||
+        t.aliases?.some(a => a.toLowerCase() === lowerName)
+      )
+    ) || null;
+  }
+
+  /**
    * Get filtered tags based on current filter setting
    */
   function getFilteredTags() {
