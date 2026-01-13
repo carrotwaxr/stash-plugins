@@ -1238,6 +1238,40 @@
       // Use sanitized aliases
       updateInput.aliases = sanitizedAliases;
 
+      // Handle parent tag from category
+      let parentTagId = null;
+      if (hasCategory && selectedParentId) {
+        if (selectedParentId === '__create__') {
+          // Create the parent tag
+          try {
+            const newParent = await createTag({ name: stashdbTag.category.name });
+            parentTagId = newParent.id;
+            // Add to localTags for future reference
+            localTags.push({ id: newParent.id, name: newParent.name, aliases: [] });
+            console.debug(`[tagManager] Created parent tag: ${newParent.name}`);
+          } catch (e) {
+            console.error('[tagManager] Failed to create parent tag:', e);
+            errorEl.innerHTML = `<div class="tm-error-message">Failed to create parent tag: ${escapeHtml(e.message)}</div>`;
+            errorEl.style.display = 'block';
+            return;
+          }
+        } else {
+          parentTagId = selectedParentId;
+        }
+
+        // Set parent_ids on the update input
+        if (parentTagId) {
+          updateInput.parent_ids = [parentTagId];
+        }
+
+        // Save mapping if checkbox is checked
+        const rememberCheckbox = modal.querySelector('#tm-remember-mapping');
+        if (rememberCheckbox?.checked && parentTagId) {
+          categoryMappings[stashdbTag.category.name] = parentTagId;
+          saveCategoryMappings(); // Fire and forget
+        }
+      }
+
       // Pre-validation: check for conflicts before hitting API
       const validationErrors = validateBeforeSave(finalName, sanitizedAliases, tag.id);
       if (validationErrors.length > 0) {
