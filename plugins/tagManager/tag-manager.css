@@ -897,3 +897,42 @@
   background: rgba(13, 202, 240, 0.15);
   border-radius: 4px;
 }
+
+/* Drag and drop */
+.th-node[draggable="true"] {
+  cursor: grab;
+}
+
+.th-node.dragging {
+  opacity: 0.5;
+}
+
+.th-node.drag-over > .th-node-content {
+  background: rgba(13, 110, 253, 0.2);
+  outline: 2px dashed var(--bs-primary, #137cbd);
+  outline-offset: -2px;
+}
+
+.th-node.drag-invalid > .th-node-content {
+  background: rgba(220, 53, 69, 0.2);
+  outline: 2px dashed var(--bs-danger, #dc3545);
+  outline-offset: -2px;
+}
+
+.th-root-drop-zone {
+  min-height: 40px;
+  border: 2px dashed var(--bs-border-color, #444);
+  border-radius: 4px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bs-secondary, #6c757d);
+  transition: all 0.2s;
+}
+
+.th-root-drop-zone.drag-over {
+  border-color: var(--bs-primary, #137cbd);
+  background: rgba(13, 110, 253, 0.1);
+  color: var(--bs-primary, #137cbd);
+}

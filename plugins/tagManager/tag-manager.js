@@ -1832,7 +1832,7 @@
       : '';
 
     return `
-      <div class="th-node ${isRoot ? 'th-root' : ''}" data-tag-id="${node.id}">
+      <div class="th-node ${isRoot ? 'th-root' : ''}" data-tag-id="${node.id}" draggable="true">
         <div class="th-node-content">
           <span class="th-toggle ${hasChildren ? '' : 'th-leaf'}" data-tag-id="${node.id}">${toggleIcon}</span>
           ${imageHtml}
@@ -1870,6 +1870,9 @@
           <span class="stat"><strong>${hierarchyStats.rootTags}</strong> root tags</span>
           <span class="stat"><strong>${hierarchyStats.tagsWithChildren}</strong> with sub-tags</span>
           <span class="stat"><strong>${hierarchyStats.tagsWithParents}</strong> with parents</span>
+        </div>
+        <div class="th-root-drop-zone" id="th-root-drop-zone">
+          Drop here to make root tag
         </div>
         <div class="th-tree">
           ${treeHtml || '<div class="th-empty">No tags found</div>'}
