@@ -704,8 +704,12 @@
         </div>
         <div class="tm-browse-main">
           <div class="tm-browse-toolbar">
-            <div class="tm-selection-info">
-              ${selectedCount > 0 ? `${selectedCount} tag${selectedCount > 1 ? 's' : ''} selected` : 'No tags selected'}
+            <div class="tm-selection-controls">
+              <button class="btn btn-sm btn-secondary" id="tm-select-all">Select All</button>
+              <button class="btn btn-sm btn-secondary" id="tm-deselect-all">Deselect All</button>
+              <span class="tm-selection-info">
+                ${selectedCount > 0 ? `${selectedCount} tag${selectedCount > 1 ? 's' : ''} selected` : 'No tags selected'}
+              </span>
             </div>
             <button class="btn btn-primary" id="tm-import-selected" ${selectedCount === 0 ? 'disabled' : ''}>
               Import Selected
@@ -910,6 +914,28 @@
           }
         });
       });
+
+      // Select All / Deselect All
+      const selectAllBtn = container.querySelector('#tm-select-all');
+      const deselectAllBtn = container.querySelector('#tm-deselect-all');
+
+      if (selectAllBtn) {
+        selectAllBtn.addEventListener('click', () => {
+          container.querySelectorAll('.tm-browse-tag:not(.tm-exists-locally) input[type="checkbox"]').forEach(cb => {
+            cb.checked = true;
+            const tagEl = cb.closest('.tm-browse-tag');
+            selectedForImport.add(tagEl.dataset.stashdbId);
+          });
+          renderPage(container);
+        });
+      }
+
+      if (deselectAllBtn) {
+        deselectAllBtn.addEventListener('click', () => {
+          selectedForImport.clear();
+          renderPage(container);
+        });
+      }
 
       // Import button
       const importBtn = container.querySelector('#tm-import-selected');
