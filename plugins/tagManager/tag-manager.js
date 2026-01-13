@@ -951,10 +951,21 @@
     modal.querySelector('.tm-apply-btn').addEventListener('click', async () => {
       const nameChoice = modal.querySelector('input[name="tm-name"]:checked').value;
       const descChoice = modal.querySelector('input[name="tm-desc"]:checked').value;
+      const errorEl = modal.querySelector('#tm-diff-error');
+
+      // Hide any previous error
+      errorEl.style.display = 'none';
+      errorEl.innerHTML = '';
 
       // Use the selected stash-box endpoint
       const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
       console.debug(`[tagManager] Saving stash_id with endpoint: ${endpoint}`);
+
+      // Determine final name
+      const finalName = nameChoice === 'stashdb' ? stashdbTag.name : tag.name;
+
+      // Sanitize aliases - remove final name to prevent self-referential alias
+      const sanitizedAliases = sanitizeAliasesForSave(editableAliases, finalName, tag.name);
 
       // Build update input
       const updateInput = {
@@ -973,8 +984,8 @@
         updateInput.description = stashdbTag.description || '';
       }
 
-      // Use the edited aliases directly (user has full control via pill UI)
-      updateInput.aliases = Array.from(editableAliases);
+      // Use sanitized aliases
+      updateInput.aliases = sanitizedAliases;
 
       try {
         await updateTag(updateInput);
