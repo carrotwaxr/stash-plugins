@@ -1563,10 +1563,10 @@
     }
 
     resultsContainer.innerHTML = matches.map(tag => {
-      // Check for circular reference (will be implemented in Task 4)
+      // Check for circular reference
       const wouldCreateCircle = mode === 'parent'
-        ? wouldCreateCircularRef(targetTag.id, tag.id)
-        : wouldCreateCircularRef(tag.id, targetTag.id);
+        ? wouldCreateCircularRef(tag.id, targetTag.id)
+        : wouldCreateCircularRef(targetTag.id, tag.id);
 
       const isAlreadyRelated = mode === 'parent'
         ? targetTag.parents?.some(p => p.id === tag.id)
@@ -1650,12 +1650,29 @@
   }
 
   /**
-   * Check if adding a parent would create a circular reference
-   * Placeholder - will be properly implemented in Task 4
+   * Check if making potentialParentId a parent of tagId would create a circular reference.
+   * This happens if tagId is already an ancestor of potentialParentId.
    */
   function wouldCreateCircularRef(potentialParentId, tagId) {
-    // Placeholder - will be implemented in Task 4
-    return false;
+    // Build a set of all ancestors of potentialParentId
+    const ancestors = new Set();
+
+    function collectAncestors(id) {
+      const tag = hierarchyTags.find(t => t.id === id);
+      if (!tag || !tag.parents) return;
+
+      for (const parent of tag.parents) {
+        if (ancestors.has(parent.id)) continue; // Already visited
+        ancestors.add(parent.id);
+        collectAncestors(parent.id);
+      }
+    }
+
+    collectAncestors(potentialParentId);
+
+    // If tagId is an ancestor of potentialParentId, adding potentialParentId as parent of tagId
+    // would create: tagId -> potentialParentId -> ... -> tagId (circular)
+    return ancestors.has(tagId);
   }
 
   /**
