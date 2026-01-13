@@ -21,6 +21,7 @@ import log
 from stashapi.stashapp import StashInterface
 from stashdb_api import search_tags_by_name, query_all_tags
 from matcher import TagMatcher, load_synonyms
+from blacklist import Blacklist
 
 # Plugin ID must match yml
 PLUGIN_ID = "tagManager"
@@ -217,6 +218,7 @@ def get_settings_from_config(stash_config):
         "enable_synonyms": config.get("enableSynonymSearch") != False,  # Default True
         "fuzzy_threshold": int(config.get("fuzzyThreshold", 80)),
         "page_size": int(config.get("pageSize", 25)),
+        "tag_blacklist": config.get("tagBlacklist", ""),
     }
 
 
@@ -235,6 +237,9 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
         Dict with matches and search info
     """
     log.LogDebug(f"Searching for tag: {tag_name}")
+
+    # Load blacklist from settings
+    blacklist = Blacklist(settings.get('tag_blacklist', ''))
 
     # First try StashDB's name search (searches name + aliases)
     api_matches = search_tags_by_name(stashdb_url, stashdb_api_key, tag_name, limit=20)
@@ -287,6 +292,19 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
 
     # Sort by score
     combined_matches.sort(key=lambda m: m["score"], reverse=True)
+
+    # Filter out blacklisted tags
+    if blacklist.count > 0:
+        filtered_matches = []
+        hidden_count = 0
+        for match in combined_matches:
+            if blacklist.is_blacklisted(match["tag"]["name"]):
+                hidden_count += 1
+            else:
+                filtered_matches.append(match)
+        combined_matches = filtered_matches
+        if hidden_count > 0:
+            log.LogDebug(f"Filtered {hidden_count} blacklisted tags from search results")
 
     log.LogInfo(f"Found {len(combined_matches)} matches for '{tag_name}'")
 

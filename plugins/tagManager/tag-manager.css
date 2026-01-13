@@ -832,3 +832,10 @@
   font-size: 0.8em;
   color: var(--bs-secondary-color, #888);
 }
+
+/* Blacklist notice */
+.tm-blacklist-notice {
+  font-size: 0.85em;
+  color: var(--bs-warning, #ffc107);
+  margin-top: 4px;
+}

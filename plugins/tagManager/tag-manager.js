@@ -28,6 +28,7 @@
   let matchResults = {}; // Cache of tag_id -> matches
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
   let categoryMappings = {}; // Cache of category_name -> local_tag_id
+  let tagBlacklist = []; // Parsed blacklist patterns [{type: 'literal'|'regex', pattern: string, regex?: RegExp}]
 
   /**
    * Set page title with retry to overcome Stash's title management
@@ -356,6 +357,76 @@
     } catch (e) {
       console.error("[tagManager] Failed to load cache status:", e);
       cacheStatus = null;
+    }
+  }
+
+  /**
+   * Parse blacklist string into pattern objects
+   */
+  function parseBlacklist(blacklistStr) {
+    if (!blacklistStr) return [];
+
+    return blacklistStr.split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      .map(pattern => {
+        if (pattern.startsWith('/')) {
+          // Regex pattern - extract pattern without leading /
+          const regexStr = pattern.slice(1);
+          try {
+            return { type: 'regex', pattern: regexStr, regex: new RegExp(regexStr, 'i') };
+          } catch (e) {
+            console.warn(`[tagManager] Invalid regex in blacklist: ${pattern}`, e);
+            return null;
+          }
+        } else {
+          // Literal pattern - case-insensitive
+          return { type: 'literal', pattern: pattern.toLowerCase() };
+        }
+      })
+      .filter(p => p !== null);
+  }
+
+  /**
+   * Check if a tag name matches any blacklist pattern
+   */
+  function isBlacklisted(tagName) {
+    if (!tagName || tagBlacklist.length === 0) return false;
+
+    const lowerName = tagName.toLowerCase();
+
+    for (const entry of tagBlacklist) {
+      if (entry.type === 'literal') {
+        if (lowerName === entry.pattern) return true;
+      } else if (entry.type === 'regex') {
+        if (entry.regex.test(tagName)) return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Load blacklist from plugin settings
+   */
+  async function loadBlacklist() {
+    try {
+      const query = `
+        query Configuration {
+          configuration {
+            plugins
+          }
+        }
+      `;
+      const data = await graphqlRequest(query);
+      const pluginConfig = data?.configuration?.plugins?.[PLUGIN_ID] || {};
+
+      if (pluginConfig.tagBlacklist) {
+        tagBlacklist = parseBlacklist(pluginConfig.tagBlacklist);
+        console.debug("[tagManager] Loaded blacklist:", tagBlacklist.length, "patterns");
+      }
+    } catch (e) {
+      console.error("[tagManager] Failed to load blacklist:", e);
     }
   }
 
@@ -1468,8 +1539,14 @@
    */
   function showMatchesModal(tagId, container) {
     const tag = localTags.find(t => t.id === tagId);
-    const matches = matchResults[tagId];
+    let matches = matchResults[tagId];
     if (!tag) return;
+
+    // Filter out blacklisted matches
+    const originalCount = matches?.length || 0;
+    const filteredMatches = matches?.filter(m => !isBlacklisted(m.tag.name)) || [];
+    const hiddenCount = originalCount - filteredMatches.length;
+    matches = filteredMatches;
 
     const modal = document.createElement('div');
     modal.className = 'tm-modal-backdrop';
@@ -1477,6 +1554,7 @@
       <div class="tm-modal tm-modal-wide">
         <div class="tm-modal-header">
           <h3>Matches for: ${escapeHtml(tag.name)}</h3>
+          ${hiddenCount > 0 ? `<div class="tm-blacklist-notice">${hiddenCount} tag${hiddenCount > 1 ? 's' : ''} hidden by blacklist</div>` : ''}
           <button class="tm-close-btn">&times;</button>
         </div>
         <div class="tm-modal-body">
@@ -1610,6 +1688,7 @@
 
         await loadSettings();
         await loadCategoryMappings();
+        await loadBlacklist();
 
         // Check if any stash-box is configured
         if (stashBoxes.length === 0) {
