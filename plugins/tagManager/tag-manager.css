@@ -797,3 +797,63 @@
   font-size: 0.85em;
   font-style: italic;
 }
+
+/* Improved alias handling - two-column checkbox layout */
+.tm-alias-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.tm-alias-column {
+  background: var(--bs-tertiary-bg, #3d3d5c);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.tm-alias-column-header {
+  font-weight: 500;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--bs-border-color, #444);
+}
+
+.tm-alias-checkbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.tm-alias-checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tm-alias-checkbox-item input[type="checkbox"] {
+  flex-shrink: 0;
+}
+
+.tm-alias-checkbox-item label {
+  word-break: break-word;
+  cursor: pointer;
+}
+
+.tm-alias-checkbox-item.new-from-other {
+  color: var(--bs-info, #0dcaf0);
+  font-style: italic;
+}
+
+.tm-final-aliases-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--bs-border-color, #444);
+}
+
+.tm-final-aliases-header {
+  font-weight: 500;
+  margin-bottom: 8px;
+}

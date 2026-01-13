@@ -846,7 +846,59 @@
     // Alias editing state - start with merged aliases
     let editableAliases = new Set([...(tag.aliases || []), ...(stashdbTag.aliases || [])]);
 
-    // Function to render alias pills
+    // Helper function to render alias checkboxes for a column
+    function renderAliasCheckboxes(primaryAliases, otherAliases, source) {
+      const newAliases = otherAliases.filter(a => !primaryAliases.some(pa => pa.toLowerCase() === a.toLowerCase()));
+
+      if (primaryAliases.length === 0 && newAliases.length === 0) {
+        return '<em class="tm-alias-empty">none</em>';
+      }
+
+      let html = '';
+
+      // Primary aliases (from this source)
+      primaryAliases.forEach(alias => {
+        const safeId = alias.replace(/[^a-zA-Z0-9]/g, '_');
+        html += `
+          <div class="tm-alias-checkbox-item">
+            <input type="checkbox" id="alias-${source}-${safeId}" data-alias="${escapeHtml(alias)}" checked>
+            <label for="alias-${source}-${safeId}">${escapeHtml(alias)}</label>
+          </div>
+        `;
+      });
+
+      // Aliases from other source that aren't in this one (shown in blue)
+      newAliases.forEach(alias => {
+        const safeId = alias.replace(/[^a-zA-Z0-9]/g, '_');
+        const fromLabel = source === 'local' ? 'from StashDB' : 'from local';
+        html += `
+          <div class="tm-alias-checkbox-item new-from-other">
+            <input type="checkbox" id="alias-new-${source}-${safeId}" data-alias="${escapeHtml(alias)}" checked>
+            <label for="alias-new-${source}-${safeId}">${escapeHtml(alias)} (${fromLabel})</label>
+          </div>
+        `;
+      });
+
+      return html || '<em class="tm-alias-empty">none</em>';
+    }
+
+    // Function to update editableAliases from checkbox state
+    function updateAliasesFromCheckboxes() {
+      editableAliases.clear();
+      // Collect from both columns, but deduplicate
+      const seen = new Set();
+      modal.querySelectorAll('.tm-alias-checkbox-item input[type="checkbox"]:checked').forEach(cb => {
+        const alias = cb.dataset.alias;
+        const lowerAlias = alias.toLowerCase();
+        if (!seen.has(lowerAlias)) {
+          seen.add(lowerAlias);
+          editableAliases.add(alias);
+        }
+      });
+      renderAliasPills();
+    }
+
+    // Function to render alias pills (read-only display of final aliases)
     function renderAliasPills() {
       const pillsContainer = modal.querySelector('#tm-alias-pills');
       if (!pillsContainer) return;
@@ -857,20 +909,8 @@
       }
 
       pillsContainer.innerHTML = Array.from(editableAliases).map(alias => `
-        <span class="tm-alias-pill">
-          ${escapeHtml(alias)}
-          <button type="button" class="tm-alias-pill-remove" data-alias="${escapeHtml(alias)}">&times;</button>
-        </span>
+        <span class="tm-alias-pill">${escapeHtml(alias)}</span>
       `).join('');
-
-      // Attach remove handlers
-      pillsContainer.querySelectorAll('.tm-alias-pill-remove').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          const aliasToRemove = e.target.dataset.alias;
-          editableAliases.delete(aliasToRemove);
-          renderAliasPills();
-        });
-      });
     }
 
     // Function to update visual selection indicators
@@ -938,10 +978,24 @@
               <tr>
                 <td>Aliases</td>
                 <td colspan="3">
-                  <div class="tm-alias-source-label">Your aliases: ${tag.aliases?.length ? escapeHtml(tag.aliases.join(', ')) : '<em>none</em>'}</div>
-                  <div class="tm-alias-source-label">StashDB aliases: ${stashdbTag.aliases?.length ? escapeHtml(stashdbTag.aliases.join(', ')) : '<em>none</em>'}</div>
-                  <div class="tm-alias-source-label" style="margin-top: 8px;">Final aliases (click &times; to remove):</div>
-                  <div class="tm-alias-pills" id="tm-alias-pills"></div>
+                  <div class="tm-alias-columns">
+                    <div class="tm-alias-column">
+                      <div class="tm-alias-column-header">Your Aliases</div>
+                      <div class="tm-alias-checkbox-list" id="tm-local-aliases">
+                        ${renderAliasCheckboxes(tag.aliases || [], stashdbTag.aliases || [], 'local')}
+                      </div>
+                    </div>
+                    <div class="tm-alias-column">
+                      <div class="tm-alias-column-header">StashDB Aliases</div>
+                      <div class="tm-alias-checkbox-list" id="tm-stashdb-aliases">
+                        ${renderAliasCheckboxes(stashdbTag.aliases || [], tag.aliases || [], 'stashdb')}
+                      </div>
+                    </div>
+                  </div>
+                  <div class="tm-final-aliases-section">
+                    <div class="tm-final-aliases-header">Final aliases:</div>
+                    <div class="tm-alias-pills" id="tm-alias-pills"></div>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -961,36 +1015,54 @@
 
     document.body.appendChild(modal);
 
-    // Initialize alias pills
-    renderAliasPills();
+    // Helper function to check/uncheck an alias checkbox by alias value
+    function setAliasCheckbox(alias, checked) {
+      const safeId = alias.replace(/[^a-zA-Z0-9]/g, '_');
+      // Try to find the checkbox in either column (it may be primary or new-from-other)
+      const selectors = [
+        `#alias-local-${safeId}`,
+        `#alias-stashdb-${safeId}`,
+        `#alias-new-local-${safeId}`,
+        `#alias-new-stashdb-${safeId}`
+      ];
+      for (const selector of selectors) {
+        const cb = modal.querySelector(selector);
+        if (cb) {
+          cb.checked = checked;
+          break;
+        }
+      }
+    }
 
-    // When name choice changes, update aliases if needed
+    // Update aliases when checkboxes change
+    modal.querySelectorAll('.tm-alias-checkbox-item input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', updateAliasesFromCheckboxes);
+    });
+
+    // Initialize alias pills from checkboxes
+    updateAliasesFromCheckboxes();
+
+    // When name choice changes, update alias checkboxes as needed
     modal.querySelectorAll('input[name="tm-name"]').forEach(radio => {
       radio.addEventListener('change', (e) => {
         if (e.target.value === 'local_add_alias') {
-          // Add StashDB name to aliases if not already present
-          if (!editableAliases.has(stashdbTag.name) &&
-              !Array.from(editableAliases).some(a => a.toLowerCase() === stashdbTag.name.toLowerCase())) {
-            editableAliases.add(stashdbTag.name);
-            renderAliasPills();
-          }
+          // Check the StashDB name in the alias checkboxes if not already checked
+          setAliasCheckbox(stashdbTag.name, true);
+          updateAliasesFromCheckboxes();
         } else if (e.target.value === 'stashdb') {
-          // Add local name to aliases if not already present (preserve old name when renaming)
-          if (tag.name && !editableAliases.has(tag.name) &&
-              !Array.from(editableAliases).some(a => a.toLowerCase() === tag.name.toLowerCase())) {
-            editableAliases.add(tag.name);
-            renderAliasPills();
+          // Check the local name in the alias checkboxes if not already checked (preserve old name when renaming)
+          if (tag.name) {
+            setAliasCheckbox(tag.name, true);
+            updateAliasesFromCheckboxes();
           }
         }
       });
     });
 
-    // If default is local_add_alias, ensure StashDB name is in aliases
+    // If default is local_add_alias, ensure StashDB name checkbox is checked
     if (nameDefault === 'local_add_alias') {
-      if (!Array.from(editableAliases).some(a => a.toLowerCase() === stashdbTag.name.toLowerCase())) {
-        editableAliases.add(stashdbTag.name);
-        renderAliasPills();
-      }
+      setAliasCheckbox(stashdbTag.name, true);
+      updateAliasesFromCheckboxes();
     }
 
     // Initialize selection visuals
