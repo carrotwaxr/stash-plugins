@@ -1266,6 +1266,23 @@
   }
 
   /**
+   * Create a new tag via GraphQL
+   */
+  async function createTag(input) {
+    const query = `
+      mutation TagCreate($input: TagCreateInput!) {
+        tagCreate(input: $input) {
+          id
+          name
+        }
+      }
+    `;
+
+    const data = await graphqlRequest(query, { input });
+    return data?.tagCreate;
+  }
+
+  /**
    * Show modal with all matches for manual selection
    */
   function showMatchesModal(tagId, container) {
