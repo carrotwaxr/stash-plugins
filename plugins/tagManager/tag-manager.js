@@ -27,6 +27,7 @@
   let isCacheLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
+  let categoryMappings = {}; // Cache of category_name -> local_tag_id
 
   /**
    * Set page title with retry to overcome Stash's title management
