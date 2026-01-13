@@ -784,3 +784,16 @@
 .tm-diff-value:not(.selected) {
   opacity: 0.6;
 }
+
+/* Difference highlighting */
+.tm-diff-char {
+  background: rgba(255, 193, 7, 0.3);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.tm-diff-identical {
+  color: var(--bs-success, #198754);
+  font-size: 0.85em;
+  font-style: italic;
+}

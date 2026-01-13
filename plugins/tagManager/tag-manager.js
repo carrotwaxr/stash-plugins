@@ -390,6 +390,40 @@
   }
 
   /**
+   * Highlight character-level differences between two strings
+   * Returns HTML with differing characters wrapped in spans
+   */
+  function highlightDifferences(str1, str2) {
+    if (!str1 && !str2) return { html1: '', html2: '', identical: true };
+    if (!str1) return { html1: '', html2: escapeHtml(str2), identical: false };
+    if (!str2) return { html1: escapeHtml(str1), html2: '', identical: false };
+
+    if (str1 === str2) {
+      return { html1: escapeHtml(str1), html2: escapeHtml(str2), identical: true };
+    }
+
+    // Character-by-character comparison
+    let html1 = '';
+    let html2 = '';
+    const len = Math.max(str1.length, str2.length);
+
+    for (let i = 0; i < len; i++) {
+      const c1 = str1[i] || '';
+      const c2 = str2[i] || '';
+
+      if (c1 !== c2) {
+        html1 += c1 ? `<span class="tm-diff-char">${escapeHtml(c1)}</span>` : '';
+        html2 += c2 ? `<span class="tm-diff-char">${escapeHtml(c2)}</span>` : '';
+      } else {
+        html1 += escapeHtml(c1);
+        html2 += escapeHtml(c2);
+      }
+    }
+
+    return { html1, html2, identical: false };
+  }
+
+  /**
    * Sanitize aliases before saving - removes the final name from alias set
    * to prevent self-referential aliases (tag can't have its own name as alias).
    *
@@ -853,6 +887,10 @@
       modal.querySelector('#tm-desc-stashdb')?.classList.toggle('selected', descChoice === 'stashdb');
     }
 
+    // Calculate differences for highlighting
+    const nameDiff = highlightDifferences(tag.name, stashdbTag.name);
+    const descDiff = highlightDifferences(tag.description || '', stashdbTag.description || '');
+
     const modal = document.createElement('div');
     modal.className = 'tm-modal-backdrop';
     modal.innerHTML = `
@@ -880,8 +918,8 @@
             <tbody>
               <tr>
                 <td>Name</td>
-                <td><div class="tm-diff-value" id="tm-name-local">${escapeHtml(tag.name) || '<em>empty</em>'}</div></td>
-                <td><div class="tm-diff-value" id="tm-name-stashdb">${escapeHtml(stashdbTag.name)}</div></td>
+                <td><div class="tm-diff-value" id="tm-name-local">${nameDiff.html1 || '<em>empty</em>'}</div></td>
+                <td><div class="tm-diff-value" id="tm-name-stashdb">${nameDiff.html2}${nameDiff.identical ? ' <span class="tm-diff-identical">(identical)</span>' : ''}</div></td>
                 <td>
                   <label><input type="radio" name="tm-name" value="local_add_alias" ${nameDefault === 'local_add_alias' ? 'checked' : ''}> Keep + Add stash-box alias</label>
                   <label><input type="radio" name="tm-name" value="local" ${nameDefault === 'local' ? 'checked' : ''}> Keep</label>
@@ -890,8 +928,8 @@
               </tr>
               <tr>
                 <td>Description</td>
-                <td><div class="tm-diff-value" id="tm-desc-local">${escapeHtml(tag.description) || '<em>empty</em>'}</div></td>
-                <td><div class="tm-diff-value" id="tm-desc-stashdb">${escapeHtml(stashdbTag.description) || '<em>empty</em>'}</div></td>
+                <td><div class="tm-diff-value" id="tm-desc-local">${descDiff.html1 || '<em>empty</em>'}</div></td>
+                <td><div class="tm-diff-value" id="tm-desc-stashdb">${descDiff.html2 || '<em>empty</em>'}</div></td>
                 <td>
                   <label><input type="radio" name="tm-desc" value="local" ${descDefault === 'local' ? 'checked' : ''}> Keep</label>
                   <label><input type="radio" name="tm-desc" value="stashdb" ${descDefault === 'stashdb' ? 'checked' : ''}> StashDB</label>
