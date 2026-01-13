@@ -265,14 +265,15 @@
       const node = tagMap.get(tag.id);
 
       if (tag.parents.length === 0) {
-        // Root tag
-        roots.push(node);
+        // Root tag - create copy with null parent context
+        roots.push({ ...node, parentContextId: null });
       } else {
         // Add this tag as a child to each of its parents
+        // Create a COPY with parent context for each parent
         tag.parents.forEach(parent => {
           const parentNode = tagMap.get(parent.id);
           if (parentNode) {
-            parentNode.childNodes.push(node);
+            parentNode.childNodes.push({ ...node, parentContextId: parent.id });
           }
         });
       }
@@ -2039,6 +2040,448 @@
   let hierarchyStats = {};
   let showImages = true;
   let expandedNodes = new Set();
+  let contextMenuTag = null;
+  let contextMenuParentId = null;
+  let contextMenuEscapeHandler = null;
+  let draggedTagId = null;
+  let draggedFromParentId = null;
+  let selectedTagId = null;
+  let copiedTagId = null;
+
+  /**
+   * Show context menu for a tag node
+   */
+  function showContextMenu(x, y, tagId, parentId) {
+    hideContextMenu();
+    contextMenuTag = hierarchyTags.find(t => t.id === tagId);
+    contextMenuParentId = parentId;
+    if (!contextMenuTag) return;
+
+    const menu = document.createElement('div');
+    menu.className = 'th-context-menu';
+    menu.id = 'th-context-menu';
+
+    const hasParents = contextMenuTag.parents && contextMenuTag.parents.length > 0;
+    const isUnderParent = parentId !== null;
+
+    let menuHtml = `
+      <div class="th-context-menu-item" data-action="add-parent">Add parent...</div>
+      <div class="th-context-menu-item" data-action="add-child">Add child...</div>
+    `;
+
+    if (isUnderParent) {
+      const parentTag = hierarchyTags.find(t => t.id === parentId);
+      const parentName = parentTag ? parentTag.name : 'parent';
+      menuHtml += `<div class="th-context-menu-separator"></div>`;
+      menuHtml += `<div class="th-context-menu-item" data-action="remove-parent" data-parent-id="${parentId}">Remove from "${escapeHtml(parentName)}"</div>`;
+    }
+
+    if (hasParents) {
+      menuHtml += `<div class="th-context-menu-item" data-action="make-root">Make root (remove all parents)</div>`;
+    }
+
+    menu.innerHTML = menuHtml;
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+
+    document.body.appendChild(menu);
+
+    // Position adjustment if off-screen
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+      menu.style.left = `${window.innerWidth - rect.width - 10}px`;
+    }
+    if (rect.bottom > window.innerHeight) {
+      menu.style.top = `${window.innerHeight - rect.height - 10}px`;
+    }
+
+    // Click handlers
+    menu.querySelectorAll('.th-context-menu-item:not(.disabled)').forEach(item => {
+      item.addEventListener('click', handleContextMenuAction);
+    });
+
+    // Close on click outside
+    setTimeout(() => {
+      document.addEventListener('click', hideContextMenu, { once: true });
+    }, 0);
+
+    // Close on Escape key
+    contextMenuEscapeHandler = (e) => {
+      if (e.key === 'Escape') {
+        hideContextMenu();
+      }
+    };
+    document.addEventListener('keydown', contextMenuEscapeHandler);
+  }
+
+  /**
+   * Hide context menu
+   */
+  function hideContextMenu() {
+    const menu = document.getElementById('th-context-menu');
+    if (menu) menu.remove();
+    contextMenuTag = null;
+    contextMenuParentId = null;
+    if (contextMenuEscapeHandler) {
+      document.removeEventListener('keydown', contextMenuEscapeHandler);
+      contextMenuEscapeHandler = null;
+    }
+  }
+
+  /**
+   * Show toast notification
+   */
+  function showToast(message, type = 'success') {
+    // Create container if needed
+    let container = document.querySelector('.th-toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.className = 'th-toast-container';
+      document.body.appendChild(container);
+    }
+
+    const toast = document.createElement('div');
+    toast.className = `th-toast ${type}`;
+    toast.textContent = message;
+
+    container.appendChild(toast);
+
+    // Auto-remove after 3 seconds
+    setTimeout(() => {
+      toast.style.animation = 'th-toast-out 0.3s ease forwards';
+      setTimeout(() => toast.remove(), 300);
+    }, 3000);
+  }
+
+  /**
+   * Show tag search dialog for adding parent/child
+   */
+  function showTagSearchDialog(mode, targetTag) {
+    // mode: 'parent' or 'child'
+    const backdrop = document.createElement('div');
+    backdrop.className = 'th-search-dialog-backdrop';
+    backdrop.id = 'th-search-backdrop';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'th-search-dialog';
+    dialog.id = 'th-search-dialog';
+
+    const title = mode === 'parent'
+      ? `Add parent for "${escapeHtml(targetTag.name)}"`
+      : `Add child to "${escapeHtml(targetTag.name)}"`;
+
+    dialog.innerHTML = `
+      <h3>${title}</h3>
+      <input type="text" class="th-search-input" placeholder="Search tags..." autofocus>
+      <div class="th-search-results">
+        <div class="th-search-empty">Type to search...</div>
+      </div>
+    `;
+
+    document.body.appendChild(backdrop);
+    document.body.appendChild(dialog);
+
+    const input = dialog.querySelector('.th-search-input');
+    const results = dialog.querySelector('.th-search-results');
+
+    // Debounced search
+    let searchTimeout;
+    input.addEventListener('input', () => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        performTagSearch(input.value, mode, targetTag, results);
+      }, 200);
+    });
+
+    // Close on backdrop click or escape
+    backdrop.addEventListener('click', closeTagSearchDialog);
+    document.addEventListener('keydown', function escHandler(e) {
+      if (e.key === 'Escape') {
+        closeTagSearchDialog();
+        document.removeEventListener('keydown', escHandler);
+      }
+    });
+
+    input.focus();
+  }
+
+  /**
+   * Close the tag search dialog
+   */
+  function closeTagSearchDialog() {
+    document.getElementById('th-search-backdrop')?.remove();
+    document.getElementById('th-search-dialog')?.remove();
+  }
+
+  /**
+   * Perform tag search and render results
+   */
+  function performTagSearch(query, mode, targetTag, resultsContainer) {
+    if (!query.trim()) {
+      resultsContainer.innerHTML = '<div class="th-search-empty">Type to search...</div>';
+      return;
+    }
+
+    const lowerQuery = query.toLowerCase();
+
+    // Filter local tags
+    let matches = hierarchyTags.filter(t => {
+      // Don't show the target tag itself
+      if (t.id === targetTag.id) return false;
+
+      // Check name and aliases
+      if (t.name.toLowerCase().includes(lowerQuery)) return true;
+      if (t.aliases?.some(a => a.toLowerCase().includes(lowerQuery))) return true;
+      return false;
+    });
+
+    // Sort by relevance (exact match first, then starts with, then contains)
+    matches.sort((a, b) => {
+      const aLower = a.name.toLowerCase();
+      const bLower = b.name.toLowerCase();
+      const aExact = aLower === lowerQuery;
+      const bExact = bLower === lowerQuery;
+      if (aExact && !bExact) return -1;
+      if (bExact && !aExact) return 1;
+      const aStarts = aLower.startsWith(lowerQuery);
+      const bStarts = bLower.startsWith(lowerQuery);
+      if (aStarts && !bStarts) return -1;
+      if (bStarts && !aStarts) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    // Limit results
+    matches = matches.slice(0, 20);
+
+    if (matches.length === 0) {
+      resultsContainer.innerHTML = '<div class="th-search-empty">No tags found</div>';
+      return;
+    }
+
+    resultsContainer.innerHTML = matches.map(tag => {
+      // Check for circular reference
+      const wouldCreateCircle = mode === 'parent'
+        ? wouldCreateCircularRef(tag.id, targetTag.id)
+        : wouldCreateCircularRef(targetTag.id, tag.id);
+
+      const isAlreadyRelated = mode === 'parent'
+        ? targetTag.parents?.some(p => p.id === tag.id)
+        : tag.parents?.some(p => p.id === targetTag.id);
+
+      const disabled = wouldCreateCircle || isAlreadyRelated;
+      const badge = wouldCreateCircle ? 'circular' : isAlreadyRelated ? 'already linked' : '';
+
+      return `
+        <div class="th-search-result ${disabled ? 'disabled' : ''}"
+             data-tag-id="${tag.id}"
+             data-mode="${mode}"
+             data-target-id="${targetTag.id}">
+          <span class="th-search-result-name">${escapeHtml(tag.name)}</span>
+          ${badge ? `<span class="th-search-result-badge">${badge}</span>` : ''}
+        </div>
+      `;
+    }).join('');
+
+    // Click handlers
+    resultsContainer.querySelectorAll('.th-search-result:not(.disabled)').forEach(item => {
+      item.addEventListener('click', handleSearchResultClick);
+    });
+  }
+
+  /**
+   * Handle click on a search result
+   */
+  async function handleSearchResultClick(e) {
+    const tagId = e.currentTarget.dataset.tagId;
+    const mode = e.currentTarget.dataset.mode;
+    const targetId = e.currentTarget.dataset.targetId;
+
+    closeTagSearchDialog();
+
+    if (mode === 'parent') {
+      await addParent(targetId, tagId);
+    } else {
+      await addChild(targetId, tagId);
+    }
+  }
+
+  /**
+   * Add a parent to a tag
+   */
+  async function addParent(tagId, newParentId) {
+    const tag = hierarchyTags.find(t => t.id === tagId);
+    if (!tag) return;
+
+    const newParentIds = [...(tag.parents?.map(p => p.id) || []), newParentId];
+
+    try {
+      await updateTagParents(tagId, newParentIds);
+      await refreshHierarchy();
+      const parent = hierarchyTags.find(t => t.id === newParentId);
+      showToast(`Added "${tag.name}" as child of "${parent?.name || 'parent'}"`);
+    } catch (err) {
+      console.error('[tagManager] Failed to add parent:', err);
+      showToast(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  /**
+   * Add a child to a tag (by adding the target as the child's parent)
+   */
+  async function addChild(parentId, childId) {
+    const child = hierarchyTags.find(t => t.id === childId);
+    if (!child) return;
+
+    const newParentIds = [...(child.parents?.map(p => p.id) || []), parentId];
+
+    try {
+      await updateTagParents(childId, newParentIds);
+      await refreshHierarchy();
+      const parent = hierarchyTags.find(t => t.id === parentId);
+      showToast(`Added "${child.name}" as child of "${parent?.name || 'parent'}"`);
+    } catch (err) {
+      console.error('[tagManager] Failed to add child:', err);
+      showToast(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  /**
+   * Check if making potentialParentId a parent of tagId would create a circular reference.
+   * This happens if tagId is already an ancestor of potentialParentId.
+   */
+  function wouldCreateCircularRef(potentialParentId, tagId) {
+    // Build a set of all ancestors of potentialParentId
+    const ancestors = new Set();
+
+    function collectAncestors(id) {
+      const tag = hierarchyTags.find(t => t.id === id);
+      if (!tag || !tag.parents) return;
+
+      for (const parent of tag.parents) {
+        if (ancestors.has(parent.id)) continue; // Already visited
+        ancestors.add(parent.id);
+        collectAncestors(parent.id);
+      }
+    }
+
+    collectAncestors(potentialParentId);
+
+    // If tagId is an ancestor of potentialParentId, adding potentialParentId as parent of tagId
+    // would create: tagId -> potentialParentId -> ... -> tagId (circular)
+    return ancestors.has(tagId);
+  }
+
+  /**
+   * Update a tag's parent relationships via GraphQL
+   */
+  async function updateTagParents(tagId, parentIds) {
+    const query = `
+      mutation TagUpdate($input: TagUpdateInput!) {
+        tagUpdate(input: $input) {
+          id
+          name
+          parents { id name }
+        }
+      }
+    `;
+
+    const result = await graphqlRequest(query, {
+      input: {
+        id: tagId,
+        parent_ids: parentIds
+      }
+    });
+
+    return result?.tagUpdate;
+  }
+
+  /**
+   * Refresh hierarchy data and re-render the page
+   */
+  async function refreshHierarchy() {
+    const container = document.querySelector('.tag-hierarchy-container');
+    if (!container) return;
+
+    try {
+      hierarchyTags = await fetchAllTagsWithHierarchy();
+      hierarchyTree = buildTagTree(hierarchyTags);
+      hierarchyStats = getTreeStats(hierarchyTags);
+      renderHierarchyPage(container);
+    } catch (err) {
+      console.error('[tagManager] Failed to refresh hierarchy:', err);
+      showToast('Failed to refresh hierarchy', 'error');
+    }
+  }
+
+  /**
+   * Remove a specific parent from a tag
+   */
+  async function removeParent(tagId, parentIdToRemove) {
+    const tag = hierarchyTags.find(t => t.id === tagId);
+    if (!tag) return;
+
+    const newParentIds = tag.parents
+      .map(p => p.id)
+      .filter(id => id !== parentIdToRemove);
+
+    try {
+      await updateTagParents(tagId, newParentIds);
+      await refreshHierarchy();
+      showToast(`Removed "${tag.name}" from parent`);
+    } catch (err) {
+      console.error('[tagManager] Failed to remove parent:', err);
+      showToast(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  /**
+   * Make a tag a root by removing all its parents
+   */
+  async function makeRoot(tagId) {
+    const tag = hierarchyTags.find(t => t.id === tagId);
+    if (!tag) return;
+
+    if (tag.parents.length === 0) {
+      showToast('Tag is already a root');
+      return;
+    }
+
+    try {
+      await updateTagParents(tagId, []);
+      await refreshHierarchy();
+      showToast(`"${tag.name}" is now a root tag`);
+    } catch (err) {
+      console.error('[tagManager] Failed to make root:', err);
+      showToast(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  /**
+   * Handle context menu action
+   */
+  async function handleContextMenuAction(e) {
+    e.stopPropagation();
+    const action = e.target.dataset.action;
+    const parentIdToRemove = e.target.dataset.parentId;
+
+    if (!contextMenuTag) return;
+    hideContextMenu();
+
+    switch (action) {
+      case 'add-parent':
+        showTagSearchDialog('parent', contextMenuTag);
+        break;
+      case 'add-child':
+        showTagSearchDialog('child', contextMenuTag);
+        break;
+      case 'remove-parent':
+        await removeParent(contextMenuTag.id, parentIdToRemove);
+        break;
+      case 'make-root':
+        await makeRoot(contextMenuTag.id);
+        break;
+    }
+  }
 
   /**
    * Render a single tree node
@@ -2056,6 +2499,12 @@
       metaParts.push(`${node.child_count} sub-tag${node.child_count !== 1 ? 's' : ''}`);
     }
     const metaText = metaParts.length > 0 ? metaParts.join(', ') : '';
+
+    // Multi-parent badge
+    const parentCount = node.parents?.length || 0;
+    const multiParentBadge = parentCount > 1
+      ? `<span class="th-multi-parent-badge" title="Appears under ${parentCount} parents">${parentCount} parents</span>`
+      : '';
 
     // Image HTML
     const imageHtml = node.image_path
@@ -2078,13 +2527,16 @@
       ? (isExpanded ? '&#9660;' : '&#9654;')  // Down arrow / Right arrow
       : '';
 
+    // Parent context attribute for correct context menu behavior
+    const parentAttr = node.parentContextId ? `data-parent-context="${node.parentContextId}"` : '';
+
     return `
-      <div class="th-node ${isRoot ? 'th-root' : ''}" data-tag-id="${node.id}">
+      <div class="th-node ${isRoot ? 'th-root' : ''}" data-tag-id="${node.id}" ${parentAttr} draggable="true">
         <div class="th-node-content">
           <span class="th-toggle ${hasChildren ? '' : 'th-leaf'}" data-tag-id="${node.id}">${toggleIcon}</span>
           ${imageHtml}
           <div class="th-info">
-            <a href="/tags/${node.id}" class="th-name">${escapeHtml(node.name)}</a>
+            <a href="/tags/${node.id}" class="th-name">${escapeHtml(node.name)}</a>${multiParentBadge}
             ${metaText ? `<div class="th-meta">${metaText}</div>` : ''}
           </div>
         </div>
@@ -2118,6 +2570,9 @@
           <span class="stat"><strong>${hierarchyStats.tagsWithChildren}</strong> with sub-tags</span>
           <span class="stat"><strong>${hierarchyStats.tagsWithParents}</strong> with parents</span>
         </div>
+        <div class="th-root-drop-zone" id="th-root-drop-zone">
+          Drop here to make root tag
+        </div>
         <div class="th-tree">
           ${treeHtml || '<div class="th-empty">No tags found</div>'}
         </div>
@@ -2127,6 +2582,73 @@
     // Attach event handlers
     attachHierarchyEventHandlers(container);
   }
+
+  /**
+   * Keyboard shortcuts
+   */
+  function handleHierarchyKeyboard(e) {
+    // Only handle if hierarchy page is active
+    if (!document.querySelector('.tag-hierarchy-container')) return;
+
+    // Ctrl+C - copy selected tag
+    if (e.ctrlKey && e.key === 'c' && selectedTagId) {
+      e.preventDefault();
+      copiedTagId = selectedTagId;
+
+      // Visual feedback
+      const container = document.querySelector('.tag-hierarchy-container');
+      container?.querySelectorAll('.th-node.th-copied').forEach(n => {
+        n.classList.remove('th-copied');
+      });
+      container?.querySelectorAll(`.th-node[data-tag-id="${copiedTagId}"]`).forEach(n => {
+        n.classList.add('th-copied');
+      });
+
+      showToast('Tag copied - select target and press Ctrl+V to add as child');
+    }
+
+    // Ctrl+V - paste (add copied tag as child of selected)
+    if (e.ctrlKey && e.key === 'v' && copiedTagId && selectedTagId && copiedTagId !== selectedTagId) {
+      e.preventDefault();
+
+      if (wouldCreateCircularRef(selectedTagId, copiedTagId)) {
+        showToast('Cannot create circular reference', 'error');
+        return;
+      }
+
+      addParent(copiedTagId, selectedTagId);
+    }
+
+    // Delete/Backspace - remove selected tag from its current parent
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedTagId) {
+      // Don't handle if typing in an input
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+      e.preventDefault();
+      const selectedNode = document.querySelector(`.th-node.th-selected[data-tag-id="${selectedTagId}"]`);
+      // Use parentContext data attribute for correct parent identification
+      const parentId = selectedNode?.dataset.parentContext || null;
+
+      if (parentId) {
+        removeParent(selectedTagId, parentId);
+      } else {
+        showToast('Tag is already a root');
+      }
+    }
+
+    // Escape - clear selection
+    if (e.key === 'Escape') {
+      selectedTagId = null;
+      copiedTagId = null;
+      const container = document.querySelector('.tag-hierarchy-container');
+      container?.querySelectorAll('.th-node.th-selected, .th-node.th-copied').forEach(n => {
+        n.classList.remove('th-selected', 'th-copied');
+      });
+    }
+  }
+
+  // Register keyboard handler globally
+  document.addEventListener('keydown', handleHierarchyKeyboard);
 
   /**
    * Attach event handlers for hierarchy page
@@ -2192,6 +2714,138 @@
         });
       });
     }
+
+    // Context menu on right-click
+    container.querySelectorAll('.th-node').forEach(node => {
+      node.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        const tagId = node.dataset.tagId;
+        // Use parentContextId from the node's data attribute (set during tree building)
+        const parentId = node.dataset.parentContext || null;
+        showContextMenu(e.clientX, e.clientY, tagId, parentId);
+      });
+    });
+
+    // Highlight all instances of a tag on hover
+    container.querySelectorAll('.th-node').forEach(node => {
+      node.addEventListener('mouseenter', () => {
+        const tagId = node.dataset.tagId;
+        container.querySelectorAll(`.th-node[data-tag-id="${tagId}"]`).forEach(n => {
+          n.classList.add('th-highlighted');
+        });
+      });
+
+      node.addEventListener('mouseleave', () => {
+        container.querySelectorAll('.th-node.th-highlighted').forEach(n => {
+          n.classList.remove('th-highlighted');
+        });
+      });
+    });
+
+    // Drag and drop handlers
+    container.querySelectorAll('.th-node').forEach(node => {
+      node.addEventListener('dragstart', (e) => {
+        draggedTagId = node.dataset.tagId;
+        // Use parentContext data attribute for correct parent identification
+        draggedFromParentId = node.dataset.parentContext || null;
+        node.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', draggedTagId);
+      });
+
+      node.addEventListener('dragend', () => {
+        node.classList.remove('dragging');
+        draggedTagId = null;
+        draggedFromParentId = null;
+        // Clear all drag-over states
+        container.querySelectorAll('.drag-over, .drag-invalid').forEach(el => {
+          el.classList.remove('drag-over', 'drag-invalid');
+        });
+      });
+
+      node.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (!draggedTagId || node.dataset.tagId === draggedTagId) return;
+
+        const targetId = node.dataset.tagId;
+        const wouldCircle = wouldCreateCircularRef(targetId, draggedTagId);
+
+        node.classList.remove('drag-over', 'drag-invalid');
+        node.classList.add(wouldCircle ? 'drag-invalid' : 'drag-over');
+      });
+
+      node.addEventListener('dragleave', () => {
+        node.classList.remove('drag-over', 'drag-invalid');
+      });
+
+      node.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        node.classList.remove('drag-over', 'drag-invalid');
+
+        if (!draggedTagId || node.dataset.tagId === draggedTagId) return;
+
+        const targetId = node.dataset.tagId;
+        if (wouldCreateCircularRef(targetId, draggedTagId)) {
+          showToast('Cannot create circular reference', 'error');
+          return;
+        }
+
+        // Add target as parent of dragged tag
+        await addParent(draggedTagId, targetId);
+      });
+    });
+
+    // Root drop zone handler
+    const rootDropZone = container.querySelector('#th-root-drop-zone');
+    if (rootDropZone) {
+      rootDropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (draggedTagId) {
+          rootDropZone.classList.add('drag-over');
+        }
+      });
+
+      rootDropZone.addEventListener('dragleave', () => {
+        rootDropZone.classList.remove('drag-over');
+      });
+
+      rootDropZone.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        rootDropZone.classList.remove('drag-over');
+
+        if (!draggedTagId) return;
+
+        // If dragged from a specific parent, just remove that parent
+        if (draggedFromParentId) {
+          await removeParent(draggedTagId, draggedFromParentId);
+        } else {
+          // Make completely root
+          await makeRoot(draggedTagId);
+        }
+      });
+    }
+
+    // Click to select (for keyboard operations)
+    container.querySelectorAll('.th-node-content').forEach(content => {
+      content.addEventListener('click', (e) => {
+        // Don't select if clicking on a link or toggle
+        if (e.target.closest('a') || e.target.closest('.th-toggle')) return;
+
+        const node = content.closest('.th-node');
+        const tagId = node?.dataset.tagId;
+        if (!tagId) return;
+
+        // Clear previous selection
+        container.querySelectorAll('.th-node.th-selected').forEach(n => {
+          n.classList.remove('th-selected');
+        });
+
+        // Select this node
+        node.classList.add('th-selected');
+        selectedTagId = tagId;
+      });
+    });
   }
 
   /**
