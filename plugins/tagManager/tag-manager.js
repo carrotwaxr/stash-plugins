@@ -1367,6 +1367,7 @@
   let expandedNodes = new Set();
   let contextMenuTag = null;
   let contextMenuParentId = null;
+  let contextMenuEscapeHandler = null;
 
   /**
    * Show context menu for a tag node
@@ -1424,6 +1425,14 @@
     setTimeout(() => {
       document.addEventListener('click', hideContextMenu, { once: true });
     }, 0);
+
+    // Close on Escape key
+    contextMenuEscapeHandler = (e) => {
+      if (e.key === 'Escape') {
+        hideContextMenu();
+      }
+    };
+    document.addEventListener('keydown', contextMenuEscapeHandler);
   }
 
   /**
@@ -1434,12 +1443,17 @@
     if (menu) menu.remove();
     contextMenuTag = null;
     contextMenuParentId = null;
+    if (contextMenuEscapeHandler) {
+      document.removeEventListener('keydown', contextMenuEscapeHandler);
+      contextMenuEscapeHandler = null;
+    }
   }
 
   /**
    * Handle context menu action (placeholder - actions implemented in Task 2)
    */
   function handleContextMenuAction(e) {
+    e.stopPropagation();
     const action = e.target.dataset.action;
     console.debug('[tagManager] Context menu action:', action);
     hideContextMenu();
