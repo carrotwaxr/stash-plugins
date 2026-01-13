@@ -808,6 +808,46 @@
       });
     });
 
+    // Browse view handlers (only when browse tab active)
+    if (activeTab === 'browse') {
+      // Category selection
+      container.querySelectorAll('.tm-category-item').forEach(item => {
+        item.addEventListener('click', () => {
+          browseCategory = item.dataset.category;
+          renderPage(container);
+        });
+      });
+
+      // Checkbox selection
+      container.querySelectorAll('.tm-browse-tag input[type="checkbox"]').forEach(cb => {
+        cb.addEventListener('change', (e) => {
+          const tagEl = e.target.closest('.tm-browse-tag');
+          const stashdbId = tagEl.dataset.stashdbId;
+          if (e.target.checked) {
+            selectedForImport.add(stashdbId);
+          } else {
+            selectedForImport.delete(stashdbId);
+          }
+          // Update selection count display
+          const infoEl = container.querySelector('.tm-selection-info');
+          const btnEl = container.querySelector('#tm-import-selected');
+          if (infoEl) {
+            const count = selectedForImport.size;
+            infoEl.textContent = count > 0 ? `${count} tag${count > 1 ? 's' : ''} selected` : 'No tags selected';
+          }
+          if (btnEl) {
+            btnEl.disabled = selectedForImport.size === 0;
+          }
+        });
+      });
+
+      // Import button
+      const importBtn = container.querySelector('#tm-import-selected');
+      if (importBtn) {
+        importBtn.addEventListener('click', () => handleImportSelected(container));
+      }
+    }
+
     // Stash-box dropdown
     container.querySelector('#tm-stashbox')?.addEventListener('change', async (e) => {
       const endpoint = e.target.value;
