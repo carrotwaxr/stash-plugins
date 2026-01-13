@@ -987,6 +987,66 @@
       // Use sanitized aliases
       updateInput.aliases = sanitizedAliases;
 
+      // Pre-validation: check for conflicts before hitting API
+      const validationErrors = validateBeforeSave(finalName, sanitizedAliases, tag.id);
+      if (validationErrors.length > 0) {
+        const err = validationErrors[0]; // Show first error
+        const conflictTag = err.conflictsWith;
+
+        if (err.type === 'name_conflict') {
+          errorEl.innerHTML = `
+            <div class="tm-error-message">
+              Cannot rename to "${escapeHtml(err.value)}" - this name already exists.
+            </div>
+            <div class="tm-error-actions">
+              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+                Edit "${escapeHtml(conflictTag.name)}"
+              </a>
+              <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
+                Keep local name instead
+              </button>
+            </div>
+          `;
+        } else {
+          errorEl.innerHTML = `
+            <div class="tm-error-message">
+              Alias "${escapeHtml(err.value)}" conflicts with tag "${escapeHtml(conflictTag.name)}".
+            </div>
+            <div class="tm-error-actions">
+              <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(err.value)}">
+                Remove from aliases
+              </button>
+              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+                Edit "${escapeHtml(conflictTag.name)}"
+              </a>
+            </div>
+          `;
+        }
+
+        errorEl.style.display = 'block';
+
+        // Attach action handlers
+        const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
+        if (keepLocalBtn) {
+          keepLocalBtn.addEventListener('click', () => {
+            modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
+            errorEl.style.display = 'none';
+          });
+        }
+
+        const removeAliasBtn = errorEl.querySelector('.tm-error-remove-alias');
+        if (removeAliasBtn) {
+          removeAliasBtn.addEventListener('click', () => {
+            const aliasToRemove = removeAliasBtn.dataset.alias;
+            editableAliases.delete(aliasToRemove);
+            renderAliasPills();
+            errorEl.style.display = 'none';
+          });
+        }
+
+        return; // Don't proceed with save
+      }
+
       try {
         await updateTag(updateInput);
         modal.remove();
