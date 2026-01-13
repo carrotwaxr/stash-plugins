@@ -207,14 +207,15 @@
       const node = tagMap.get(tag.id);
 
       if (tag.parents.length === 0) {
-        // Root tag
-        roots.push(node);
+        // Root tag - create copy with null parent context
+        roots.push({ ...node, parentContextId: null });
       } else {
         // Add this tag as a child to each of its parents
+        // Create a COPY with parent context for each parent
         tag.parents.forEach(parent => {
           const parentNode = tagMap.get(parent.id);
           if (parentNode) {
-            parentNode.childNodes.push(node);
+            parentNode.childNodes.push({ ...node, parentContextId: parent.id });
           }
         });
       }
@@ -1852,8 +1853,11 @@
       ? (isExpanded ? '&#9660;' : '&#9654;')  // Down arrow / Right arrow
       : '';
 
+    // Parent context attribute for correct context menu behavior
+    const parentAttr = node.parentContextId ? `data-parent-context="${node.parentContextId}"` : '';
+
     return `
-      <div class="th-node ${isRoot ? 'th-root' : ''}" data-tag-id="${node.id}" draggable="true">
+      <div class="th-node ${isRoot ? 'th-root' : ''}" data-tag-id="${node.id}" ${parentAttr} draggable="true">
         <div class="th-node-content">
           <span class="th-toggle ${hasChildren ? '' : 'th-leaf'}" data-tag-id="${node.id}">${toggleIcon}</span>
           ${imageHtml}
@@ -1948,7 +1952,8 @@
 
       e.preventDefault();
       const selectedNode = document.querySelector(`.th-node.th-selected[data-tag-id="${selectedTagId}"]`);
-      const parentId = selectedNode?.closest('.th-children')?.dataset.parentId;
+      // Use parentContext data attribute for correct parent identification
+      const parentId = selectedNode?.dataset.parentContext || null;
 
       if (parentId) {
         removeParent(selectedTagId, parentId);
@@ -2041,7 +2046,8 @@
       node.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         const tagId = node.dataset.tagId;
-        const parentId = node.closest('.th-children')?.dataset.parentId || null;
+        // Use parentContextId from the node's data attribute (set during tree building)
+        const parentId = node.dataset.parentContext || null;
         showContextMenu(e.clientX, e.clientY, tagId, parentId);
       });
     });
@@ -2066,7 +2072,8 @@
     container.querySelectorAll('.th-node').forEach(node => {
       node.addEventListener('dragstart', (e) => {
         draggedTagId = node.dataset.tagId;
-        draggedFromParentId = node.closest('.th-children')?.dataset.parentId || null;
+        // Use parentContext data attribute for correct parent identification
+        draggedFromParentId = node.dataset.parentContext || null;
         node.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', draggedTagId);
