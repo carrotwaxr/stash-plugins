@@ -1503,6 +1503,7 @@
       renderHierarchyPage(container);
     } catch (err) {
       console.error('[tagManager] Failed to refresh hierarchy:', err);
+      showToast('Failed to refresh hierarchy', 'error');
     }
   }
 
