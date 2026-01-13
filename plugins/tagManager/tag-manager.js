@@ -1450,14 +1450,130 @@
   }
 
   /**
-   * Handle context menu action (placeholder - actions implemented in Task 2)
+   * Show toast notification
    */
-  function handleContextMenuAction(e) {
+  function showToast(message, type = 'success') {
+    // Placeholder - will be implemented in Task 9
+    console.log(`[tagManager] Toast (${type}): ${message}`);
+  }
+
+  /**
+   * Show tag search dialog for adding parent/child
+   */
+  function showTagSearchDialog(mode, targetTag) {
+    // Placeholder - will be implemented in Task 3
+    console.log(`[tagManager] Would show ${mode} search dialog for "${targetTag.name}"`);
+  }
+
+  /**
+   * Update a tag's parent relationships via GraphQL
+   */
+  async function updateTagParents(tagId, parentIds) {
+    const query = `
+      mutation TagUpdate($input: TagUpdateInput!) {
+        tagUpdate(input: $input) {
+          id
+          name
+          parents { id name }
+        }
+      }
+    `;
+
+    const result = await graphqlRequest(query, {
+      input: {
+        id: tagId,
+        parent_ids: parentIds
+      }
+    });
+
+    return result?.tagUpdate;
+  }
+
+  /**
+   * Refresh hierarchy data and re-render the page
+   */
+  async function refreshHierarchy() {
+    const container = document.querySelector('.tag-hierarchy-container');
+    if (!container) return;
+
+    try {
+      hierarchyTags = await fetchAllTagsWithHierarchy();
+      hierarchyTree = buildTagTree(hierarchyTags);
+      hierarchyStats = getTreeStats(hierarchyTags);
+      renderHierarchyPage(container);
+    } catch (err) {
+      console.error('[tagManager] Failed to refresh hierarchy:', err);
+    }
+  }
+
+  /**
+   * Remove a specific parent from a tag
+   */
+  async function removeParent(tagId, parentIdToRemove) {
+    const tag = hierarchyTags.find(t => t.id === tagId);
+    if (!tag) return;
+
+    const newParentIds = tag.parents
+      .map(p => p.id)
+      .filter(id => id !== parentIdToRemove);
+
+    try {
+      await updateTagParents(tagId, newParentIds);
+      await refreshHierarchy();
+      showToast(`Removed "${tag.name}" from parent`);
+    } catch (err) {
+      console.error('[tagManager] Failed to remove parent:', err);
+      showToast(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  /**
+   * Make a tag a root by removing all its parents
+   */
+  async function makeRoot(tagId) {
+    const tag = hierarchyTags.find(t => t.id === tagId);
+    if (!tag) return;
+
+    if (tag.parents.length === 0) {
+      showToast('Tag is already a root');
+      return;
+    }
+
+    try {
+      await updateTagParents(tagId, []);
+      await refreshHierarchy();
+      showToast(`"${tag.name}" is now a root tag`);
+    } catch (err) {
+      console.error('[tagManager] Failed to make root:', err);
+      showToast(`Error: ${err.message}`, 'error');
+    }
+  }
+
+  /**
+   * Handle context menu action
+   */
+  async function handleContextMenuAction(e) {
     e.stopPropagation();
     const action = e.target.dataset.action;
-    console.debug('[tagManager] Context menu action:', action);
+    const parentIdToRemove = e.target.dataset.parentId;
+
+    if (!contextMenuTag) return;
     hideContextMenu();
-    // Actions will be implemented in Task 2
+
+    switch (action) {
+      case 'add-parent':
+        showTagSearchDialog('parent', contextMenuTag);
+        break;
+      case 'add-child':
+        showTagSearchDialog('child', contextMenuTag);
+        break;
+      case 'remove-parent':
+        await removeParent(contextMenuTag.id, parentIdToRemove);
+        break;
+      case 'make-root':
+        await makeRoot(contextMenuTag.id);
+        break;
+    }
   }
 
   /**
