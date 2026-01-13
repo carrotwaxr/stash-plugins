@@ -517,6 +517,47 @@
   }
 
   /**
+   * Check if a StashDB tag already exists locally
+   */
+  function findLocalTagByStashId(stashdbId) {
+    return localTags.find(t =>
+      t.stash_ids?.some(sid => sid.stash_id === stashdbId)
+    );
+  }
+
+  /**
+   * Render list of tags for browse/import view
+   */
+  function renderBrowseTagList(tags) {
+    if (!tags || tags.length === 0) {
+      return '<div class="tm-browse-empty">No tags in this category</div>';
+    }
+
+    const rows = tags.map(tag => {
+      const localTag = findLocalTagByStashId(tag.id);
+      const existsLocally = !!localTag;
+      const isSelected = selectedForImport.has(tag.id);
+
+      return `
+        <div class="tm-browse-tag ${existsLocally ? 'tm-exists-locally' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
+          <label class="tm-browse-checkbox">
+            <input type="checkbox" ${isSelected ? 'checked' : ''} ${existsLocally ? 'disabled' : ''}>
+          </label>
+          <div class="tm-browse-tag-info">
+            <span class="tm-browse-tag-name">${escapeHtml(tag.name)}</span>
+            ${tag.aliases?.length ? `<span class="tm-browse-tag-aliases">${escapeHtml(tag.aliases.slice(0, 3).join(', '))}</span>` : ''}
+          </div>
+          <div class="tm-browse-tag-status">
+            ${existsLocally ? `<span class="tm-local-exists" title="Linked to: ${escapeHtml(localTag.name)}">✓ Exists</span>` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return rows;
+  }
+
+  /**
    * Render the browse/import view
    */
   function renderBrowseView() {
