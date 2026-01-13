@@ -1368,6 +1368,8 @@
   let contextMenuTag = null;
   let contextMenuParentId = null;
   let contextMenuEscapeHandler = null;
+  let draggedTagId = null;
+  let draggedFromParentId = null;
 
   /**
    * Show context menu for a tag node
@@ -1974,6 +1976,89 @@
         });
       });
     });
+
+    // Drag and drop handlers
+    container.querySelectorAll('.th-node').forEach(node => {
+      node.addEventListener('dragstart', (e) => {
+        draggedTagId = node.dataset.tagId;
+        draggedFromParentId = node.closest('.th-children')?.dataset.parentId || null;
+        node.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', draggedTagId);
+      });
+
+      node.addEventListener('dragend', () => {
+        node.classList.remove('dragging');
+        draggedTagId = null;
+        draggedFromParentId = null;
+        // Clear all drag-over states
+        container.querySelectorAll('.drag-over, .drag-invalid').forEach(el => {
+          el.classList.remove('drag-over', 'drag-invalid');
+        });
+      });
+
+      node.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (!draggedTagId || node.dataset.tagId === draggedTagId) return;
+
+        const targetId = node.dataset.tagId;
+        const wouldCircle = wouldCreateCircularRef(targetId, draggedTagId);
+
+        node.classList.remove('drag-over', 'drag-invalid');
+        node.classList.add(wouldCircle ? 'drag-invalid' : 'drag-over');
+      });
+
+      node.addEventListener('dragleave', () => {
+        node.classList.remove('drag-over', 'drag-invalid');
+      });
+
+      node.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        node.classList.remove('drag-over', 'drag-invalid');
+
+        if (!draggedTagId || node.dataset.tagId === draggedTagId) return;
+
+        const targetId = node.dataset.tagId;
+        if (wouldCreateCircularRef(targetId, draggedTagId)) {
+          showToast('Cannot create circular reference', 'error');
+          return;
+        }
+
+        // Add target as parent of dragged tag
+        await addParent(draggedTagId, targetId);
+      });
+    });
+
+    // Root drop zone handler
+    const rootDropZone = container.querySelector('#th-root-drop-zone');
+    if (rootDropZone) {
+      rootDropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (draggedTagId) {
+          rootDropZone.classList.add('drag-over');
+        }
+      });
+
+      rootDropZone.addEventListener('dragleave', () => {
+        rootDropZone.classList.remove('drag-over');
+      });
+
+      rootDropZone.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        rootDropZone.classList.remove('drag-over');
+
+        if (!draggedTagId) return;
+
+        // If dragged from a specific parent, just remove that parent
+        if (draggedFromParentId) {
+          await removeParent(draggedTagId, draggedFromParentId);
+        } else {
+          // Make completely root
+          await makeRoot(draggedTagId);
+        }
+      });
+    }
   }
 
   /**
