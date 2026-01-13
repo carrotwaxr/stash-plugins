@@ -1370,6 +1370,8 @@
   let contextMenuEscapeHandler = null;
   let draggedTagId = null;
   let draggedFromParentId = null;
+  let selectedTagId = null;
+  let copiedTagId = null;
 
   /**
    * Show context menu for a tag node
@@ -1887,6 +1889,72 @@
   }
 
   /**
+   * Keyboard shortcuts
+   */
+  function handleHierarchyKeyboard(e) {
+    // Only handle if hierarchy page is active
+    if (!document.querySelector('.tag-hierarchy-container')) return;
+
+    // Ctrl+C - copy selected tag
+    if (e.ctrlKey && e.key === 'c' && selectedTagId) {
+      e.preventDefault();
+      copiedTagId = selectedTagId;
+
+      // Visual feedback
+      const container = document.querySelector('.tag-hierarchy-container');
+      container?.querySelectorAll('.th-node.th-copied').forEach(n => {
+        n.classList.remove('th-copied');
+      });
+      container?.querySelectorAll(`.th-node[data-tag-id="${copiedTagId}"]`).forEach(n => {
+        n.classList.add('th-copied');
+      });
+
+      showToast('Tag copied - select target and press Ctrl+V to add as child');
+    }
+
+    // Ctrl+V - paste (add copied tag as child of selected)
+    if (e.ctrlKey && e.key === 'v' && copiedTagId && selectedTagId && copiedTagId !== selectedTagId) {
+      e.preventDefault();
+
+      if (wouldCreateCircularRef(selectedTagId, copiedTagId)) {
+        showToast('Cannot create circular reference', 'error');
+        return;
+      }
+
+      addParent(copiedTagId, selectedTagId);
+    }
+
+    // Delete/Backspace - remove selected tag from its current parent
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedTagId) {
+      // Don't handle if typing in an input
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+      e.preventDefault();
+      const selectedNode = document.querySelector(`.th-node.th-selected[data-tag-id="${selectedTagId}"]`);
+      const parentId = selectedNode?.closest('.th-children')?.dataset.parentId;
+
+      if (parentId) {
+        removeParent(selectedTagId, parentId);
+      } else {
+        showToast('Tag is already a root');
+      }
+    }
+
+    // Escape - clear selection
+    if (e.key === 'Escape') {
+      selectedTagId = null;
+      copiedTagId = null;
+      const container = document.querySelector('.tag-hierarchy-container');
+      container?.querySelectorAll('.th-node.th-selected, .th-node.th-copied').forEach(n => {
+        n.classList.remove('th-selected', 'th-copied');
+      });
+    }
+  }
+
+  // Register keyboard handler globally
+  document.addEventListener('keydown', handleHierarchyKeyboard);
+
+  /**
    * Attach event handlers for hierarchy page
    */
   function attachHierarchyEventHandlers(container) {
@@ -2059,6 +2127,27 @@
         }
       });
     }
+
+    // Click to select (for keyboard operations)
+    container.querySelectorAll('.th-node-content').forEach(content => {
+      content.addEventListener('click', (e) => {
+        // Don't select if clicking on a link or toggle
+        if (e.target.closest('a') || e.target.closest('.th-toggle')) return;
+
+        const node = content.closest('.th-node');
+        const tagId = node?.dataset.tagId;
+        if (!tagId) return;
+
+        // Clear previous selection
+        container.querySelectorAll('.th-node.th-selected').forEach(n => {
+          n.classList.remove('th-selected');
+        });
+
+        // Select this node
+        node.classList.add('th-selected');
+        selectedTagId = tagId;
+      });
+    });
   }
 
   /**

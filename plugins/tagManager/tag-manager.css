@@ -936,3 +936,15 @@
   background: rgba(13, 110, 253, 0.1);
   color: var(--bs-primary, #137cbd);
 }
+
+/* Keyboard selection */
+.th-node.th-selected > .th-node-content {
+  outline: 2px solid var(--bs-primary, #137cbd);
+  outline-offset: -2px;
+  background: rgba(13, 110, 253, 0.1);
+}
+
+.th-node.th-copied > .th-node-content {
+  outline: 2px dashed var(--bs-success, #198754);
+  outline-offset: -2px;
+}
