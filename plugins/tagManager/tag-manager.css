@@ -128,7 +128,7 @@
 
 .tm-tag-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* Changed from center - allows multi-line aliases */
   justify-content: space-between;
   padding: 12px 16px;
   background: var(--bs-secondary-bg, #2d2d44);
@@ -141,6 +141,8 @@
   flex-direction: column;
   gap: 4px;
   min-width: 200px;
+  flex: 1; /* Take available space */
+  max-width: 50%; /* Don't push match section off */
 }
 
 .tm-tag-name {
@@ -158,13 +160,16 @@
 .tm-tag-aliases {
   font-size: 0.85em;
   color: var(--bs-secondary-color, #888);
+  word-break: break-word; /* Allow long aliases to wrap */
+  line-height: 1.4;
 }
 
 .tm-tag-match {
   display: flex;
   align-items: center;
   gap: 12px;
-  flex-wrap: wrap;
+  flex-shrink: 0; /* Don't shrink - keep buttons full size */
+  flex-wrap: nowrap; /* Keep match info and buttons on same line */
 }
 
 .tm-match {
@@ -207,7 +212,8 @@
 
 .tm-actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
+  flex-shrink: 0; /* Keep buttons full size */
 }
 
 .tm-no-match {
@@ -751,7 +757,6 @@
   color: var(--bs-secondary-color, #aaa);
 }
 
-<<<<<<< HEAD
 /* Category/Parent Tag Section */
 .tm-category-section {
   display: flex;
@@ -1277,4 +1282,105 @@
     opacity: 0;
     transform: translateY(-20px);
   }
+}
+
+/* Match dialog selection indicators */
+.tm-diff-value {
+  padding: 8px 12px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.tm-diff-value.selected {
+  background: rgba(25, 135, 84, 0.15);
+  outline: 2px solid var(--bs-success, #198754);
+  outline-offset: -2px;
+}
+
+.tm-diff-value.selected::after {
+  content: '\2713';
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--bs-success, #198754);
+  font-weight: bold;
+}
+
+.tm-diff-value:not(.selected) {
+  opacity: 0.6;
+}
+
+/* Difference highlighting */
+.tm-diff-char {
+  background: rgba(255, 193, 7, 0.3);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.tm-diff-identical {
+  color: var(--bs-success, #198754);
+  font-size: 0.85em;
+  font-style: italic;
+}
+
+/* Improved alias handling - two-column checkbox layout */
+.tm-alias-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.tm-alias-column {
+  background: var(--bs-tertiary-bg, #3d3d5c);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.tm-alias-column-header {
+  font-weight: 500;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--bs-border-color, #444);
+}
+
+.tm-alias-checkbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.tm-alias-checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tm-alias-checkbox-item input[type="checkbox"] {
+  flex-shrink: 0;
+}
+
+.tm-alias-checkbox-item label {
+  word-break: break-word;
+  cursor: pointer;
+}
+
+.tm-alias-checkbox-item.new-from-other {
+  color: var(--bs-info, #0dcaf0);
+  font-style: italic;
+}
+
+.tm-final-aliases-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--bs-border-color, #444);
+}
+
+.tm-final-aliases-header {
+  font-weight: 500;
+  margin-bottom: 8px;
 }
