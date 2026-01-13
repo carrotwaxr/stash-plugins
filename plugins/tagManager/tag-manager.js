@@ -517,6 +517,76 @@
   }
 
   /**
+   * Handle importing selected StashDB tags
+   */
+  async function handleImportSelected(container) {
+    if (selectedForImport.size === 0) return;
+
+    const statusEl = container.querySelector('.tm-selection-info');
+    const btnEl = container.querySelector('#tm-import-selected');
+
+    if (statusEl) statusEl.textContent = 'Importing...';
+    if (btnEl) btnEl.disabled = true;
+
+    let imported = 0;
+    let errors = 0;
+
+    for (const stashdbId of selectedForImport) {
+      const stashdbTag = stashdbTags.find(t => t.id === stashdbId);
+      if (!stashdbTag) continue;
+
+      try {
+        // Create local tag with stash_id
+        const input = {
+          name: stashdbTag.name,
+          description: stashdbTag.description || '',
+          aliases: stashdbTag.aliases || [],
+          stash_ids: [{
+            endpoint: selectedStashBox.endpoint,
+            stash_id: stashdbId
+          }]
+        };
+
+        const query = `
+          mutation TagCreate($input: TagCreateInput!) {
+            tagCreate(input: $input) {
+              id
+              name
+            }
+          }
+        `;
+
+        const data = await graphqlRequest(query, { input });
+        if (data?.tagCreate) {
+          // Add to local tags
+          localTags.push({
+            id: data.tagCreate.id,
+            name: data.tagCreate.name,
+            aliases: stashdbTag.aliases || [],
+            stash_ids: input.stash_ids
+          });
+          imported++;
+        }
+      } catch (e) {
+        console.error(`[tagManager] Failed to import "${stashdbTag.name}":`, e);
+        errors++;
+      }
+    }
+
+    // Clear selection and re-render
+    selectedForImport.clear();
+
+    const message = errors > 0
+      ? `Imported ${imported} tag${imported !== 1 ? 's' : ''}, ${errors} error${errors !== 1 ? 's' : ''}`
+      : `Imported ${imported} tag${imported !== 1 ? 's' : ''}`;
+
+    if (statusEl) statusEl.textContent = message;
+
+    // Re-render after short delay to show message
+    setTimeout(() => renderPage(container), 1500);
+  }
+
+  /**
    * Check if a StashDB tag already exists locally
    */
   function findLocalTagByStashId(stashdbId) {
