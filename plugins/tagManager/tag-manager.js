@@ -390,6 +390,94 @@
   }
 
   /**
+   * Sanitize aliases before saving - removes the final name from alias set
+   * to prevent self-referential aliases (tag can't have its own name as alias).
+   *
+   * @param {Set} aliases - The editable aliases set
+   * @param {string} finalName - The name the tag will have after save
+   * @param {string} currentLocalName - The tag's current local name
+   * @returns {string[]} - Cleaned array of aliases
+   */
+  function sanitizeAliasesForSave(aliases, finalName, currentLocalName) {
+    const cleaned = new Set(aliases);
+
+    // Remove final name (can't alias yourself)
+    cleaned.forEach(alias => {
+      if (alias.toLowerCase() === finalName.toLowerCase()) {
+        cleaned.delete(alias);
+      }
+    });
+
+    // If keeping local name, also ensure it's not in aliases
+    if (finalName.toLowerCase() === currentLocalName.toLowerCase()) {
+      cleaned.forEach(alias => {
+        if (alias.toLowerCase() === currentLocalName.toLowerCase()) {
+          cleaned.delete(alias);
+        }
+      });
+    }
+
+    return Array.from(cleaned);
+  }
+
+  /**
+   * Find a local tag that conflicts with a given name (as name or alias).
+   * Used for pre-validation before saving.
+   *
+   * @param {string} name - The name to check for conflicts
+   * @param {string} excludeTagId - Tag ID to exclude from search (the tag being edited)
+   * @returns {object|null} - The conflicting tag or null
+   */
+  function findConflictingTag(name, excludeTagId) {
+    const lowerName = name.toLowerCase();
+    return localTags.find(t =>
+      t.id !== excludeTagId && (
+        t.name.toLowerCase() === lowerName ||
+        t.aliases?.some(a => a.toLowerCase() === lowerName)
+      )
+    ) || null;
+  }
+
+  /**
+   * Validate tag update before attempting to save.
+   * Checks for name and alias conflicts with other local tags.
+   *
+   * @param {string} finalName - The name the tag will have
+   * @param {string[]} aliases - The aliases to save
+   * @param {string} currentTagId - The ID of the tag being edited
+   * @returns {object[]} - Array of error objects, empty if valid
+   */
+  function validateBeforeSave(finalName, aliases, currentTagId) {
+    const errors = [];
+
+    // Check if final name conflicts with another tag
+    const nameConflict = findConflictingTag(finalName, currentTagId);
+    if (nameConflict) {
+      errors.push({
+        type: 'name_conflict',
+        field: 'name',
+        value: finalName,
+        conflictsWith: nameConflict
+      });
+    }
+
+    // Check each alias for conflicts
+    for (const alias of aliases) {
+      const aliasConflict = findConflictingTag(alias, currentTagId);
+      if (aliasConflict) {
+        errors.push({
+          type: 'alias_conflict',
+          field: 'alias',
+          value: alias,
+          conflictsWith: aliasConflict
+        });
+      }
+    }
+
+    return errors;
+  }
+
+  /**
    * Get filtered tags based on current filter setting
    */
   function getFilteredTags() {
@@ -863,10 +951,21 @@
     modal.querySelector('.tm-apply-btn').addEventListener('click', async () => {
       const nameChoice = modal.querySelector('input[name="tm-name"]:checked').value;
       const descChoice = modal.querySelector('input[name="tm-desc"]:checked').value;
+      const errorEl = modal.querySelector('#tm-diff-error');
+
+      // Hide any previous error
+      errorEl.style.display = 'none';
+      errorEl.innerHTML = '';
 
       // Use the selected stash-box endpoint
       const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
       console.debug(`[tagManager] Saving stash_id with endpoint: ${endpoint}`);
+
+      // Determine final name
+      const finalName = nameChoice === 'stashdb' ? stashdbTag.name : tag.name;
+
+      // Sanitize aliases - remove final name to prevent self-referential alias
+      const sanitizedAliases = sanitizeAliasesForSave(editableAliases, finalName, tag.name);
 
       // Build update input
       const updateInput = {
@@ -885,8 +984,68 @@
         updateInput.description = stashdbTag.description || '';
       }
 
-      // Use the edited aliases directly (user has full control via pill UI)
-      updateInput.aliases = Array.from(editableAliases);
+      // Use sanitized aliases
+      updateInput.aliases = sanitizedAliases;
+
+      // Pre-validation: check for conflicts before hitting API
+      const validationErrors = validateBeforeSave(finalName, sanitizedAliases, tag.id);
+      if (validationErrors.length > 0) {
+        const err = validationErrors[0]; // Show first error
+        const conflictTag = err.conflictsWith;
+
+        if (err.type === 'name_conflict') {
+          errorEl.innerHTML = `
+            <div class="tm-error-message">
+              Cannot rename to "${escapeHtml(err.value)}" - this name already exists.
+            </div>
+            <div class="tm-error-actions">
+              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+                Edit "${escapeHtml(conflictTag.name)}"
+              </a>
+              <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
+                Keep local name instead
+              </button>
+            </div>
+          `;
+        } else {
+          errorEl.innerHTML = `
+            <div class="tm-error-message">
+              Alias "${escapeHtml(err.value)}" conflicts with tag "${escapeHtml(conflictTag.name)}".
+            </div>
+            <div class="tm-error-actions">
+              <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(err.value)}">
+                Remove from aliases
+              </button>
+              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+                Edit "${escapeHtml(conflictTag.name)}"
+              </a>
+            </div>
+          `;
+        }
+
+        errorEl.style.display = 'block';
+
+        // Attach action handlers
+        const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
+        if (keepLocalBtn) {
+          keepLocalBtn.addEventListener('click', () => {
+            modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
+            errorEl.style.display = 'none';
+          });
+        }
+
+        const removeAliasBtn = errorEl.querySelector('.tm-error-remove-alias');
+        if (removeAliasBtn) {
+          removeAliasBtn.addEventListener('click', () => {
+            const aliasToRemove = removeAliasBtn.dataset.alias;
+            editableAliases.delete(aliasToRemove);
+            renderAliasPills();
+            errorEl.style.display = 'none';
+          });
+        }
+
+        return; // Don't proceed with save
+      }
 
       try {
         await updateTag(updateInput);
@@ -905,17 +1064,78 @@
         showStatus(`Matched "${tag.name}" to "${stashdbTag.name}"`, 'success');
         renderPage(container);
       } catch (e) {
-        const errorEl = modal.querySelector('#tm-diff-error');
-        if (errorEl) {
-          // Parse error message for friendlier display
-          let errorMsg = e.message;
-          const aliasConflictMatch = errorMsg.match(/tag with name '([^']+)' already exists/i);
-          if (aliasConflictMatch) {
-            errorMsg = `Cannot save: "${aliasConflictMatch[1]}" conflicts with an existing tag name. Remove it from aliases to continue.`;
-          }
-          errorEl.textContent = errorMsg;
+        console.error('[tagManager] Save error:', e.message);
+
+        // Parse "tag with name 'X' already exists"
+        const nameExistsMatch = e.message.match(/tag with name '([^']+)' already exists/i);
+        if (nameExistsMatch) {
+          const conflictName = nameExistsMatch[1];
+          const conflictTag = findConflictingTag(conflictName, tag.id);
+
+          errorEl.innerHTML = `
+            <div class="tm-error-message">
+              Cannot save: "${escapeHtml(conflictName)}" conflicts with an existing tag.
+            </div>
+            <div class="tm-error-actions">
+              ${conflictTag ? `
+                <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+                  Edit "${escapeHtml(conflictTag.name)}"
+                </a>
+              ` : ''}
+              <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(conflictName)}">
+                Remove from aliases
+              </button>
+            </div>
+          `;
           errorEl.style.display = 'block';
+
+          const removeBtn = errorEl.querySelector('.tm-error-remove-alias');
+          if (removeBtn) {
+            removeBtn.addEventListener('click', () => {
+              editableAliases.delete(removeBtn.dataset.alias);
+              renderAliasPills();
+              errorEl.style.display = 'none';
+            });
+          }
+          return;
         }
+
+        // Parse "name 'X' is used as alias for 'Y'"
+        const aliasUsedMatch = e.message.match(/name '([^']+)' is used as alias for '([^']+)'/i);
+        if (aliasUsedMatch) {
+          const [, conflictName, otherTagName] = aliasUsedMatch;
+          const otherTag = localTags.find(t => t.name === otherTagName);
+
+          errorEl.innerHTML = `
+            <div class="tm-error-message">
+              Cannot use "${escapeHtml(conflictName)}" - it's an alias on "${escapeHtml(otherTagName)}".
+            </div>
+            <div class="tm-error-actions">
+              ${otherTag ? `
+                <a href="/tags/${otherTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+                  Edit "${escapeHtml(otherTagName)}"
+                </a>
+              ` : ''}
+              <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
+                Keep local name instead
+              </button>
+            </div>
+          `;
+          errorEl.style.display = 'block';
+
+          const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
+          if (keepLocalBtn) {
+            keepLocalBtn.addEventListener('click', () => {
+              modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
+              errorEl.style.display = 'none';
+            });
+          }
+          return;
+        }
+
+        // Fallback for unknown errors
+        errorEl.innerHTML = `<div class="tm-error-message">${escapeHtml(e.message)}</div>`;
+        errorEl.style.display = 'block';
       }
     });
   }
