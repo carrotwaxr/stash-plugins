@@ -27,6 +27,7 @@
   let isCacheLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
+  let categoryMappings = {}; // Cache of category_name -> local_tag_id
 
   /**
    * Set page title with retry to overcome Stash's title management
@@ -128,6 +129,59 @@
       });
     } catch (e) {
       console.error("[tagManager] Failed to load settings:", e);
+    }
+  }
+
+  /**
+   * Load category mappings from plugin settings
+   */
+  async function loadCategoryMappings() {
+    try {
+      const query = `
+        query Configuration {
+          configuration {
+            plugins
+          }
+        }
+      `;
+      const data = await graphqlRequest(query);
+      const pluginConfig = data?.configuration?.plugins?.[PLUGIN_ID] || {};
+
+      // Parse JSON string from settings
+      if (pluginConfig.categoryMappings) {
+        try {
+          categoryMappings = JSON.parse(pluginConfig.categoryMappings);
+          console.debug("[tagManager] Loaded category mappings:", Object.keys(categoryMappings).length);
+        } catch (e) {
+          console.warn("[tagManager] Failed to parse category mappings:", e);
+          categoryMappings = {};
+        }
+      }
+    } catch (e) {
+      console.error("[tagManager] Failed to load category mappings:", e);
+    }
+  }
+
+  /**
+   * Save category mappings to plugin settings
+   */
+  async function saveCategoryMappings() {
+    try {
+      const query = `
+        mutation ConfigurePlugin($plugin_id: ID!, $input: Map!) {
+          configurePlugin(plugin_id: $plugin_id, input: $input)
+        }
+      `;
+
+      await graphqlRequest(query, {
+        plugin_id: PLUGIN_ID,
+        input: {
+          categoryMappings: JSON.stringify(categoryMappings)
+        }
+      });
+      console.debug("[tagManager] Saved category mappings");
+    } catch (e) {
+      console.error("[tagManager] Failed to save category mappings:", e);
     }
   }
 
@@ -478,6 +532,56 @@
   }
 
   /**
+   * Find local tags that could be parent tags for a given category name.
+   * Searches by exact match, alias match, and fuzzy match.
+   *
+   * @param {string} categoryName - The StashDB category name to match
+   * @returns {object[]} - Array of { tag, matchType, score } sorted by relevance
+   */
+  function findLocalParentMatches(categoryName) {
+    if (!categoryName) return [];
+
+    const lowerCategoryName = categoryName.toLowerCase();
+    const matches = [];
+
+    for (const tag of localTags) {
+      // Skip tags that are children (have parents) - they're less likely to be category tags
+      // But don't skip completely, just deprioritize
+      const isChild = tag.parent_count > 0;
+
+      // Exact name match
+      if (tag.name.toLowerCase() === lowerCategoryName) {
+        matches.push({ tag, matchType: 'exact', score: isChild ? 95 : 100 });
+        continue;
+      }
+
+      // Name contains category (e.g., "CATEGORY: Action" contains "Action")
+      if (tag.name.toLowerCase().includes(lowerCategoryName)) {
+        matches.push({ tag, matchType: 'contains', score: isChild ? 85 : 90 });
+        continue;
+      }
+
+      // Alias match
+      if (tag.aliases?.some(a => a.toLowerCase() === lowerCategoryName)) {
+        matches.push({ tag, matchType: 'alias', score: isChild ? 80 : 85 });
+        continue;
+      }
+
+      // Fuzzy match on name (simple: starts with same letters)
+      if (tag.name.toLowerCase().startsWith(lowerCategoryName.slice(0, 3)) &&
+          tag.name.length < categoryName.length + 5) {
+        matches.push({ tag, matchType: 'fuzzy', score: isChild ? 60 : 70 });
+      }
+    }
+
+    // Sort by score descending
+    matches.sort((a, b) => b.score - a.score);
+
+    // Limit to top 5
+    return matches.slice(0, 5);
+  }
+
+  /**
    * Get filtered tags based on current filter setting
    */
   function getFilteredTags() {
@@ -812,6 +916,26 @@
     // Alias editing state - start with merged aliases
     let editableAliases = new Set([...(tag.aliases || []), ...(stashdbTag.aliases || [])]);
 
+    // Category/parent state
+    const hasCategory = !!stashdbTag.category?.name;
+    let selectedParentId = null;
+    let createParentIfMissing = true;
+    let parentMatches = [];
+
+    if (hasCategory) {
+      // Check for saved mapping first
+      const savedMapping = categoryMappings[stashdbTag.category.name];
+      if (savedMapping) {
+        selectedParentId = savedMapping;
+      } else {
+        // Find local matches
+        parentMatches = findLocalParentMatches(stashdbTag.category.name);
+        if (parentMatches.length > 0) {
+          selectedParentId = parentMatches[0].tag.id;
+        }
+      }
+    }
+
     // Function to render alias pills
     function renderAliasPills() {
       const pillsContainer = modal.querySelector('#tm-alias-pills');
@@ -836,6 +960,87 @@
           editableAliases.delete(aliasToRemove);
           renderAliasPills();
         });
+      });
+    }
+
+    // Parent tag search modal
+    function showParentSearchModal() {
+      const searchModal = document.createElement('div');
+      searchModal.className = 'tm-modal-backdrop tm-search-modal';
+      searchModal.innerHTML = `
+        <div class="tm-modal tm-modal-small">
+          <div class="tm-modal-header">
+            <h3>Search Parent Tag</h3>
+            <button class="tm-close-btn">&times;</button>
+          </div>
+          <div class="tm-modal-body">
+            <input type="text" id="tm-parent-search-input" class="form-control"
+                   placeholder="Search tags..." value="${escapeHtml(stashdbTag.category?.name || '')}">
+            <div class="tm-search-results" id="tm-parent-search-results">
+              <div class="tm-loading">Type to search...</div>
+            </div>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(searchModal);
+
+      const input = searchModal.querySelector('#tm-parent-search-input');
+      const resultsEl = searchModal.querySelector('#tm-parent-search-results');
+
+      function doSearch() {
+        const term = input.value.trim().toLowerCase();
+        if (!term) {
+          resultsEl.innerHTML = '<div class="tm-loading">Type to search...</div>';
+          return;
+        }
+
+        const matches = localTags.filter(t =>
+          t.name.toLowerCase().includes(term) ||
+          t.aliases?.some(a => a.toLowerCase().includes(term))
+        ).slice(0, 10);
+
+        if (matches.length === 0) {
+          resultsEl.innerHTML = '<div class="tm-no-matches">No matching tags found</div>';
+          return;
+        }
+
+        resultsEl.innerHTML = matches.map(t => `
+          <div class="tm-search-result" data-tag-id="${t.id}">
+            <span class="tm-result-name">${escapeHtml(t.name)}</span>
+            ${t.aliases?.length ? `<span class="tm-result-aliases">${escapeHtml(t.aliases.slice(0, 3).join(', '))}</span>` : ''}
+          </div>
+        `).join('');
+
+        resultsEl.querySelectorAll('.tm-search-result').forEach(el => {
+          el.addEventListener('click', () => {
+            const tagId = el.dataset.tagId;
+            const tag = localTags.find(t => t.id === tagId);
+            if (tag) {
+              // Update the parent select
+              const select = modal.querySelector('#tm-parent-select');
+              // Add option if not present
+              if (!select.querySelector(`option[value="${tagId}"]`)) {
+                const option = document.createElement('option');
+                option.value = tagId;
+                option.textContent = tag.name;
+                select.appendChild(option);
+              }
+              select.value = tagId;
+              selectedParentId = tagId;
+            }
+            searchModal.remove();
+          });
+        });
+      }
+
+      input.addEventListener('input', doSearch);
+      input.focus();
+      doSearch();
+
+      searchModal.querySelector('.tm-close-btn').addEventListener('click', () => searchModal.remove());
+      searchModal.addEventListener('click', (e) => {
+        if (e.target === searchModal) searchModal.remove();
       });
     }
 
@@ -892,6 +1097,37 @@
                   <div class="tm-alias-pills" id="tm-alias-pills"></div>
                 </td>
               </tr>
+              ${hasCategory ? `
+              <tr>
+                <td>Parent Tag</td>
+                <td colspan="3">
+                  <div class="tm-category-section">
+                    <div class="tm-category-info">
+                      <span class="tm-category-label">StashDB Category:</span>
+                      <span class="tm-category-name">${escapeHtml(stashdbTag.category.name)}</span>
+                    </div>
+                    <div class="tm-parent-select">
+                      <select id="tm-parent-select" class="form-control">
+                        <option value="">-- No parent --</option>
+                        <option value="__create__" ${!selectedParentId ? 'selected' : ''}>Create "${escapeHtml(stashdbTag.category.name)}"</option>
+                        ${parentMatches.map(m => `
+                          <option value="${m.tag.id}" ${selectedParentId === m.tag.id ? 'selected' : ''}>
+                            ${escapeHtml(m.tag.name)} (${m.matchType})
+                          </option>
+                        `).join('')}
+                      </select>
+                      <button type="button" class="btn btn-secondary btn-sm" id="tm-parent-search-btn">Search...</button>
+                    </div>
+                    <div class="tm-parent-remember">
+                      <label>
+                        <input type="checkbox" id="tm-remember-mapping" checked>
+                        Remember this mapping
+                      </label>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+              ` : ''}
             </tbody>
           </table>
 
@@ -911,6 +1147,21 @@
 
     // Initialize alias pills
     renderAliasPills();
+
+    // Parent selection handlers (if category exists)
+    if (hasCategory) {
+      const parentSelect = modal.querySelector('#tm-parent-select');
+      if (parentSelect) {
+        parentSelect.addEventListener('change', (e) => {
+          selectedParentId = e.target.value === '' ? null : e.target.value;
+        });
+      }
+
+      const searchBtn = modal.querySelector('#tm-parent-search-btn');
+      if (searchBtn) {
+        searchBtn.addEventListener('click', showParentSearchModal);
+      }
+    }
 
     // When name choice changes, update aliases if needed
     modal.querySelectorAll('input[name="tm-name"]').forEach(radio => {
@@ -986,6 +1237,40 @@
 
       // Use sanitized aliases
       updateInput.aliases = sanitizedAliases;
+
+      // Handle parent tag from category
+      let parentTagId = null;
+      if (hasCategory && selectedParentId) {
+        if (selectedParentId === '__create__') {
+          // Create the parent tag
+          try {
+            const newParent = await createTag({ name: stashdbTag.category.name });
+            parentTagId = newParent.id;
+            // Add to localTags for future reference
+            localTags.push({ id: newParent.id, name: newParent.name, aliases: [] });
+            console.debug(`[tagManager] Created parent tag: ${newParent.name}`);
+          } catch (e) {
+            console.error('[tagManager] Failed to create parent tag:', e);
+            errorEl.innerHTML = `<div class="tm-error-message">Failed to create parent tag: ${escapeHtml(e.message)}</div>`;
+            errorEl.style.display = 'block';
+            return;
+          }
+        } else {
+          parentTagId = selectedParentId;
+        }
+
+        // Set parent_ids on the update input
+        if (parentTagId) {
+          updateInput.parent_ids = [parentTagId];
+        }
+
+        // Save mapping if checkbox is checked
+        const rememberCheckbox = modal.querySelector('#tm-remember-mapping');
+        if (rememberCheckbox?.checked && parentTagId) {
+          categoryMappings[stashdbTag.category.name] = parentTagId;
+          saveCategoryMappings(); // Fire and forget
+        }
+      }
 
       // Pre-validation: check for conflicts before hitting API
       const validationErrors = validateBeforeSave(finalName, sanitizedAliases, tag.id);
@@ -1162,6 +1447,23 @@
   }
 
   /**
+   * Create a new tag via GraphQL
+   */
+  async function createTag(input) {
+    const query = `
+      mutation TagCreate($input: TagCreateInput!) {
+        tagCreate(input: $input) {
+          id
+          name
+        }
+      }
+    `;
+
+    const data = await graphqlRequest(query, { input });
+    return data?.tagCreate;
+  }
+
+  /**
    * Show modal with all matches for manual selection
    */
   function showMatchesModal(tagId, container) {
@@ -1307,6 +1609,7 @@
         containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
 
         await loadSettings();
+        await loadCategoryMappings();
 
         // Check if any stash-box is configured
         if (stashBoxes.length === 0) {
