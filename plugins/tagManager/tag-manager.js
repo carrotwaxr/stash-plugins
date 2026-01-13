@@ -390,6 +390,37 @@
   }
 
   /**
+   * Sanitize aliases before saving - removes the final name from alias set
+   * to prevent self-referential aliases (tag can't have its own name as alias).
+   *
+   * @param {Set} aliases - The editable aliases set
+   * @param {string} finalName - The name the tag will have after save
+   * @param {string} currentLocalName - The tag's current local name
+   * @returns {string[]} - Cleaned array of aliases
+   */
+  function sanitizeAliasesForSave(aliases, finalName, currentLocalName) {
+    const cleaned = new Set(aliases);
+
+    // Remove final name (can't alias yourself)
+    cleaned.forEach(alias => {
+      if (alias.toLowerCase() === finalName.toLowerCase()) {
+        cleaned.delete(alias);
+      }
+    });
+
+    // If keeping local name, also ensure it's not in aliases
+    if (finalName.toLowerCase() === currentLocalName.toLowerCase()) {
+      cleaned.forEach(alias => {
+        if (alias.toLowerCase() === currentLocalName.toLowerCase()) {
+          cleaned.delete(alias);
+        }
+      });
+    }
+
+    return Array.from(cleaned);
+  }
+
+  /**
    * Get filtered tags based on current filter setting
    */
   function getFilteredTags() {
