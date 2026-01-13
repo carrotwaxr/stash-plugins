@@ -963,6 +963,87 @@
       });
     }
 
+    // Parent tag search modal
+    function showParentSearchModal() {
+      const searchModal = document.createElement('div');
+      searchModal.className = 'tm-modal-backdrop tm-search-modal';
+      searchModal.innerHTML = `
+        <div class="tm-modal tm-modal-small">
+          <div class="tm-modal-header">
+            <h3>Search Parent Tag</h3>
+            <button class="tm-close-btn">&times;</button>
+          </div>
+          <div class="tm-modal-body">
+            <input type="text" id="tm-parent-search-input" class="form-control"
+                   placeholder="Search tags..." value="${escapeHtml(stashdbTag.category?.name || '')}">
+            <div class="tm-search-results" id="tm-parent-search-results">
+              <div class="tm-loading">Type to search...</div>
+            </div>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(searchModal);
+
+      const input = searchModal.querySelector('#tm-parent-search-input');
+      const resultsEl = searchModal.querySelector('#tm-parent-search-results');
+
+      function doSearch() {
+        const term = input.value.trim().toLowerCase();
+        if (!term) {
+          resultsEl.innerHTML = '<div class="tm-loading">Type to search...</div>';
+          return;
+        }
+
+        const matches = localTags.filter(t =>
+          t.name.toLowerCase().includes(term) ||
+          t.aliases?.some(a => a.toLowerCase().includes(term))
+        ).slice(0, 10);
+
+        if (matches.length === 0) {
+          resultsEl.innerHTML = '<div class="tm-no-matches">No matching tags found</div>';
+          return;
+        }
+
+        resultsEl.innerHTML = matches.map(t => `
+          <div class="tm-search-result" data-tag-id="${t.id}">
+            <span class="tm-result-name">${escapeHtml(t.name)}</span>
+            ${t.aliases?.length ? `<span class="tm-result-aliases">${escapeHtml(t.aliases.slice(0, 3).join(', '))}</span>` : ''}
+          </div>
+        `).join('');
+
+        resultsEl.querySelectorAll('.tm-search-result').forEach(el => {
+          el.addEventListener('click', () => {
+            const tagId = el.dataset.tagId;
+            const tag = localTags.find(t => t.id === tagId);
+            if (tag) {
+              // Update the parent select
+              const select = modal.querySelector('#tm-parent-select');
+              // Add option if not present
+              if (!select.querySelector(`option[value="${tagId}"]`)) {
+                const option = document.createElement('option');
+                option.value = tagId;
+                option.textContent = tag.name;
+                select.appendChild(option);
+              }
+              select.value = tagId;
+              selectedParentId = tagId;
+            }
+            searchModal.remove();
+          });
+        });
+      }
+
+      input.addEventListener('input', doSearch);
+      input.focus();
+      doSearch();
+
+      searchModal.querySelector('.tm-close-btn').addEventListener('click', () => searchModal.remove());
+      searchModal.addEventListener('click', (e) => {
+        if (e.target === searchModal) searchModal.remove();
+      });
+    }
+
     const modal = document.createElement('div');
     modal.className = 'tm-modal-backdrop';
     modal.innerHTML = `
