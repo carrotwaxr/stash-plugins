@@ -926,3 +926,14 @@
   text-align: center;
   color: var(--bs-secondary-color, #888);
 }
+
+/* Selection controls */
+.tm-selection-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tm-selection-controls .tm-selection-info {
+  margin-left: 10px;
+}
