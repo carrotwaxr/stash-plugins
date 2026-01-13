@@ -1365,6 +1365,86 @@
   let hierarchyStats = {};
   let showImages = true;
   let expandedNodes = new Set();
+  let contextMenuTag = null;
+  let contextMenuParentId = null;
+
+  /**
+   * Show context menu for a tag node
+   */
+  function showContextMenu(x, y, tagId, parentId) {
+    hideContextMenu();
+    contextMenuTag = hierarchyTags.find(t => t.id === tagId);
+    contextMenuParentId = parentId;
+    if (!contextMenuTag) return;
+
+    const menu = document.createElement('div');
+    menu.className = 'th-context-menu';
+    menu.id = 'th-context-menu';
+
+    const hasParents = contextMenuTag.parents && contextMenuTag.parents.length > 0;
+    const isUnderParent = parentId !== null;
+
+    let menuHtml = `
+      <div class="th-context-menu-item" data-action="add-parent">Add parent...</div>
+      <div class="th-context-menu-item" data-action="add-child">Add child...</div>
+    `;
+
+    if (isUnderParent) {
+      const parentTag = hierarchyTags.find(t => t.id === parentId);
+      const parentName = parentTag ? parentTag.name : 'parent';
+      menuHtml += `<div class="th-context-menu-separator"></div>`;
+      menuHtml += `<div class="th-context-menu-item" data-action="remove-parent" data-parent-id="${parentId}">Remove from "${escapeHtml(parentName)}"</div>`;
+    }
+
+    if (hasParents) {
+      menuHtml += `<div class="th-context-menu-item" data-action="make-root">Make root (remove all parents)</div>`;
+    }
+
+    menu.innerHTML = menuHtml;
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+
+    document.body.appendChild(menu);
+
+    // Position adjustment if off-screen
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+      menu.style.left = `${window.innerWidth - rect.width - 10}px`;
+    }
+    if (rect.bottom > window.innerHeight) {
+      menu.style.top = `${window.innerHeight - rect.height - 10}px`;
+    }
+
+    // Click handlers
+    menu.querySelectorAll('.th-context-menu-item:not(.disabled)').forEach(item => {
+      item.addEventListener('click', handleContextMenuAction);
+    });
+
+    // Close on click outside
+    setTimeout(() => {
+      document.addEventListener('click', hideContextMenu, { once: true });
+    }, 0);
+  }
+
+  /**
+   * Hide context menu
+   */
+  function hideContextMenu() {
+    const menu = document.getElementById('th-context-menu');
+    if (menu) menu.remove();
+    contextMenuTag = null;
+    contextMenuParentId = null;
+  }
+
+  /**
+   * Handle context menu action (placeholder - actions implemented in Task 2)
+   */
+  function handleContextMenuAction(e) {
+    const action = e.target.dataset.action;
+    console.debug('[tagManager] Context menu action:', action);
+    hideContextMenu();
+    // Actions will be implemented in Task 2
+  }
 
   /**
    * Render a single tree node
@@ -1518,6 +1598,16 @@
         });
       });
     }
+
+    // Context menu on right-click
+    container.querySelectorAll('.th-node').forEach(node => {
+      node.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        const tagId = node.dataset.tagId;
+        const parentId = node.closest('.th-children')?.dataset.parentId || null;
+        showContextMenu(e.clientX, e.clientY, tagId, parentId);
+      });
+    });
   }
 
   /**
