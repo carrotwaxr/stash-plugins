@@ -517,6 +517,98 @@
   }
 
   /**
+   * Render the browse/import view
+   */
+  function renderBrowseView() {
+    if (!stashdbTags || stashdbTags.length === 0) {
+      return `
+        <div class="tm-browse-empty">
+          <p>No StashDB tags cached. Click "Refresh Cache" above to load tags.</p>
+        </div>
+      `;
+    }
+
+    // Group tags by category
+    const categories = {};
+    const uncategorized = [];
+
+    for (const tag of stashdbTags) {
+      const catName = tag.category?.name || null;
+      if (catName) {
+        if (!categories[catName]) {
+          categories[catName] = [];
+        }
+        categories[catName].push(tag);
+      } else {
+        uncategorized.push(tag);
+      }
+    }
+
+    // Sort categories alphabetically
+    const sortedCategories = Object.keys(categories).sort();
+
+    // Build category list
+    const categoryList = sortedCategories.map(cat => {
+      const count = categories[cat].length;
+      const isSelected = browseCategory === cat;
+      return `<div class="tm-category-item ${isSelected ? 'tm-category-active' : ''}" data-category="${escapeHtml(cat)}">
+        <span class="tm-category-name">${escapeHtml(cat)}</span>
+        <span class="tm-category-count">${count}</span>
+      </div>`;
+    }).join('');
+
+    // Add uncategorized if any
+    const uncategorizedItem = uncategorized.length > 0
+      ? `<div class="tm-category-item ${browseCategory === '__uncategorized__' ? 'tm-category-active' : ''}" data-category="__uncategorized__">
+          <span class="tm-category-name">Uncategorized</span>
+          <span class="tm-category-count">${uncategorized.length}</span>
+        </div>`
+      : '';
+
+    // Render tag list for selected category
+    let tagListHtml = '';
+    if (browseCategory) {
+      const tagsToShow = browseCategory === '__uncategorized__'
+        ? uncategorized
+        : (categories[browseCategory] || []);
+
+      tagListHtml = renderBrowseTagList(tagsToShow);
+    } else {
+      tagListHtml = `<div class="tm-browse-hint">Select a category to view tags</div>`;
+    }
+
+    const selectedCount = selectedForImport.size;
+
+    return `
+      <div class="tm-browse">
+        <div class="tm-browse-sidebar">
+          <div class="tm-browse-sidebar-header">
+            <strong>Categories</strong>
+            <span class="tm-total-tags">${stashdbTags.length} total</span>
+          </div>
+          <div class="tm-category-list">
+            ${categoryList}
+            ${uncategorizedItem}
+          </div>
+        </div>
+        <div class="tm-browse-main">
+          <div class="tm-browse-toolbar">
+            <div class="tm-selection-info">
+              ${selectedCount > 0 ? `${selectedCount} tag${selectedCount > 1 ? 's' : ''} selected` : 'No tags selected'}
+            </div>
+            <button class="btn btn-primary" id="tm-import-selected" ${selectedCount === 0 ? 'disabled' : ''}>
+              Import Selected
+            </button>
+          </div>
+          <div class="tm-browse-tags">
+            ${tagListHtml}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
    * Render the main page content
    */
   function renderPage(container) {
