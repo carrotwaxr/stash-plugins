@@ -1237,8 +1237,14 @@
    */
   function showMatchesModal(tagId, container) {
     const tag = localTags.find(t => t.id === tagId);
-    const matches = matchResults[tagId];
+    let matches = matchResults[tagId];
     if (!tag) return;
+
+    // Filter out blacklisted matches
+    const originalCount = matches?.length || 0;
+    const filteredMatches = matches?.filter(m => !isBlacklisted(m.tag.name)) || [];
+    const hiddenCount = originalCount - filteredMatches.length;
+    matches = filteredMatches;
 
     const modal = document.createElement('div');
     modal.className = 'tm-modal-backdrop';
@@ -1246,6 +1252,7 @@
       <div class="tm-modal tm-modal-wide">
         <div class="tm-modal-header">
           <h3>Matches for: ${escapeHtml(tag.name)}</h3>
+          ${hiddenCount > 0 ? `<div class="tm-blacklist-notice">${hiddenCount} tag${hiddenCount > 1 ? 's' : ''} hidden by blacklist</div>` : ''}
           <button class="tm-close-btn">&times;</button>
         </div>
         <div class="tm-modal-body">
