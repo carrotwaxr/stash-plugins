@@ -439,6 +439,45 @@
   }
 
   /**
+   * Validate tag update before attempting to save.
+   * Checks for name and alias conflicts with other local tags.
+   *
+   * @param {string} finalName - The name the tag will have
+   * @param {string[]} aliases - The aliases to save
+   * @param {string} currentTagId - The ID of the tag being edited
+   * @returns {object[]} - Array of error objects, empty if valid
+   */
+  function validateBeforeSave(finalName, aliases, currentTagId) {
+    const errors = [];
+
+    // Check if final name conflicts with another tag
+    const nameConflict = findConflictingTag(finalName, currentTagId);
+    if (nameConflict) {
+      errors.push({
+        type: 'name_conflict',
+        field: 'name',
+        value: finalName,
+        conflictsWith: nameConflict
+      });
+    }
+
+    // Check each alias for conflicts
+    for (const alias of aliases) {
+      const aliasConflict = findConflictingTag(alias, currentTagId);
+      if (aliasConflict) {
+        errors.push({
+          type: 'alias_conflict',
+          field: 'alias',
+          value: alias,
+          conflictsWith: aliasConflict
+        });
+      }
+    }
+
+    return errors;
+  }
+
+  /**
    * Get filtered tags based on current filter setting
    */
   function getFilteredTags() {
