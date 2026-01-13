@@ -1804,6 +1804,12 @@
     }
     const metaText = metaParts.length > 0 ? metaParts.join(', ') : '';
 
+    // Multi-parent badge
+    const parentCount = node.parents?.length || 0;
+    const multiParentBadge = parentCount > 1
+      ? `<span class="th-multi-parent-badge" title="Appears under ${parentCount} parents">${parentCount} parents</span>`
+      : '';
+
     // Image HTML
     const imageHtml = node.image_path
       ? `<div class="th-image ${showImages ? '' : 'th-hidden'}">
@@ -1831,7 +1837,7 @@
           <span class="th-toggle ${hasChildren ? '' : 'th-leaf'}" data-tag-id="${node.id}">${toggleIcon}</span>
           ${imageHtml}
           <div class="th-info">
-            <a href="/tags/${node.id}" class="th-name">${escapeHtml(node.name)}</a>
+            <a href="/tags/${node.id}" class="th-name">${escapeHtml(node.name)}</a>${multiParentBadge}
             ${metaText ? `<div class="th-meta">${metaText}</div>` : ''}
           </div>
         </div>
@@ -1947,6 +1953,22 @@
         const tagId = node.dataset.tagId;
         const parentId = node.closest('.th-children')?.dataset.parentId || null;
         showContextMenu(e.clientX, e.clientY, tagId, parentId);
+      });
+    });
+
+    // Highlight all instances of a tag on hover
+    container.querySelectorAll('.th-node').forEach(node => {
+      node.addEventListener('mouseenter', () => {
+        const tagId = node.dataset.tagId;
+        container.querySelectorAll(`.th-node[data-tag-id="${tagId}"]`).forEach(n => {
+          n.classList.add('th-highlighted');
+        });
+      });
+
+      node.addEventListener('mouseleave', () => {
+        container.querySelectorAll('.th-node.th-highlighted').forEach(n => {
+          n.classList.remove('th-highlighted');
+        });
       });
     });
   }

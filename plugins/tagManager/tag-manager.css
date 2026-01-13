@@ -881,3 +881,19 @@
   text-align: center;
   color: var(--bs-secondary, #6c757d);
 }
+
+/* Multi-parent indicator */
+.th-multi-parent-badge {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: var(--bs-info, #0dcaf0);
+  color: var(--bs-dark, #212529);
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+.th-node.th-highlighted .th-node-content {
+  background: rgba(13, 202, 240, 0.15);
+  border-radius: 4px;
+}
