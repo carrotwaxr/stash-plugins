@@ -29,6 +29,9 @@
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
   let categoryMappings = {}; // Cache of category_name -> local_tag_id
   let tagBlacklist = []; // Parsed blacklist patterns [{type: 'literal'|'regex', pattern: string, regex?: RegExp}]
+  let activeTab = 'match'; // 'match' or 'browse'
+  let browseCategory = null; // Selected category in browse view
+  let selectedForImport = new Set(); // Tag IDs selected for import
 
   /**
    * Set page title with retry to overcome Stash's title management
@@ -689,6 +692,213 @@
   }
 
   /**
+   * Handle importing selected StashDB tags
+   */
+  async function handleImportSelected(container) {
+    if (selectedForImport.size === 0) return;
+
+    const statusEl = container.querySelector('.tm-selection-info');
+    const btnEl = container.querySelector('#tm-import-selected');
+
+    if (statusEl) statusEl.textContent = 'Importing...';
+    if (btnEl) btnEl.disabled = true;
+
+    let imported = 0;
+    let errors = 0;
+
+    for (const stashdbId of selectedForImport) {
+      const stashdbTag = stashdbTags.find(t => t.id === stashdbId);
+      if (!stashdbTag) continue;
+
+      try {
+        // Create local tag with stash_id
+        const input = {
+          name: stashdbTag.name,
+          description: stashdbTag.description || '',
+          aliases: stashdbTag.aliases || [],
+          stash_ids: [{
+            endpoint: selectedStashBox.endpoint,
+            stash_id: stashdbId
+          }]
+        };
+
+        const query = `
+          mutation TagCreate($input: TagCreateInput!) {
+            tagCreate(input: $input) {
+              id
+              name
+            }
+          }
+        `;
+
+        const data = await graphqlRequest(query, { input });
+        if (data?.tagCreate) {
+          // Add to local tags
+          localTags.push({
+            id: data.tagCreate.id,
+            name: data.tagCreate.name,
+            aliases: stashdbTag.aliases || [],
+            stash_ids: input.stash_ids
+          });
+          imported++;
+        }
+      } catch (e) {
+        console.error(`[tagManager] Failed to import "${stashdbTag.name}":`, e);
+        errors++;
+      }
+    }
+
+    // Clear selection and re-render
+    selectedForImport.clear();
+
+    const message = errors > 0
+      ? `Imported ${imported} tag${imported !== 1 ? 's' : ''}, ${errors} error${errors !== 1 ? 's' : ''}`
+      : `Imported ${imported} tag${imported !== 1 ? 's' : ''}`;
+
+    if (statusEl) statusEl.textContent = message;
+
+    // Re-render after short delay to show message
+    setTimeout(() => renderPage(container), 1500);
+  }
+
+  /**
+   * Check if a StashDB tag already exists locally
+   */
+  function findLocalTagByStashId(stashdbId) {
+    return localTags.find(t =>
+      t.stash_ids?.some(sid => sid.stash_id === stashdbId)
+    );
+  }
+
+  /**
+   * Render list of tags for browse/import view
+   */
+  function renderBrowseTagList(tags) {
+    if (!tags || tags.length === 0) {
+      return '<div class="tm-browse-empty">No tags in this category</div>';
+    }
+
+    const rows = tags.map(tag => {
+      const localTag = findLocalTagByStashId(tag.id);
+      const existsLocally = !!localTag;
+      const isSelected = selectedForImport.has(tag.id);
+
+      return `
+        <div class="tm-browse-tag ${existsLocally ? 'tm-exists-locally' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
+          <label class="tm-browse-checkbox">
+            <input type="checkbox" ${isSelected ? 'checked' : ''} ${existsLocally ? 'disabled' : ''}>
+          </label>
+          <div class="tm-browse-tag-info">
+            <span class="tm-browse-tag-name">${escapeHtml(tag.name)}</span>
+            ${tag.aliases?.length ? `<span class="tm-browse-tag-aliases">${escapeHtml(tag.aliases.slice(0, 3).join(', '))}</span>` : ''}
+          </div>
+          <div class="tm-browse-tag-status">
+            ${existsLocally ? `<span class="tm-local-exists" title="Linked to: ${escapeHtml(localTag.name)}">✓ Exists</span>` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return rows;
+  }
+
+  /**
+   * Render the browse/import view
+   */
+  function renderBrowseView() {
+    if (!stashdbTags || stashdbTags.length === 0) {
+      return `
+        <div class="tm-browse-empty">
+          <p>No StashDB tags cached. Click "Refresh Cache" above to load tags.</p>
+        </div>
+      `;
+    }
+
+    // Group tags by category
+    const categories = {};
+    const uncategorized = [];
+
+    for (const tag of stashdbTags) {
+      const catName = tag.category?.name || null;
+      if (catName) {
+        if (!categories[catName]) {
+          categories[catName] = [];
+        }
+        categories[catName].push(tag);
+      } else {
+        uncategorized.push(tag);
+      }
+    }
+
+    // Sort categories alphabetically
+    const sortedCategories = Object.keys(categories).sort();
+
+    // Build category list
+    const categoryList = sortedCategories.map(cat => {
+      const count = categories[cat].length;
+      const isSelected = browseCategory === cat;
+      return `<div class="tm-category-item ${isSelected ? 'tm-category-active' : ''}" data-category="${escapeHtml(cat)}">
+        <span class="tm-category-name">${escapeHtml(cat)}</span>
+        <span class="tm-category-count">${count}</span>
+      </div>`;
+    }).join('');
+
+    // Add uncategorized if any
+    const uncategorizedItem = uncategorized.length > 0
+      ? `<div class="tm-category-item ${browseCategory === '__uncategorized__' ? 'tm-category-active' : ''}" data-category="__uncategorized__">
+          <span class="tm-category-name">Uncategorized</span>
+          <span class="tm-category-count">${uncategorized.length}</span>
+        </div>`
+      : '';
+
+    // Render tag list for selected category
+    let tagListHtml = '';
+    if (browseCategory) {
+      const tagsToShow = browseCategory === '__uncategorized__'
+        ? uncategorized
+        : (categories[browseCategory] || []);
+
+      tagListHtml = renderBrowseTagList(tagsToShow);
+    } else {
+      tagListHtml = `<div class="tm-browse-hint">Select a category to view tags</div>`;
+    }
+
+    const selectedCount = selectedForImport.size;
+
+    return `
+      <div class="tm-browse">
+        <div class="tm-browse-sidebar">
+          <div class="tm-browse-sidebar-header">
+            <strong>Categories</strong>
+            <span class="tm-total-tags">${stashdbTags.length} total</span>
+          </div>
+          <div class="tm-category-list">
+            ${categoryList}
+            ${uncategorizedItem}
+          </div>
+        </div>
+        <div class="tm-browse-main">
+          <div class="tm-browse-toolbar">
+            <div class="tm-selection-controls">
+              <button class="btn btn-sm btn-secondary" id="tm-select-all">Select All</button>
+              <button class="btn btn-sm btn-secondary" id="tm-deselect-all">Deselect All</button>
+              <span class="tm-selection-info">
+                ${selectedCount > 0 ? `${selectedCount} tag${selectedCount > 1 ? 's' : ''} selected` : 'No tags selected'}
+              </span>
+            </div>
+            <button class="btn btn-primary" id="tm-import-selected" ${selectedCount === 0 ? 'disabled' : ''}>
+              Import Selected
+            </button>
+          </div>
+          <div class="tm-browse-tags">
+            ${tagListHtml}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
    * Render the main page content
    */
   function renderPage(container) {
@@ -722,6 +932,12 @@
           </div>
         </div>
 
+        <div class="tm-tabs">
+          <button class="tm-tab ${activeTab === 'match' ? 'tm-tab-active' : ''}" data-tab="match">Match Local Tags</button>
+          <button class="tm-tab ${activeTab === 'browse' ? 'tm-tab-active' : ''}" data-tab="browse">Browse StashDB</button>
+        </div>
+
+        ${activeTab === 'match' ? `
         ${!hasStashBox ? `
           <div class="tag-manager-error">
             <h3>No Stash-Box Configured</h3>
@@ -764,6 +980,9 @@
             <span>Page ${currentPage} of ${totalPages || 1}</span>
             <button class="btn btn-secondary" id="tm-next" ${currentPage >= totalPages ? 'disabled' : ''}>Next</button>
           </div>
+        `}
+        ` : `
+          ${renderBrowseView()}
         `}
 
         <div id="tm-status" class="tag-manager-status"></div>
@@ -827,6 +1046,79 @@
    * Attach event handlers to rendered elements
    */
   function attachEventHandlers(container) {
+    // Tab switching
+    container.querySelectorAll('.tm-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const newTab = tab.dataset.tab;
+        if (newTab !== activeTab) {
+          activeTab = newTab;
+          renderPage(container);
+        }
+      });
+    });
+
+    // Browse view handlers (only when browse tab active)
+    if (activeTab === 'browse') {
+      // Category selection
+      container.querySelectorAll('.tm-category-item').forEach(item => {
+        item.addEventListener('click', () => {
+          browseCategory = item.dataset.category;
+          renderPage(container);
+        });
+      });
+
+      // Checkbox selection
+      container.querySelectorAll('.tm-browse-tag input[type="checkbox"]').forEach(cb => {
+        cb.addEventListener('change', (e) => {
+          const tagEl = e.target.closest('.tm-browse-tag');
+          const stashdbId = tagEl.dataset.stashdbId;
+          if (e.target.checked) {
+            selectedForImport.add(stashdbId);
+          } else {
+            selectedForImport.delete(stashdbId);
+          }
+          // Update selection count display
+          const infoEl = container.querySelector('.tm-selection-info');
+          const btnEl = container.querySelector('#tm-import-selected');
+          if (infoEl) {
+            const count = selectedForImport.size;
+            infoEl.textContent = count > 0 ? `${count} tag${count > 1 ? 's' : ''} selected` : 'No tags selected';
+          }
+          if (btnEl) {
+            btnEl.disabled = selectedForImport.size === 0;
+          }
+        });
+      });
+
+      // Select All / Deselect All
+      const selectAllBtn = container.querySelector('#tm-select-all');
+      const deselectAllBtn = container.querySelector('#tm-deselect-all');
+
+      if (selectAllBtn) {
+        selectAllBtn.addEventListener('click', () => {
+          container.querySelectorAll('.tm-browse-tag:not(.tm-exists-locally) input[type="checkbox"]').forEach(cb => {
+            cb.checked = true;
+            const tagEl = cb.closest('.tm-browse-tag');
+            selectedForImport.add(tagEl.dataset.stashdbId);
+          });
+          renderPage(container);
+        });
+      }
+
+      if (deselectAllBtn) {
+        deselectAllBtn.addEventListener('click', () => {
+          selectedForImport.clear();
+          renderPage(container);
+        });
+      }
+
+      // Import button
+      const importBtn = container.querySelector('#tm-import-selected');
+      if (importBtn) {
+        importBtn.addEventListener('click', () => handleImportSelected(container));
+      }
+    }
+
     // Stash-box dropdown
     container.querySelector('#tm-stashbox')?.addEventListener('change', async (e) => {
       const endpoint = e.target.value;
