@@ -916,6 +916,26 @@
     // Alias editing state - start with merged aliases
     let editableAliases = new Set([...(tag.aliases || []), ...(stashdbTag.aliases || [])]);
 
+    // Category/parent state
+    const hasCategory = !!stashdbTag.category?.name;
+    let selectedParentId = null;
+    let createParentIfMissing = true;
+    let parentMatches = [];
+
+    if (hasCategory) {
+      // Check for saved mapping first
+      const savedMapping = categoryMappings[stashdbTag.category.name];
+      if (savedMapping) {
+        selectedParentId = savedMapping;
+      } else {
+        // Find local matches
+        parentMatches = findLocalParentMatches(stashdbTag.category.name);
+        if (parentMatches.length > 0) {
+          selectedParentId = parentMatches[0].tag.id;
+        }
+      }
+    }
+
     // Function to render alias pills
     function renderAliasPills() {
       const pillsContainer = modal.querySelector('#tm-alias-pills');
@@ -996,6 +1016,37 @@
                   <div class="tm-alias-pills" id="tm-alias-pills"></div>
                 </td>
               </tr>
+              ${hasCategory ? `
+              <tr>
+                <td>Parent Tag</td>
+                <td colspan="3">
+                  <div class="tm-category-section">
+                    <div class="tm-category-info">
+                      <span class="tm-category-label">StashDB Category:</span>
+                      <span class="tm-category-name">${escapeHtml(stashdbTag.category.name)}</span>
+                    </div>
+                    <div class="tm-parent-select">
+                      <select id="tm-parent-select" class="form-control">
+                        <option value="">-- No parent --</option>
+                        <option value="__create__" ${!selectedParentId ? 'selected' : ''}>Create "${escapeHtml(stashdbTag.category.name)}"</option>
+                        ${parentMatches.map(m => `
+                          <option value="${m.tag.id}" ${selectedParentId === m.tag.id ? 'selected' : ''}>
+                            ${escapeHtml(m.tag.name)} (${m.matchType})
+                          </option>
+                        `).join('')}
+                      </select>
+                      <button type="button" class="btn btn-secondary btn-sm" id="tm-parent-search-btn">Search...</button>
+                    </div>
+                    <div class="tm-parent-remember">
+                      <label>
+                        <input type="checkbox" id="tm-remember-mapping" checked>
+                        Remember this mapping
+                      </label>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+              ` : ''}
             </tbody>
           </table>
 
