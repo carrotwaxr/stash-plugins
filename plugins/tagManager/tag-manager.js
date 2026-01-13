@@ -1148,6 +1148,21 @@
     // Initialize alias pills
     renderAliasPills();
 
+    // Parent selection handlers (if category exists)
+    if (hasCategory) {
+      const parentSelect = modal.querySelector('#tm-parent-select');
+      if (parentSelect) {
+        parentSelect.addEventListener('change', (e) => {
+          selectedParentId = e.target.value === '' ? null : e.target.value;
+        });
+      }
+
+      const searchBtn = modal.querySelector('#tm-parent-search-btn');
+      if (searchBtn) {
+        searchBtn.addEventListener('click', showParentSearchModal);
+      }
+    }
+
     // When name choice changes, update aliases if needed
     modal.querySelectorAll('input[name="tm-name"]').forEach(radio => {
       radio.addEventListener('change', (e) => {
