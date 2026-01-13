@@ -664,6 +664,17 @@
    * Attach event handlers to rendered elements
    */
   function attachEventHandlers(container) {
+    // Tab switching
+    container.querySelectorAll('.tm-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const newTab = tab.dataset.tab;
+        if (newTab !== activeTab) {
+          activeTab = newTab;
+          renderPage(container);
+        }
+      });
+    });
+
     // Stash-box dropdown
     container.querySelector('#tm-stashbox')?.addEventListener('change', async (e) => {
       const endpoint = e.target.value;
