@@ -1609,6 +1609,7 @@
         containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
 
         await loadSettings();
+        await loadCategoryMappings();
 
         // Check if any stash-box is configured
         if (stashBoxes.length === 0) {
