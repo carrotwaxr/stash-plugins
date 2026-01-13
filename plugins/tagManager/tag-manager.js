@@ -1457,8 +1457,25 @@
    * Show toast notification
    */
   function showToast(message, type = 'success') {
-    // Placeholder - will be implemented in Task 9
-    console.log(`[tagManager] Toast (${type}): ${message}`);
+    // Create container if needed
+    let container = document.querySelector('.th-toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.className = 'th-toast-container';
+      document.body.appendChild(container);
+    }
+
+    const toast = document.createElement('div');
+    toast.className = `th-toast ${type}`;
+    toast.textContent = message;
+
+    container.appendChild(toast);
+
+    // Auto-remove after 3 seconds
+    setTimeout(() => {
+      toast.style.animation = 'th-toast-out 0.3s ease forwards';
+      setTimeout(() => toast.remove(), 300);
+    }, 3000);
   }
 
   /**
