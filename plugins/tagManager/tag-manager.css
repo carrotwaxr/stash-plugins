@@ -750,3 +750,10 @@
   padding: 40px;
   color: var(--bs-secondary-color, #aaa);
 }
+
+/* Blacklist notice */
+.tm-blacklist-notice {
+  font-size: 0.85em;
+  color: var(--bs-warning, #ffc107);
+  margin-top: 4px;
+}
