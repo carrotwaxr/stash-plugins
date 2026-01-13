@@ -27,6 +27,9 @@
   let isCacheLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
+  let activeTab = 'match'; // 'match' or 'browse'
+  let browseCategory = null; // Selected category in browse view
+  let selectedForImport = new Set(); // Tag IDs selected for import
 
   /**
    * Set page title with retry to overcome Stash's title management
