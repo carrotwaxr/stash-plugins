@@ -1,4 +1,4 @@
-"""
+r"""
 Blacklist utility for filtering unwanted StashDB tags.
 
 Blacklist format (stored in plugin settings):

@@ -32,6 +32,7 @@
   let activeTab = 'match'; // 'match' or 'browse'
   let browseCategory = null; // Selected category in browse view
   let selectedForImport = new Set(); // Tag IDs selected for import
+  let isImporting = false; // Guard against double-click on import
 
   /**
    * Set page title with retry to overcome Stash's title management
@@ -731,6 +732,9 @@
    */
   async function handleImportSelected(container) {
     if (selectedForImport.size === 0) return;
+    if (isImporting) return; // Prevent double-click
+
+    isImporting = true;
 
     const statusEl = container.querySelector('.tm-selection-info');
     const btnEl = container.querySelector('#tm-import-selected');
@@ -792,8 +796,11 @@
 
     if (statusEl) statusEl.textContent = message;
 
-    // Re-render after short delay to show message
-    setTimeout(() => renderPage(container), 1500);
+    // Re-render after short delay to show message, then reset import guard
+    setTimeout(() => {
+      isImporting = false;
+      renderPage(container);
+    }, 1500);
   }
 
   /**
@@ -1343,26 +1350,27 @@
       }
 
       let html = '';
+      let aliasIndex = 0; // Unique index to prevent ID collisions
 
       // Primary aliases (from this source)
       primaryAliases.forEach(alias => {
-        const safeId = alias.replace(/[^a-zA-Z0-9]/g, '_');
+        const safeId = `${source}-${aliasIndex++}`;
         html += `
           <div class="tm-alias-checkbox-item">
-            <input type="checkbox" id="alias-${source}-${safeId}" data-alias="${escapeHtml(alias)}" checked>
-            <label for="alias-${source}-${safeId}">${escapeHtml(alias)}</label>
+            <input type="checkbox" id="alias-${safeId}" data-alias="${escapeHtml(alias)}" checked>
+            <label for="alias-${safeId}">${escapeHtml(alias)}</label>
           </div>
         `;
       });
 
       // Aliases from other source that aren't in this one (shown in blue)
       newAliases.forEach(alias => {
-        const safeId = alias.replace(/[^a-zA-Z0-9]/g, '_');
+        const safeId = `new-${source}-${aliasIndex++}`;
         const fromLabel = source === 'local' ? 'from StashDB' : 'from local';
         html += `
           <div class="tm-alias-checkbox-item new-from-other">
-            <input type="checkbox" id="alias-new-${source}-${safeId}" data-alias="${escapeHtml(alias)}" checked>
-            <label for="alias-new-${source}-${safeId}">${escapeHtml(alias)} (${fromLabel})</label>
+            <input type="checkbox" id="alias-${safeId}" data-alias="${escapeHtml(alias)}" checked>
+            <label for="alias-${safeId}">${escapeHtml(alias)} (${fromLabel})</label>
           </div>
         `;
       });
@@ -1617,17 +1625,10 @@
 
     // Helper function to check/uncheck an alias checkbox by alias value
     function setAliasCheckbox(alias, checked) {
-      const safeId = alias.replace(/[^a-zA-Z0-9]/g, '_');
-      // Try to find the checkbox in either column (it may be primary or new-from-other)
-      const selectors = [
-        `#alias-local-${safeId}`,
-        `#alias-stashdb-${safeId}`,
-        `#alias-new-local-${safeId}`,
-        `#alias-new-stashdb-${safeId}`
-      ];
-      for (const selector of selectors) {
-        const cb = modal.querySelector(selector);
-        if (cb) {
+      // Find checkbox by data-alias attribute (case-insensitive)
+      const checkboxes = modal.querySelectorAll('.tm-alias-checkbox-item input[type="checkbox"]');
+      for (const cb of checkboxes) {
+        if (cb.dataset.alias && cb.dataset.alias.toLowerCase() === alias.toLowerCase()) {
           cb.checked = checked;
           break;
         }
@@ -2779,8 +2780,7 @@
     }
   }
 
-  // Register keyboard handler globally
-  document.addEventListener('keydown', handleHierarchyKeyboard);
+  // Note: Keyboard handler is registered/unregistered in TagHierarchyPage component
 
   /**
    * Attach event handlers for hierarchy page
@@ -2988,6 +2988,9 @@
     const containerRef = React.useRef(null);
 
     React.useEffect(() => {
+      // Register keyboard handler for this page
+      document.addEventListener('keydown', handleHierarchyKeyboard);
+
       async function init() {
         if (!containerRef.current) return;
 
@@ -3016,6 +3019,11 @@
       }
 
       init();
+
+      // Cleanup: remove keyboard handler when component unmounts
+      return () => {
+        document.removeEventListener('keydown', handleHierarchyKeyboard);
+      };
     }, []);
 
     return React.createElement('div', {
