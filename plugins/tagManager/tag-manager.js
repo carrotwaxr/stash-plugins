@@ -1093,6 +1093,16 @@
       tab.addEventListener('click', () => {
         const newTab = tab.dataset.tab;
         if (newTab !== activeTab) {
+          // Warn if there are pending hierarchy changes
+          if (isEditMode && pendingChanges.length > 0) {
+            if (!confirm('You have unsaved hierarchy changes. Discard them?')) {
+              return;
+            }
+            // Discard changes
+            isEditMode = false;
+            pendingChanges = [];
+            originalParentMap.clear();
+          }
           activeTab = newTab;
           renderPage(container);
         }
@@ -2181,6 +2191,258 @@
   let selectedTagId = null;
   let copiedTagId = null;
 
+  // Edit mode state
+  let isEditMode = false;
+  let pendingChanges = [];
+  let originalParentMap = new Map(); // tagId -> array of parent ids (snapshot at edit start)
+
+  /**
+   * Enter edit mode - snapshot current state and show changes panel
+   */
+  function enterEditMode() {
+    if (isEditMode) return;
+
+    isEditMode = true;
+    pendingChanges = [];
+
+    // Snapshot current parent relationships
+    originalParentMap.clear();
+    for (const tag of hierarchyTags) {
+      originalParentMap.set(tag.id, tag.parents?.map(p => p.id) || []);
+    }
+
+    // Show the changes panel
+    renderChangesPanel();
+  }
+
+  /**
+   * Add a pending change, handling cancellation of opposite changes.
+   * Returns true if change was added, false if it cancelled out an existing change.
+   */
+  function addPendingChange(type, tagId, tagName, parentId, parentName) {
+    // Check for opposite change that would cancel this out
+    const oppositeType = type === 'add-parent' ? 'remove-parent' : 'add-parent';
+    const oppositeIdx = pendingChanges.findIndex(c =>
+      c.type === oppositeType && c.tagId === tagId && c.parentId === parentId
+    );
+
+    if (oppositeIdx !== -1) {
+      // Remove the opposite change (they cancel out)
+      pendingChanges.splice(oppositeIdx, 1);
+
+      // If no changes left, exit edit mode
+      if (pendingChanges.length === 0) {
+        exitEditMode(false);
+        showToast('Change cancelled - no pending changes');
+        return false;
+      }
+
+      renderChangesPanel();
+      showToast('Change cancelled previous pending change');
+      return false;
+    }
+
+    // Check if this exact change already exists
+    const existingIdx = pendingChanges.findIndex(c =>
+      c.type === type && c.tagId === tagId && c.parentId === parentId
+    );
+
+    if (existingIdx === -1) {
+      pendingChanges.push({
+        type,
+        tagId,
+        tagName,
+        parentId,
+        parentName,
+        timestamp: Date.now()
+      });
+    }
+
+    // Re-render the changes panel
+    renderChangesPanel();
+    return true;
+  }
+
+  /**
+   * Remove a specific pending change by index
+   */
+  function removePendingChange(index) {
+    if (index >= 0 && index < pendingChanges.length) {
+      pendingChanges.splice(index, 1);
+
+      // If no changes left, exit edit mode
+      if (pendingChanges.length === 0) {
+        exitEditMode(false);
+      } else {
+        renderChangesPanel();
+        // Re-render tree to update visual state
+        applyPendingChangesToTree();
+      }
+    }
+  }
+
+  /**
+   * Exit edit mode - either save or discard changes
+   */
+  async function exitEditMode(save) {
+    if (!isEditMode) return;
+
+    if (save && pendingChanges.length > 0) {
+      await savePendingChanges();
+    }
+
+    isEditMode = false;
+    pendingChanges = [];
+    originalParentMap.clear();
+
+    // Remove the changes panel
+    const panel = document.getElementById('th-changes-panel');
+    if (panel) panel.remove();
+
+    // Refresh from server to ensure consistent state
+    await refreshHierarchy();
+  }
+
+  /**
+   * Render the pending changes panel at the bottom of the hierarchy view
+   */
+  function renderChangesPanel() {
+    // Remove existing panel
+    let panel = document.getElementById('th-changes-panel');
+    if (panel) panel.remove();
+
+    const container = document.querySelector('.tag-hierarchy');
+    if (!container) return;
+
+    panel = document.createElement('div');
+    panel.id = 'th-changes-panel';
+    panel.className = 'th-changes-panel';
+
+    const changesHtml = pendingChanges.map((change, idx) => {
+      const action = change.type === 'add-parent'
+        ? `Added "${escapeHtml(change.parentName)}" as parent of "${escapeHtml(change.tagName)}"`
+        : `Removed "${escapeHtml(change.tagName)}" from "${escapeHtml(change.parentName)}"`;
+      return `
+        <div class="th-change-item">
+          <span class="th-change-text">${action}</span>
+          <button class="th-change-remove" data-index="${idx}" title="Remove this change">&times;</button>
+        </div>
+      `;
+    }).join('');
+
+    panel.innerHTML = `
+      <div class="th-changes-header">
+        <span>Pending Changes (${pendingChanges.length})</span>
+      </div>
+      <div class="th-changes-list">
+        ${changesHtml || '<div class="th-no-changes">No changes yet</div>'}
+      </div>
+      <div class="th-changes-actions">
+        <button class="btn btn-secondary" id="th-cancel-changes">Cancel</button>
+        <button class="btn btn-primary" id="th-save-changes" ${pendingChanges.length === 0 ? 'disabled' : ''}>Save Changes</button>
+      </div>
+    `;
+
+    container.appendChild(panel);
+
+    // Attach event handlers
+    panel.querySelector('#th-cancel-changes')?.addEventListener('click', () => exitEditMode(false));
+    panel.querySelector('#th-save-changes')?.addEventListener('click', () => exitEditMode(true));
+    panel.querySelectorAll('.th-change-remove').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const idx = parseInt(e.target.dataset.index, 10);
+        removePendingChange(idx);
+      });
+    });
+  }
+
+  /**
+   * Save all pending changes to the server
+   */
+  async function savePendingChanges() {
+    if (pendingChanges.length === 0) return;
+
+    // Compute final parent state for each modified tag
+    const tagUpdates = new Map(); // tagId -> Set of final parent ids
+
+    // Start with original parents
+    for (const change of pendingChanges) {
+      if (!tagUpdates.has(change.tagId)) {
+        const original = originalParentMap.get(change.tagId) || [];
+        tagUpdates.set(change.tagId, new Set(original));
+      }
+    }
+
+    // Apply changes
+    for (const change of pendingChanges) {
+      const parentSet = tagUpdates.get(change.tagId);
+      if (change.type === 'add-parent') {
+        parentSet.add(change.parentId);
+      } else {
+        parentSet.delete(change.parentId);
+      }
+    }
+
+    // Send mutations
+    const errors = [];
+    for (const [tagId, parentSet] of tagUpdates) {
+      try {
+        await updateTagParents(tagId, Array.from(parentSet));
+      } catch (err) {
+        const tag = hierarchyTags.find(t => t.id === tagId);
+        errors.push(`Failed to update "${tag?.name || tagId}": ${err.message}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      showToast(`Some changes failed:\n${errors.join('\n')}`, 'error');
+    } else {
+      showToast(`Saved ${pendingChanges.length} change${pendingChanges.length !== 1 ? 's' : ''}`);
+    }
+  }
+
+  /**
+   * Apply pending changes to local tree state and re-render
+   */
+  function applyPendingChangesToTree() {
+    // Create a working copy of tags with pending changes applied
+    const workingTags = hierarchyTags.map(tag => {
+      // Get original parents
+      const originalParents = originalParentMap.get(tag.id) || tag.parents?.map(p => p.id) || [];
+      const parentSet = new Set(originalParents);
+
+      // Apply pending changes for this tag
+      for (const change of pendingChanges) {
+        if (change.tagId === tag.id) {
+          if (change.type === 'add-parent') {
+            parentSet.add(change.parentId);
+          } else {
+            parentSet.delete(change.parentId);
+          }
+        }
+      }
+
+      // Convert back to parent objects
+      const newParents = Array.from(parentSet).map(pid => {
+        const parentTag = hierarchyTags.find(t => t.id === pid);
+        return parentTag ? { id: pid, name: parentTag.name } : { id: pid, name: 'Unknown' };
+      });
+
+      return { ...tag, parents: newParents };
+    });
+
+    // Rebuild and re-render tree
+    hierarchyTree = buildTagTree(workingTags);
+    const container = document.querySelector('.tag-hierarchy-container');
+    if (container) {
+      renderHierarchyPage(container);
+      // Re-attach the changes panel after re-render
+      if (isEditMode) {
+        renderChangesPanel();
+      }
+    }
+  }
+
   /**
    * Show context menu for a tag node
    */
@@ -2443,18 +2705,19 @@
    */
   async function addParent(tagId, newParentId) {
     const tag = hierarchyTags.find(t => t.id === tagId);
-    if (!tag) return;
+    const parent = hierarchyTags.find(t => t.id === newParentId);
+    if (!tag || !parent) return;
 
-    const newParentIds = [...(tag.parents?.map(p => p.id) || []), newParentId];
+    // Enter edit mode if not already
+    enterEditMode();
 
-    try {
-      await updateTagParents(tagId, newParentIds);
-      await refreshHierarchy();
-      const parent = hierarchyTags.find(t => t.id === newParentId);
-      showToast(`Added "${tag.name}" as child of "${parent?.name || 'parent'}"`);
-    } catch (err) {
-      console.error('[tagManager] Failed to add parent:', err);
-      showToast(`Error: ${err.message}`, 'error');
+    // Queue the change (returns false if it cancelled out an existing change)
+    const wasAdded = addPendingChange('add-parent', tagId, tag.name, newParentId, parent.name);
+
+    if (wasAdded) {
+      // Update local state for immediate visual feedback
+      applyPendingChangesToTree();
+      showToast(`Queued: Add "${tag.name}" as child of "${parent.name}"`);
     }
   }
 
@@ -2463,37 +2726,58 @@
    */
   async function addChild(parentId, childId) {
     const child = hierarchyTags.find(t => t.id === childId);
-    if (!child) return;
+    const parent = hierarchyTags.find(t => t.id === parentId);
+    if (!child || !parent) return;
 
-    const newParentIds = [...(child.parents?.map(p => p.id) || []), parentId];
+    // Enter edit mode if not already
+    enterEditMode();
 
-    try {
-      await updateTagParents(childId, newParentIds);
-      await refreshHierarchy();
-      const parent = hierarchyTags.find(t => t.id === parentId);
-      showToast(`Added "${child.name}" as child of "${parent?.name || 'parent'}"`);
-    } catch (err) {
-      console.error('[tagManager] Failed to add child:', err);
-      showToast(`Error: ${err.message}`, 'error');
+    // Queue the change (returns false if it cancelled out an existing change)
+    const wasAdded = addPendingChange('add-parent', childId, child.name, parentId, parent.name);
+
+    if (wasAdded) {
+      // Update local state for immediate visual feedback
+      applyPendingChangesToTree();
+      showToast(`Queued: Add "${child.name}" as child of "${parent.name}"`);
     }
   }
 
   /**
    * Check if making potentialParentId a parent of tagId would create a circular reference.
    * This happens if tagId is already an ancestor of potentialParentId.
+   * Also considers pending changes that haven't been saved yet.
    */
   function wouldCreateCircularRef(potentialParentId, tagId) {
+    // Build effective parent map considering pending changes
+    const effectiveParents = new Map();
+
+    for (const tag of hierarchyTags) {
+      const parents = new Set(tag.parents?.map(p => p.id) || []);
+      effectiveParents.set(tag.id, parents);
+    }
+
+    // Apply pending changes
+    for (const change of pendingChanges) {
+      const parents = effectiveParents.get(change.tagId) || new Set();
+      if (change.type === 'add-parent') {
+        parents.add(change.parentId);
+      } else {
+        parents.delete(change.parentId);
+      }
+      effectiveParents.set(change.tagId, parents);
+    }
+
     // Build a set of all ancestors of potentialParentId
     const ancestors = new Set();
 
     function collectAncestors(id) {
-      const tag = hierarchyTags.find(t => t.id === id);
-      if (!tag || !tag.parents) return;
+      const parents = effectiveParents.get(id);
+      if (!parents) return;
 
-      for (const parent of tag.parents) {
-        if (ancestors.has(parent.id)) continue; // Already visited
-        ancestors.add(parent.id);
-        collectAncestors(parent.id);
+      for (const parentId of parents) {
+        if (ancestors.has(parentId)) continue; // Already visited
+        ancestors.add(parentId);
+        collectAncestors(parentId);
       }
     }
 
@@ -2551,19 +2835,19 @@
    */
   async function removeParent(tagId, parentIdToRemove) {
     const tag = hierarchyTags.find(t => t.id === tagId);
-    if (!tag) return;
+    const parent = hierarchyTags.find(t => t.id === parentIdToRemove);
+    if (!tag || !parent) return;
 
-    const newParentIds = tag.parents
-      .map(p => p.id)
-      .filter(id => id !== parentIdToRemove);
+    // Enter edit mode if not already
+    enterEditMode();
 
-    try {
-      await updateTagParents(tagId, newParentIds);
-      await refreshHierarchy();
-      showToast(`Removed "${tag.name}" from parent`);
-    } catch (err) {
-      console.error('[tagManager] Failed to remove parent:', err);
-      showToast(`Error: ${err.message}`, 'error');
+    // Queue the change (returns false if it cancelled out an existing change)
+    const wasAdded = addPendingChange('remove-parent', tagId, tag.name, parentIdToRemove, parent.name);
+
+    if (wasAdded) {
+      // Update local state for immediate visual feedback
+      applyPendingChangesToTree();
+      showToast(`Queued: Remove "${tag.name}" from "${parent.name}"`);
     }
   }
 
@@ -2574,18 +2858,25 @@
     const tag = hierarchyTags.find(t => t.id === tagId);
     if (!tag) return;
 
-    if (tag.parents.length === 0) {
+    if (!tag.parents || tag.parents.length === 0) {
       showToast('Tag is already a root');
       return;
     }
 
-    try {
-      await updateTagParents(tagId, []);
-      await refreshHierarchy();
-      showToast(`"${tag.name}" is now a root tag`);
-    } catch (err) {
-      console.error('[tagManager] Failed to make root:', err);
-      showToast(`Error: ${err.message}`, 'error');
+    // Enter edit mode if not already
+    enterEditMode();
+
+    // Queue removal of each parent
+    let anyAdded = false;
+    for (const parent of tag.parents) {
+      const wasAdded = addPendingChange('remove-parent', tagId, tag.name, parent.id, parent.name);
+      if (wasAdded) anyAdded = true;
+    }
+
+    if (anyAdded) {
+      // Update local state for immediate visual feedback
+      applyPendingChangesToTree();
+      showToast(`Queued: Make "${tag.name}" a root tag`);
     }
   }
 
