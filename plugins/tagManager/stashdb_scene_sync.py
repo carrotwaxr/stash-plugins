@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import log
+from blacklist import Blacklist
 from tag_cache import TagCache
 from stashdb_api import RateLimiter, find_scene_by_id, find_scenes_by_fingerprints
 
@@ -67,7 +68,7 @@ def match_stashdb_tag_to_local(stashdb_tag, tag_cache, endpoint):
     return None
 
 
-def process_scene(scene, stashdb_scene, tag_cache, stash, settings, endpoint):
+def process_scene(scene, stashdb_scene, tag_cache, stash, settings, endpoint, blacklist):
     """
     Process a single scene's tag merge.
 
@@ -78,6 +79,7 @@ def process_scene(scene, stashdb_scene, tag_cache, stash, settings, endpoint):
         stash: StashInterface (can be None for dry_run)
         settings: Plugin settings dict with 'dry_run' key
         endpoint: StashDB endpoint URL
+        blacklist: Blacklist instance for filtering tags
 
     Returns:
         ProcessResult with status, tags_added, tags_skipped, merged_tag_ids
@@ -89,7 +91,11 @@ def process_scene(scene, stashdb_scene, tag_cache, stash, settings, endpoint):
     new_tag_ids = set()
     skipped_tags = []
 
+    # Get StashDB tags, filtering out blacklisted ones
     stashdb_tags = stashdb_scene.get("tags", []) or []
+    stashdb_tags, hidden_count = blacklist.filter_tags(stashdb_tags)
+    if hidden_count > 0:
+        log.LogDebug(f"Scene {scene_id}: Filtered {hidden_count} blacklisted tags")
 
     for stashdb_tag in stashdb_tags:
         local_id = match_stashdb_tag_to_local(stashdb_tag, tag_cache, endpoint)
@@ -181,6 +187,10 @@ def sync_scene_tags(stash, stashdb_url, stashdb_api_key, settings):
     stats = SyncStats()
     dry_run = settings.get("dry_run", True)
 
+    # Load blacklist
+    blacklist = Blacklist(settings.get('tagBlacklist', ''))
+    log.LogDebug(f"Loaded blacklist with {blacklist.count} patterns")
+
     log.LogInfo(f"Starting scene tag sync (dry_run={dry_run})")
 
     # Step 1: Build tag cache from local tags
@@ -216,7 +226,7 @@ def sync_scene_tags(stash, stashdb_url, stashdb_api_key, settings):
 
     processed_in_pass1 = _process_pass_one(
         scenes, stashdb_url, stashdb_api_key, tag_cache,
-        stash, settings, rate_limiter, stats, retry_queue
+        stash, settings, rate_limiter, stats, retry_queue, blacklist
     )
 
     log.LogInfo(f"Pass 1 complete: {processed_in_pass1} processed, {len(retry_queue)} in retry queue")
@@ -226,7 +236,7 @@ def sync_scene_tags(stash, stashdb_url, stashdb_api_key, settings):
         log.LogInfo(f"Pass 2: Processing {len(retry_queue)} scenes sequentially...")
         _process_pass_two(
             retry_queue, stashdb_url, stashdb_api_key, tag_cache,
-            stash, settings, rate_limiter, stats
+            stash, settings, rate_limiter, stats, blacklist
         )
 
     # Step 5: Log summary
@@ -335,7 +345,7 @@ def _get_scene_fingerprints(scene):
 
 
 def _process_pass_one(scenes, stashdb_url, stashdb_api_key, tag_cache,
-                       stash, settings, rate_limiter, stats, retry_queue):
+                       stash, settings, rate_limiter, stats, retry_queue, blacklist):
     """
     Process scenes in batches using fingerprint queries.
 
@@ -389,7 +399,7 @@ def _process_pass_one(scenes, stashdb_url, stashdb_api_key, tag_cache,
             # Process the scene
             result = process_scene(
                 scene, matched_stashdb_scene, tag_cache,
-                stash, settings, stashdb_url
+                stash, settings, stashdb_url, blacklist
             )
 
             _update_stats(stats, result)
@@ -402,7 +412,7 @@ def _process_pass_one(scenes, stashdb_url, stashdb_api_key, tag_cache,
 
 
 def _process_pass_two(retry_queue, stashdb_url, stashdb_api_key, tag_cache,
-                       stash, settings, rate_limiter, stats):
+                       stash, settings, rate_limiter, stats, blacklist):
     """Process scenes individually by StashDB ID."""
     for i, scene in enumerate(retry_queue):
         stashdb_id = _get_scene_stashdb_id(scene, stashdb_url)
@@ -423,7 +433,7 @@ def _process_pass_two(retry_queue, stashdb_url, stashdb_api_key, tag_cache,
 
         result = process_scene(
             scene, stashdb_scene, tag_cache,
-            stash, settings, stashdb_url
+            stash, settings, stashdb_url, blacklist
         )
 
         _update_stats(stats, result)

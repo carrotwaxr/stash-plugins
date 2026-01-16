@@ -30,6 +30,14 @@ settings:
     displayName: Scene Tag Sync - Dry Run
     description: Preview what tags would be added without making changes (caps at 200 scenes). Default is enabled for safety.
     type: BOOLEAN
+  categoryMappings:
+    displayName: Category Mappings (Internal)
+    description: JSON mapping of StashDB categories to local parent tag IDs. Managed automatically.
+    type: STRING
+  tagBlacklist:
+    displayName: Tag Blacklist
+    description: Tags to exclude from matching and sync. One pattern per line. Prefix with / for regex (e.g., /Available$/).
+    type: STRING
 
 exec:
   - python

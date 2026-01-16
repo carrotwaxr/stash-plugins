@@ -6,6 +6,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tag_cache import TagCache
+from blacklist import Blacklist
 
 
 class TestMatchStashdbTagToLocal(unittest.TestCase):
@@ -37,6 +38,7 @@ class TestMatchStashdbTagToLocal(unittest.TestCase):
             },
         ]
         self.tag_cache = TagCache.build(self.local_tags)
+        self.empty_blacklist = Blacklist("")
 
     def test_matches_by_stashdb_id_first(self):
         """Should match by StashDB ID link (priority 1)."""
@@ -129,6 +131,7 @@ class TestProcessScene(unittest.TestCase):
             },
         ]
         self.tag_cache = TagCache.build(self.local_tags)
+        self.empty_blacklist = Blacklist("")
 
     def test_returns_no_changes_when_no_new_tags(self):
         """Should return no_changes when scene already has all matched tags."""
@@ -148,7 +151,8 @@ class TestProcessScene(unittest.TestCase):
 
         result = process_scene(
             local_scene, stashdb_scene, self.tag_cache,
-            stash=None, settings=settings, endpoint=self.endpoint
+            stash=None, settings=settings, endpoint=self.endpoint,
+            blacklist=self.empty_blacklist
         )
 
         self.assertEqual(result.status, "no_changes")
@@ -173,7 +177,8 @@ class TestProcessScene(unittest.TestCase):
 
         result = process_scene(
             local_scene, stashdb_scene, self.tag_cache,
-            stash=None, settings=settings, endpoint=self.endpoint
+            stash=None, settings=settings, endpoint=self.endpoint,
+            blacklist=self.empty_blacklist
         )
 
         self.assertEqual(result.status, "dry_run")
@@ -197,7 +202,8 @@ class TestProcessScene(unittest.TestCase):
 
         result = process_scene(
             local_scene, stashdb_scene, self.tag_cache,
-            stash=None, settings=settings, endpoint=self.endpoint
+            stash=None, settings=settings, endpoint=self.endpoint,
+            blacklist=self.empty_blacklist
         )
 
         self.assertEqual(result.tags_added, 1)  # Only Blonde
@@ -220,7 +226,8 @@ class TestProcessScene(unittest.TestCase):
 
         result = process_scene(
             local_scene, stashdb_scene, self.tag_cache,
-            stash=None, settings=settings, endpoint=self.endpoint
+            stash=None, settings=settings, endpoint=self.endpoint,
+            blacklist=self.empty_blacklist
         )
 
         # Should add Blonde (id=2) but preserve existing (id=99)
