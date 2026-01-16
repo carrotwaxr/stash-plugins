@@ -974,12 +974,6 @@
           </div>
         </div>
 
-        <div class="tm-tabs">
-          <button class="tm-tab ${activeTab === 'match' ? 'tm-tab-active' : ''}" data-tab="match">Match Local Tags</button>
-          <button class="tm-tab ${activeTab === 'browse' ? 'tm-tab-active' : ''}" data-tab="browse">Browse StashDB</button>
-        </div>
-
-        ${activeTab === 'match' ? `
         ${!hasStashBox ? `
           <div class="tag-manager-error">
             <h3>No Stash-Box Configured</h3>
@@ -999,32 +993,38 @@
             </div>
           </div>
 
-          <div class="tag-manager-filters">
-            <select id="tm-filter" class="form-control">
-              <option value="unmatched" ${currentFilter === 'unmatched' ? 'selected' : ''}>Show Unmatched</option>
-              <option value="matched" ${currentFilter === 'matched' ? 'selected' : ''}>Show Matched</option>
-              <option value="all" ${currentFilter === 'all' ? 'selected' : ''}>Show All</option>
-            </select>
-            <button class="btn btn-primary" id="tm-search-all-btn" ${isLoading || isCacheLoading ? 'disabled' : ''}>
-              ${isLoading ? 'Searching...' : 'Find Matches for Page'}
-            </button>
+          <div class="tm-tabs">
+            <button class="tm-tab ${activeTab === 'match' ? 'tm-tab-active' : ''}" data-tab="match">Match Local Tags</button>
+            <button class="tm-tab ${activeTab === 'browse' ? 'tm-tab-active' : ''}" data-tab="browse">Browse StashDB</button>
           </div>
 
-          <div class="tag-manager-list" id="tm-tag-list">
-            ${pageTags.length === 0
-              ? `<div class="tm-empty">${emptyMessage}</div>`
-              : pageTags.map(tag => renderTagRow(tag)).join('')
-            }
-          </div>
+          ${activeTab === 'match' ? `
+            <div class="tag-manager-filters">
+              <select id="tm-filter" class="form-control">
+                <option value="unmatched" ${currentFilter === 'unmatched' ? 'selected' : ''}>Show Unmatched</option>
+                <option value="matched" ${currentFilter === 'matched' ? 'selected' : ''}>Show Matched</option>
+                <option value="all" ${currentFilter === 'all' ? 'selected' : ''}>Show All</option>
+              </select>
+              <button class="btn btn-primary" id="tm-search-all-btn" ${isLoading || isCacheLoading ? 'disabled' : ''}>
+                ${isLoading ? 'Searching...' : 'Find Matches for Page'}
+              </button>
+            </div>
 
-          <div class="tag-manager-pagination">
-            <button class="btn btn-secondary" id="tm-prev" ${currentPage <= 1 ? 'disabled' : ''}>Previous</button>
-            <span>Page ${currentPage} of ${totalPages || 1}</span>
-            <button class="btn btn-secondary" id="tm-next" ${currentPage >= totalPages ? 'disabled' : ''}>Next</button>
-          </div>
-        `}
-        ` : `
-          ${renderBrowseView()}
+            <div class="tag-manager-list" id="tm-tag-list">
+              ${pageTags.length === 0
+                ? `<div class="tm-empty">${emptyMessage}</div>`
+                : pageTags.map(tag => renderTagRow(tag)).join('')
+              }
+            </div>
+
+            <div class="tag-manager-pagination">
+              <button class="btn btn-secondary" id="tm-prev" ${currentPage <= 1 ? 'disabled' : ''}>Previous</button>
+              <span>Page ${currentPage} of ${totalPages || 1}</span>
+              <button class="btn btn-secondary" id="tm-next" ${currentPage >= totalPages ? 'disabled' : ''}>Next</button>
+            </div>
+          ` : `
+            ${renderBrowseView()}
+          `}
         `}
 
         <div id="tm-status" class="tag-manager-status"></div>
