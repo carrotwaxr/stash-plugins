@@ -1695,10 +1695,12 @@
           setAliasCheckbox(stashdbTag.name, true);
           updateAliasesFromCheckboxes();
         } else if (e.target.value === 'stashdb') {
-          // Check the local name in the alias checkboxes if not already checked (preserve old name when renaming)
-          if (tag.name) {
-            setAliasCheckbox(tag.name, true);
-            updateAliasesFromCheckboxes();
+          // Add the local name as an alias (preserve old name when renaming)
+          // The local name may not have a checkbox if it's not in either alias list,
+          // so we add it directly to editableAliases
+          if (tag.name && tag.name.toLowerCase() !== stashdbTag.name.toLowerCase()) {
+            editableAliases.add(tag.name);
+            renderAliasPills();
           }
         }
       });
