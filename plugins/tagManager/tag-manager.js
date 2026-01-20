@@ -60,6 +60,10 @@
    * Make a GraphQL request to local Stash
    */
   async function graphqlRequest(query, variables = {}) {
+    // Extract operation name for logging
+    const opMatch = query.match(/(?:query|mutation)\s+(\w+)/);
+    const opName = opMatch ? opMatch[1] : 'anonymous';
+
     const response = await fetch(getGraphQLUrl(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -67,14 +71,17 @@
     });
 
     if (!response.ok) {
+      console.error('[tagManager] GraphQL request failed:', opName, response.status);
       throw new Error(`GraphQL request failed: ${response.status}`);
     }
 
     const result = await response.json();
     if (result.errors?.length > 0) {
+      console.error('[tagManager] GraphQL errors:', opName, result.errors);
       throw new Error(result.errors[0].message);
     }
 
+    console.debug('[tagManager] GraphQL response:', opName, result.data ? 'OK' : 'empty');
     return result.data;
   }
 
@@ -269,6 +276,8 @@
    * @returns {Array} - Array of root nodes (tags with no parents)
    */
   function buildTagTree(tags) {
+    console.debug('[tagManager] buildTagTree: Processing', tags.length, 'tags');
+
     // Create a map for quick lookup
     const tagMap = new Map();
     tags.forEach(tag => {
@@ -280,6 +289,7 @@
 
     // Find root tags (no parents) and build children arrays
     const roots = [];
+    let childAssignments = 0;
 
     tags.forEach(tag => {
       const node = tagMap.get(tag.id);
@@ -294,10 +304,13 @@
           const parentNode = tagMap.get(parent.id);
           if (parentNode) {
             parentNode.childNodes.push({ ...node, parentContextId: parent.id });
+            childAssignments++;
           }
         });
       }
     });
+
+    console.debug('[tagManager] buildTagTree: Found', roots.length, 'root tags,', childAssignments, 'child assignments');
 
     // Sort roots and all children alphabetically by name
     const sortByName = (a, b) => a.name.localeCompare(b.name);
@@ -1746,6 +1759,16 @@
       // Sanitize aliases - remove final name to prevent self-referential alias
       const sanitizedAliases = sanitizeAliasesForSave(editableAliases, finalName, tag.name);
 
+      console.debug('[tagManager] Applying match:', {
+        localTag: tag.name,
+        stashdbTag: stashdbTag.name,
+        nameChoice,
+        descChoice,
+        aliasCount: sanitizedAliases.length,
+        hasCategory,
+        selectedParentId
+      });
+
       // Build update input
       const updateInput = {
         id: tag.id,
@@ -2246,6 +2269,8 @@
    * Returns true if change was added, false if it cancelled out an existing change.
    */
   function addPendingChange(type, tagId, tagName, parentId, parentName) {
+    console.debug('[tagManager] addPendingChange:', { type, tagId, tagName, parentId, parentName });
+
     // Check for opposite change that would cancel this out
     const oppositeType = type === 'add-parent' ? 'remove-parent' : 'add-parent';
     const oppositeIdx = pendingChanges.findIndex(c =>
@@ -2388,6 +2413,8 @@
   async function savePendingChanges() {
     if (pendingChanges.length === 0) return;
 
+    console.debug('[tagManager] savePendingChanges: Saving', pendingChanges.length, 'changes:', pendingChanges);
+
     // Compute final parent state for each modified tag
     const tagUpdates = new Map(); // tagId -> Set of final parent ids
 
@@ -2476,6 +2503,15 @@
     hideContextMenu();
     contextMenuTag = hierarchyTags.find(t => t.id === tagId);
     contextMenuParentId = parentId;
+
+    console.debug('[tagManager] showContextMenu:', {
+      tagId,
+      parentId,
+      tagFound: !!contextMenuTag,
+      tagName: contextMenuTag?.name,
+      tagParents: contextMenuTag?.parents
+    });
+
     if (!contextMenuTag) return;
 
     const menu = document.createElement('div');
@@ -2484,6 +2520,8 @@
 
     const hasParents = contextMenuTag.parents && contextMenuTag.parents.length > 0;
     const isUnderParent = parentId !== null;
+
+    console.debug('[tagManager] showContextMenu menu options:', { hasParents, isUnderParent });
 
     let menuHtml = `
       <div class="th-context-menu-item" data-action="add-parent">Add parent...</div>
@@ -2818,6 +2856,14 @@
    * Update a tag's parent relationships via GraphQL
    */
   async function updateTagParents(tagId, parentIds) {
+    const tag = hierarchyTags.find(t => t.id === tagId);
+    console.debug('[tagManager] updateTagParents:', {
+      tagId,
+      tagName: tag?.name,
+      newParentIds: parentIds,
+      currentParents: tag?.parents
+    });
+
     const query = `
       mutation TagUpdate($input: TagUpdateInput!) {
         tagUpdate(input: $input) {
@@ -2835,6 +2881,7 @@
       }
     });
 
+    console.debug('[tagManager] updateTagParents result:', result?.tagUpdate);
     return result?.tagUpdate;
   }
 
@@ -2999,6 +3046,20 @@
    * Render the full hierarchy page
    */
   function renderHierarchyPage(container) {
+    // Log sample of hierarchy data for debugging
+    const sampleNodes = hierarchyTree.slice(0, 3).map(root => ({
+      id: root.id,
+      name: root.name,
+      parentContextId: root.parentContextId,
+      childCount: root.childNodes.length,
+      sampleChildren: root.childNodes.slice(0, 2).map(c => ({
+        id: c.id,
+        name: c.name,
+        parentContextId: c.parentContextId
+      }))
+    }));
+    console.debug('[tagManager] renderHierarchyPage: Sample tree structure:', sampleNodes);
+
     const treeHtml = hierarchyTree.map(root => renderTreeNode(root, true)).join('');
 
     container.innerHTML = `
@@ -3168,9 +3229,11 @@
     container.querySelectorAll('.th-node').forEach(node => {
       node.addEventListener('contextmenu', (e) => {
         e.preventDefault();
+        e.stopPropagation(); // Prevent bubbling to parent .th-node elements
         const tagId = node.dataset.tagId;
         // Use parentContextId from the node's data attribute (set during tree building)
         const parentId = node.dataset.parentContext || null;
+        console.debug('[tagManager] Context menu:', { tagId, parentId, datasetKeys: Object.keys(node.dataset), parentContext: node.dataset.parentContext });
         showContextMenu(e.clientX, e.clientY, tagId, parentId);
       });
     });
