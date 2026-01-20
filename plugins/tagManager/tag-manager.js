@@ -244,6 +244,25 @@
   }
 
   /**
+   * Fetch a single tag's current parent IDs
+   * Used to preserve existing parents when adding new ones
+   */
+  async function fetchTagParentIds(tagId) {
+    const query = `
+      query FindTag($id: ID!) {
+        findTag(id: $id) {
+          parents {
+            id
+          }
+        }
+      }
+    `;
+
+    const result = await graphqlRequest(query, { id: tagId });
+    return (result?.findTag?.parents || []).map(p => p.id);
+  }
+
+  /**
    * Build a tree structure from flat tag list
    * Tags with multiple parents appear under each parent
    * @param {Array} tags - Flat array of tags with parent/children info
@@ -1766,9 +1785,14 @@
           parentTagId = selectedParentId;
         }
 
-        // Set parent_ids on the update input
+        // Merge new parent with existing parents (don't replace)
         if (parentTagId) {
-          updateInput.parent_ids = [parentTagId];
+          const existingParentIds = await fetchTagParentIds(tag.id);
+          // Add new parent if not already present
+          if (!existingParentIds.includes(parentTagId)) {
+            updateInput.parent_ids = [...existingParentIds, parentTagId];
+          }
+          // If already a parent, no need to update parent_ids
         }
 
         // Save mapping if checkbox is checked
