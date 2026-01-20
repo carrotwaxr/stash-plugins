@@ -2962,20 +2962,25 @@
     const parentIdToRemove = e.target.dataset.parentId;
 
     if (!contextMenuTag) return;
+
+    // Save references before hideContextMenu() clears them
+    const tag = contextMenuTag;
+    const tagId = contextMenuTag.id;
+
     hideContextMenu();
 
     switch (action) {
       case 'add-parent':
-        showTagSearchDialog('parent', contextMenuTag);
+        showTagSearchDialog('parent', tag);
         break;
       case 'add-child':
-        showTagSearchDialog('child', contextMenuTag);
+        showTagSearchDialog('child', tag);
         break;
       case 'remove-parent':
-        await removeParent(contextMenuTag.id, parentIdToRemove);
+        await removeParent(tagId, parentIdToRemove);
         break;
       case 'make-root':
-        await makeRoot(contextMenuTag.id);
+        await makeRoot(tagId);
         break;
     }
   }
