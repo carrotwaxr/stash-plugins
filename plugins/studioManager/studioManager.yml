@@ -1,0 +1,10 @@
+name: Studio Manager
+description: Manage studio hierarchy with visual tree editing. View and edit parent-child studio relationships.
+version: 0.1.0
+url: https://github.com/carrotwaxr/stash-plugins
+
+ui:
+  javascript:
+    - studio-manager.js
+  css:
+    - studio-manager.css
