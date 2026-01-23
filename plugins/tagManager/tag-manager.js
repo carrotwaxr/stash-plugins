@@ -635,6 +635,86 @@
   }
 
   /**
+   * Handle merging a source tag into a destination tag, then apply StashDB link.
+   * Used by both pre-validation and API error merge handlers.
+   *
+   * @param {object} params - Merge parameters
+   * @param {object} params.sourceTag - The tag being merged (will be deleted)
+   * @param {string} params.destinationId - ID of the tag to merge into
+   * @param {object} params.stashdbTag - The StashDB tag to link
+   * @param {string} params.endpoint - The stash-box endpoint URL
+   * @param {string[]} params.sanitizedAliases - Aliases to include in the merge
+   * @param {HTMLElement} params.modal - The modal element (for reading description choice)
+   * @param {HTMLElement} params.container - The container element (for re-rendering)
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  async function performTagMerge({ sourceTag, destinationId, stashdbTag, endpoint, sanitizedAliases, modal, container }) {
+    const destinationTag = localTags.find(t => t.id === destinationId);
+    if (!destinationTag) {
+      return { success: false, error: 'Could not find destination tag.' };
+    }
+
+    try {
+      // Merge current tag into the destination (conflicting) tag
+      // This will move all entities from current tag to destination, merge aliases, then delete current tag
+      const mergedTag = await mergeTags([sourceTag.id], destinationId);
+
+      // Preserve existing stash_ids and add/update the new one for this endpoint
+      const existingStashIds = mergedTag.stash_ids || [];
+      const filteredStashIds = existingStashIds.filter(sid => sid.endpoint !== endpoint);
+
+      const stashIdUpdate = {
+        id: destinationId,
+        stash_ids: [...filteredStashIds, {
+          endpoint: endpoint,
+          stash_id: stashdbTag.id,
+        }],
+      };
+
+      // Merge the aliases we collected (including the original tag name) into the destination
+      const mergedAliases = new Set(mergedTag.aliases || []);
+      for (const alias of sanitizedAliases) {
+        mergedAliases.add(alias);
+      }
+      stashIdUpdate.aliases = Array.from(mergedAliases);
+
+      // Apply description if user chose StashDB description
+      const descChoice = modal.querySelector('input[name="tm-desc"]:checked')?.value;
+      if (descChoice === 'stashdb' && stashdbTag.description) {
+        stashIdUpdate.description = stashdbTag.description;
+      }
+
+      await updateTag(stashIdUpdate);
+
+      // Update local state - remove the merged (source) tag and update destination
+      const sourceIdx = localTags.findIndex(t => t.id === sourceTag.id);
+      if (sourceIdx >= 0) {
+        localTags.splice(sourceIdx, 1);
+      }
+
+      const destIdx = localTags.findIndex(t => t.id === destinationId);
+      if (destIdx >= 0) {
+        localTags[destIdx].stash_ids = stashIdUpdate.stash_ids;
+        localTags[destIdx].aliases = stashIdUpdate.aliases;
+        if (stashIdUpdate.description !== undefined) {
+          localTags[destIdx].description = stashIdUpdate.description;
+        }
+      }
+
+      delete matchResults[sourceTag.id];
+      modal.remove();
+
+      showStatus(`Merged "${sourceTag.name}" into "${destinationTag.name}" and linked to StashDB`, 'success');
+      renderPage(container);
+
+      return { success: true };
+    } catch (e) {
+      console.error('[tagManager] Merge error:', e.message);
+      return { success: false, error: e.message };
+    }
+  }
+
+  /**
    * Validate tag update before attempting to save.
    * Checks for name and alias conflicts with other local tags.
    *
@@ -1840,12 +1920,15 @@
               Cannot rename to "${escapeHtml(err.value)}" - this name already exists.
             </div>
             <div class="tm-error-actions">
-              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
-                Edit "${escapeHtml(conflictTag.name)}"
-              </a>
+              <button type="button" class="btn btn-primary btn-sm tm-error-merge" data-conflict-id="${conflictTag.id}">
+                Merge into "${escapeHtml(conflictTag.name)}"
+              </button>
               <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
                 Keep local name instead
               </button>
+              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+                Edit "${escapeHtml(conflictTag.name)}"
+              </a>
             </div>
           `;
         } else {
@@ -1885,6 +1968,34 @@
           });
         }
 
+        // Merge button handler - merges current tag into the conflicting tag
+        const mergeBtn = errorEl.querySelector('.tm-error-merge');
+        if (mergeBtn) {
+          mergeBtn.addEventListener('click', async () => {
+            const destinationId = mergeBtn.dataset.conflictId;
+            const originalText = mergeBtn.textContent;
+
+            mergeBtn.disabled = true;
+            mergeBtn.textContent = 'Merging...';
+
+            const result = await performTagMerge({
+              sourceTag: tag,
+              destinationId,
+              stashdbTag,
+              endpoint,
+              sanitizedAliases,
+              modal,
+              container
+            });
+
+            if (!result.success) {
+              errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
+              mergeBtn.disabled = false;
+              mergeBtn.textContent = originalText;
+            }
+          });
+        }
+
         return; // Don't proceed with save
       }
 
@@ -1919,6 +2030,9 @@
             </div>
             <div class="tm-error-actions">
               ${conflictTag ? `
+                <button type="button" class="btn btn-primary btn-sm tm-error-merge-api" data-conflict-id="${conflictTag.id}">
+                  Merge into "${escapeHtml(conflictTag.name)}"
+                </button>
                 <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
                   Edit "${escapeHtml(conflictTag.name)}"
                 </a>
@@ -1936,6 +2050,34 @@
               editableAliases.delete(removeBtn.dataset.alias);
               renderAliasPills();
               errorEl.style.display = 'none';
+            });
+          }
+
+          // Merge button handler for API error case
+          const mergeApiBtn = errorEl.querySelector('.tm-error-merge-api');
+          if (mergeApiBtn) {
+            mergeApiBtn.addEventListener('click', async () => {
+              const destinationId = mergeApiBtn.dataset.conflictId;
+              const originalText = mergeApiBtn.textContent;
+
+              mergeApiBtn.disabled = true;
+              mergeApiBtn.textContent = 'Merging...';
+
+              const result = await performTagMerge({
+                sourceTag: tag,
+                destinationId,
+                stashdbTag,
+                endpoint,
+                sanitizedAliases,
+                modal,
+                container
+              });
+
+              if (!result.success) {
+                errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
+                mergeApiBtn.disabled = false;
+                mergeApiBtn.textContent = originalText;
+              }
             });
           }
           return;
@@ -2017,6 +2159,37 @@
 
     const data = await graphqlRequest(query, { input });
     return data?.tagCreate;
+  }
+
+  /**
+   * Merge tags via GraphQL - merges source tags into destination tag.
+   * This reassigns all entities (scenes, images, galleries, performers, studios, groups, markers)
+   * from source tags to destination, merges aliases and stash_ids, then deletes source tags.
+   *
+   * @param {string[]} sourceIds - Array of tag IDs to merge (will be deleted)
+   * @param {string} destinationId - Tag ID to merge into (will be kept)
+   * @returns {object} - The updated destination tag
+   */
+  async function mergeTags(sourceIds, destinationId) {
+    const query = `
+      mutation TagsMerge($input: TagsMergeInput!) {
+        tagsMerge(input: $input) {
+          id
+          name
+          description
+          aliases
+          stash_ids {
+            endpoint
+            stash_id
+          }
+        }
+      }
+    `;
+
+    const data = await graphqlRequest(query, {
+      input: { source: sourceIds, destination: destinationId }
+    });
+    return data?.tagsMerge;
   }
 
   /**
