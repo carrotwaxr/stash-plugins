@@ -81,6 +81,18 @@ Match and sync local tags with StashDB tags. Bulk cleanup your tag library with 
 
 [Documentation](plugins/tagManager/README.md)
 
+### Studio Manager (v0.1.0)
+
+Manage studio hierarchy with visual tree editing. View and edit parent-child studio relationships.
+
+**Features:**
+- Visual tree view of studio parent-child relationships
+- Drag and drop to set parent relationships
+- Context menu for quick actions
+- Pending changes panel for reviewing edits before saving
+
+[Documentation](plugins/studioManager/README.md)
+
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/carrotwaxr/stash-plugins/issues)
