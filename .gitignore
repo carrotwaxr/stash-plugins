@@ -3,8 +3,10 @@
 **/.coverage
 **/.pytest_cache
 **/node_modules
+**/venv/
 CLAUDE.md
-scripts/
+scripts/*
+!scripts/duplicate-performer-finder/
 
 # Environment files with secrets
 .env
