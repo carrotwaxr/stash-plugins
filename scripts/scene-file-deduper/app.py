@@ -44,9 +44,9 @@ def create_app() -> Flask:
     @app.route("/")
     def index():
         """Serve the scene file deduper page."""
-        # Get excluded tag IDs from query params
+        # Get excluded tag IDs from query params (strip whitespace, filter empty)
         exclude_tags_param = request.args.get("exclude_tags", "")
-        exclude_tag_ids = [t for t in exclude_tags_param.split(",") if t]
+        exclude_tag_ids = [t.strip() for t in exclude_tags_param.split(",") if t.strip()]
 
         # Fetch multi-file scenes
         scenes = client.get_multi_file_scenes(exclude_tag_ids if exclude_tag_ids else None)
@@ -70,8 +70,17 @@ def create_app() -> Flask:
         keep_file_id = data.get("keep_file_id")
         all_file_ids = data.get("all_file_ids", [])
 
+        # Validate required fields exist
         if not scene_id or not file_ids_to_delete or not keep_file_id or not all_file_ids:
             return jsonify({"success": False, "error": "Missing required fields"}), 400
+
+        # Validate field types
+        if not isinstance(scene_id, str) or not isinstance(keep_file_id, str):
+            return jsonify({"success": False, "error": "scene_id and keep_file_id must be strings"}), 400
+        if not isinstance(file_ids_to_delete, list) or not isinstance(all_file_ids, list):
+            return jsonify({"success": False, "error": "file_ids_to_delete and all_file_ids must be arrays"}), 400
+        if not all(isinstance(f, str) for f in file_ids_to_delete + all_file_ids):
+            return jsonify({"success": False, "error": "All file IDs must be strings"}), 400
 
         try:
             result = client.delete_scene_files(
