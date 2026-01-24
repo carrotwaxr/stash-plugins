@@ -49,19 +49,13 @@ class StashClient:
 
     def get_multi_file_scenes(self, exclude_tag_ids: list[str] | None = None) -> list[dict]:
         """Fetch all scenes with more than one file, optionally excluding scenes with certain tags."""
-        # Build the filter
-        scene_filter = "file_count: { value: 1, modifier: GREATER_THAN }"
-        if exclude_tag_ids:
-            tag_filter = f'tags: {{ value: {exclude_tag_ids}, modifier: EXCLUDES }}'
-            scene_filter = f"{scene_filter}, {tag_filter}"
-
-        query = f"""
-        query MultiFileScenes {{
-          findScenes(scene_filter: {{ {scene_filter} }}, filter: {{ per_page: -1 }}) {{
-            scenes {{
+        query = """
+        query MultiFileScenes($scene_filter: SceneFilterType) {
+          findScenes(scene_filter: $scene_filter, filter: { per_page: -1 }) {
+            scenes {
               id
               title
-              files {{
+              files {
                 id
                 path
                 basename
@@ -73,24 +67,29 @@ class StashClient:
                 height
                 frame_rate
                 bit_rate
-              }}
-              performers {{
+              }
+              performers {
                 id
                 name
-              }}
-              studio {{
+              }
+              studio {
                 id
                 name
-              }}
-              tags {{
+              }
+              tags {
                 id
                 name
-              }}
-            }}
-          }}
-        }}
+              }
+            }
+          }
+        }
         """
-        data = self._execute(query)
+        # Build the filter using variables (safer than string interpolation)
+        scene_filter: dict = {"file_count": {"value": 1, "modifier": "GREATER_THAN"}}
+        if exclude_tag_ids:
+            scene_filter["tags"] = {"value": exclude_tag_ids, "modifier": "EXCLUDES"}
+
+        data = self._execute(query, {"scene_filter": scene_filter})
         return data["findScenes"]["scenes"]
 
     def set_scene_primary_file(self, scene_id: str, file_id: str) -> None:
