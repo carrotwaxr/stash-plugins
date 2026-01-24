@@ -10,19 +10,26 @@ def find_duplicates(performers: list[dict]) -> dict[tuple[str, str], list[dict]]
 
     Returns:
         Dict mapping (endpoint, stash_id) tuples to lists of duplicate performers.
-        Only includes groups with 2+ performers.
+        Only includes groups with 2+ distinct performers.
     """
     buckets: dict[tuple[str, str], list[dict]] = {}
+    # Track which performer IDs are already in each bucket to avoid duplicates
+    seen: dict[tuple[str, str], set[str]] = {}
 
     for performer in performers:
         stash_ids = performer.get("stash_ids") or []
+        performer_id = performer.get("id")
         for sid in stash_ids:
             key = (sid["endpoint"], sid["stash_id"])
             if key not in buckets:
                 buckets[key] = []
-            buckets[key].append(performer)
+                seen[key] = set()
+            # Only add if this performer isn't already in this bucket
+            if performer_id not in seen[key]:
+                buckets[key].append(performer)
+                seen[key].add(performer_id)
 
-    # Filter to only actual duplicates (2+ performers sharing same stash_id)
+    # Filter to only actual duplicates (2+ distinct performers sharing same stash_id)
     duplicates = {k: v for k, v in buckets.items() if len(v) >= 2}
 
     return duplicates
