@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scene File Deduper</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>Scene File Deduper</h1>
+        <p class="summary">
+            {% if total_scenes > 0 %}
+                Found <strong>{{ total_scenes }}</strong> scene{{ 's' if total_scenes != 1 else '' }} with multiple files
+            {% else %}
+                No multi-file scenes found.
+            {% endif %}
+        </p>
+    </header>
+
+    <div class="filter-bar">
+        <label for="tag-input">Exclude scenes with tags:</label>
+        <div class="tag-input-container">
+            <input type="text" id="tag-input" placeholder="Type to search tags..." autocomplete="off">
+            <div id="tag-suggestions" class="suggestions hidden"></div>
+        </div>
+        <div id="selected-tags" class="selected-tags"></div>
+        <button id="apply-filter" class="apply-btn">Apply Filter</button>
+    </div>
+
+    <main id="scenes-container">
+        {% for scene in scenes %}
+        <div class="scene-card" data-scene-id="{{ scene.id }}">
+            <div class="scene-header">
+                <h2>{{ scene.title or 'Untitled Scene' }}</h2>
+                <div class="scene-meta">
+                    {% if scene.studio %}
+                    <span class="studio">{{ scene.studio.name }}</span>
+                    {% endif %}
+                    {% if scene.performers %}
+                    <span class="performers">{{ scene.performers | map(attribute='name') | join(', ') }}</span>
+                    {% endif %}
+                </div>
+                {% if scene.tags %}
+                <div class="scene-tags">
+                    {% for tag in scene.tags %}
+                    <span class="tag">{{ tag.name }}</span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="files-container">
+                {% for file in scene.files %}
+                <div class="file-card" data-file-id="{{ file.id }}">
+                    {% if loop.first %}
+                    <div class="primary-badge">Primary</div>
+                    {% endif %}
+
+                    <div class="file-info">
+                        <div class="resolution">{{ file.width }}x{{ file.height }}</div>
+                        <div class="codec">{{ file.video_codec or 'Unknown' }}</div>
+                    </div>
+
+                    <div class="file-details">
+                        <div class="detail">
+                            <span class="label">Size:</span>
+                            <span class="value">{{ (file.size / 1024 / 1024 / 1024) | round(2) }} GB</span>
+                        </div>
+                        <div class="detail">
+                            <span class="label">Duration:</span>
+                            <span class="value">{{ (file.duration / 60) | round(1) }} min</span>
+                        </div>
+                        <div class="detail">
+                            <span class="label">Bitrate:</span>
+                            <span class="value">{{ ((file.bit_rate or 0) / 1000000) | round(1) }} Mbps</span>
+                        </div>
+                        <div class="detail">
+                            <span class="label">Frame Rate:</span>
+                            <span class="value">{{ file.frame_rate | round(2) }} fps</span>
+                        </div>
+                        <div class="detail">
+                            <span class="label">Audio:</span>
+                            <span class="value">{{ file.audio_codec or 'Unknown' }}</span>
+                        </div>
+                    </div>
+
+                    <div class="file-path" title="{{ file.path }}">{{ file.path }}</div>
+
+                    <div class="file-actions">
+                        <button class="keep-btn" onclick="keepFile('{{ scene.id }}', '{{ file.id }}', this)">
+                            Keep This
+                        </button>
+                        <button class="delete-btn" onclick="deleteFile('{{ scene.id }}', '{{ file.id }}', this)">
+                            Delete
+                        </button>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script>
+        // Store all tags for autocomplete
+        const allTags = {{ all_tags | tojson }};
+        let selectedTagIds = [];
+
+        // Tag autocomplete functionality
+        const tagInput = document.getElementById('tag-input');
+        const suggestions = document.getElementById('tag-suggestions');
+        const selectedTagsDiv = document.getElementById('selected-tags');
+
+        tagInput.addEventListener('input', (e) => {
+            const query = e.target.value.toLowerCase();
+            if (query.length < 1) {
+                suggestions.classList.add('hidden');
+                return;
+            }
+
+            const matches = allTags
+                .filter(tag => tag.name.toLowerCase().includes(query))
+                .filter(tag => !selectedTagIds.includes(tag.id))
+                .slice(0, 10);
+
+            if (matches.length === 0) {
+                suggestions.classList.add('hidden');
+                return;
+            }
+
+            // Use safe DOM methods to avoid XSS
+            suggestions.replaceChildren(...matches.map(tag => {
+                const div = document.createElement('div');
+                div.className = 'suggestion';
+                div.dataset.id = tag.id;
+                div.textContent = tag.name;
+                return div;
+            }));
+            suggestions.classList.remove('hidden');
+        });
+
+        suggestions.addEventListener('click', (e) => {
+            if (e.target.classList.contains('suggestion')) {
+                const tagId = e.target.dataset.id;
+                const tagName = e.target.textContent;
+                addTag(tagId, tagName);
+                tagInput.value = '';
+                suggestions.classList.add('hidden');
+            }
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.tag-input-container')) {
+                suggestions.classList.add('hidden');
+            }
+        });
+
+        function addTag(id, name) {
+            if (selectedTagIds.includes(id)) return;
+            selectedTagIds.push(id);
+
+            // Use safe DOM methods to avoid XSS
+            const chip = document.createElement('span');
+            chip.className = 'tag-chip';
+            chip.dataset.id = id;
+            chip.appendChild(document.createTextNode(name + ' '));
+            const removeBtn = document.createElement('span');
+            removeBtn.className = 'remove';
+            removeBtn.textContent = '\u00D7';
+            removeBtn.addEventListener('click', () => removeTag(id));
+            chip.appendChild(removeBtn);
+            selectedTagsDiv.appendChild(chip);
+        }
+
+        function removeTag(id) {
+            selectedTagIds = selectedTagIds.filter(t => t !== id);
+            const chip = selectedTagsDiv.querySelector(`[data-id="${id}"]`);
+            if (chip) chip.remove();
+        }
+
+        document.getElementById('apply-filter').addEventListener('click', () => {
+            const params = new URLSearchParams();
+            if (selectedTagIds.length > 0) {
+                params.set('exclude_tags', selectedTagIds.join(','));
+            }
+            window.location.href = '/?' + params.toString();
+        });
+
+        // Initialize selected tags from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const excludeTags = urlParams.get('exclude_tags');
+        if (excludeTags) {
+            excludeTags.split(',').forEach(id => {
+                const tag = allTags.find(t => String(t.id) === id);
+                if (tag) addTag(String(tag.id), tag.name);
+            });
+        }
+
+        // File action functions
+        async function keepFile(sceneId, fileId, buttonElement) {
+            const sceneCard = buttonElement.closest('.scene-card');
+            const allFileCards = sceneCard.querySelectorAll('.file-card');
+            const allFileIds = Array.from(allFileCards).map(c => c.dataset.fileId);
+            const fileIdsToDelete = allFileIds.filter(id => id !== fileId);
+
+            if (fileIdsToDelete.length === 0) {
+                showToast('This is the only file', 'error');
+                return;
+            }
+
+            // Disable all buttons
+            sceneCard.querySelectorAll('button').forEach(btn => btn.disabled = true);
+
+            try {
+                const response = await fetch('/api/delete-files', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        scene_id: sceneId,
+                        file_ids_to_delete: fileIdsToDelete,
+                        keep_file_id: fileId,
+                        all_file_ids: allFileIds
+                    })
+            });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showToast('Files deleted, kept selected file', 'success');
+                    sceneCard.remove();
+                    updateSummary();
+                } else {
+                    showToast(`Error: ${result.error}`, 'error');
+                    sceneCard.querySelectorAll('button').forEach(btn => btn.disabled = false);
+                }
+            } catch (err) {
+                showToast(`Network error: ${err.message}`, 'error');
+                sceneCard.querySelectorAll('button').forEach(btn => btn.disabled = false);
+            }
+        }
+
+        async function deleteFile(sceneId, fileId, buttonElement) {
+            const sceneCard = buttonElement.closest('.scene-card');
+            const allFileCards = sceneCard.querySelectorAll('.file-card');
+            const allFileIds = Array.from(allFileCards).map(c => c.dataset.fileId);
+
+            if (allFileIds.length <= 1) {
+                showToast('Cannot delete the only file', 'error');
+                return;
+            }
+
+            // Find a file to keep (any file that's not being deleted)
+            const keepFileId = allFileIds.find(id => id !== fileId);
+
+            // Disable all buttons
+            sceneCard.querySelectorAll('button').forEach(btn => btn.disabled = true);
+
+            try {
+                const response = await fetch('/api/delete-files', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        scene_id: sceneId,
+                        file_ids_to_delete: [fileId],
+                        keep_file_id: keepFileId,
+                        all_file_ids: allFileIds
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showToast('File deleted', 'success');
+                    // If only one file left, remove the scene card
+                    if (allFileIds.length === 2) {
+                        sceneCard.remove();
+                        updateSummary();
+                    } else {
+                        // Remove just this file card
+                        const fileCard = buttonElement.closest('.file-card');
+                        fileCard.remove();
+                        // Re-enable buttons on remaining cards
+                        sceneCard.querySelectorAll('button').forEach(btn => btn.disabled = false);
+                    }
+                } else {
+                    showToast(`Error: ${result.error}`, 'error');
+                    sceneCard.querySelectorAll('button').forEach(btn => btn.disabled = false);
+                }
+            } catch (err) {
+                showToast(`Network error: ${err.message}`, 'error');
+                sceneCard.querySelectorAll('button').forEach(btn => btn.disabled = false);
+            }
+        }
+
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `toast ${type}`;
+            setTimeout(() => {
+                toast.className = 'toast hidden';
+            }, 3000);
+        }
+
+        function updateSummary() {
+            const scenes = document.querySelectorAll('.scene-card');
+            const summary = document.querySelector('.summary');
+
+            if (scenes.length === 0) {
+                summary.innerHTML = 'No multi-file scenes found.';
+            } else {
+                summary.innerHTML = `Found <strong>${scenes.length}</strong> scene${scenes.length !== 1 ? 's' : ''} with multiple files`;
+            }
+        }
+    </script>
+</body>
+</html>
