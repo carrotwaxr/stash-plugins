@@ -131,9 +131,14 @@
                 return;
             }
 
-            suggestions.innerHTML = matches
-                .map(tag => `<div class="suggestion" data-id="${tag.id}">${tag.name}</div>`)
-                .join('');
+            // Use safe DOM methods to avoid XSS
+            suggestions.replaceChildren(...matches.map(tag => {
+                const div = document.createElement('div');
+                div.className = 'suggestion';
+                div.dataset.id = tag.id;
+                div.textContent = tag.name;
+                return div;
+            }));
             suggestions.classList.remove('hidden');
         });
 
@@ -157,10 +162,16 @@
             if (selectedTagIds.includes(id)) return;
             selectedTagIds.push(id);
 
+            // Use safe DOM methods to avoid XSS
             const chip = document.createElement('span');
             chip.className = 'tag-chip';
             chip.dataset.id = id;
-            chip.innerHTML = `${name} <span class="remove" onclick="removeTag('${id}')">&times;</span>`;
+            chip.appendChild(document.createTextNode(name + ' '));
+            const removeBtn = document.createElement('span');
+            removeBtn.className = 'remove';
+            removeBtn.textContent = '\u00D7';
+            removeBtn.addEventListener('click', () => removeTag(id));
+            chip.appendChild(removeBtn);
             selectedTagsDiv.appendChild(chip);
         }
 
@@ -183,8 +194,8 @@
         const excludeTags = urlParams.get('exclude_tags');
         if (excludeTags) {
             excludeTags.split(',').forEach(id => {
-                const tag = allTags.find(t => t.id === id);
-                if (tag) addTag(tag.id, tag.name);
+                const tag = allTags.find(t => String(t.id) === id);
+                if (tag) addTag(String(tag.id), tag.name);
             });
         }
 
