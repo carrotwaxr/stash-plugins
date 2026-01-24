@@ -239,9 +239,7 @@ h1 {
 .file-path {
     font-size: 0.75rem;
     color: #999;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    word-break: break-all;
     margin-bottom: 0.75rem;
     font-family: monospace;
 }
