@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Duplicate Performer Finder</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>Duplicate Performer Finder</h1>
+        <p class="summary">
+            {% if total_groups > 0 %}
+                Found <strong>{{ total_groups }}</strong> duplicate group{{ 's' if total_groups != 1 else '' }}
+                across <strong>{{ endpoint_count }}</strong> endpoint{{ 's' if endpoint_count != 1 else '' }}
+            {% else %}
+                No duplicate performers found. Your library is clean!
+            {% endif %}
+        </p>
+    </header>
+
+    <main>
+        {% for endpoint, groups in duplicates_by_endpoint.items() %}
+        <section class="endpoint-section">
+            <h2>{{ endpoint }}</h2>
+
+            {% for group in groups %}
+            <div class="duplicate-group" data-stash-id="{{ group.stash_id }}" data-endpoint="{{ endpoint }}">
+                <div class="group-header">
+                    <span class="stash-id">Stash ID: {{ group.stash_id[:8] }}...</span>
+                    <span class="performer-count">{{ group.performers | length }} performers</span>
+                </div>
+
+                <div class="performer-cards">
+                    {% for performer in group.performers %}
+                    <div class="performer-card {% if performer.is_suggested %}suggested{% endif %}"
+                         data-performer-id="{{ performer.id }}">
+                        <h3>{{ performer.name }}</h3>
+
+                        {% if performer.alias_list %}
+                        <div class="field">
+                            <span class="label">Aliases:</span>
+                            <span class="value">{{ performer.alias_list | join(', ') }}</span>
+                        </div>
+                        {% endif %}
+
+                        {% if performer.gender %}
+                        <div class="field">
+                            <span class="label">Gender:</span>
+                            <span class="value">{{ performer.gender }}</span>
+                        </div>
+                        {% endif %}
+
+                        {% if performer.country %}
+                        <div class="field">
+                            <span class="label">Country:</span>
+                            <span class="value">{{ performer.country }}</span>
+                        </div>
+                        {% endif %}
+
+                        <div class="counts">
+                            <span class="count" title="Scenes">{{ performer.scene_count or 0 }} scenes</span>
+                            <span class="count" title="Images">{{ performer.image_count or 0 }} images</span>
+                            <span class="count" title="Galleries">{{ performer.gallery_count or 0 }} galleries</span>
+                        </div>
+
+                        <button class="merge-btn" onclick="mergeInto('{{ performer.id }}', this)">
+                            Keep This One
+                        </button>
+
+                        {% if performer.is_suggested %}
+                        <div class="suggested-badge">Suggested</div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+        </section>
+        {% endfor %}
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script>
+        async function mergeInto(destinationId, buttonElement) {
+            const card = buttonElement.closest('.performer-card');
+            const group = buttonElement.closest('.duplicate-group');
+            const allCards = group.querySelectorAll('.performer-card');
+
+            // Collect source IDs (all performers except the destination)
+            const sourceIds = [];
+            allCards.forEach(c => {
+                const id = c.dataset.performerId;
+                if (id !== destinationId) {
+                    sourceIds.push(id);
+                }
+            });
+
+            // Disable all buttons in this group
+            group.querySelectorAll('.merge-btn').forEach(btn => {
+                btn.disabled = true;
+                btn.textContent = 'Merging...';
+            });
+
+            try {
+                const response = await fetch('/api/merge', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        destination_id: destinationId,
+                        source_ids: sourceIds
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showToast(`Merged into ${result.merged_into}`, 'success');
+                    group.remove();
+                    updateSummary();
+                } else {
+                    showToast(`Error: ${result.error}`, 'error');
+                    // Re-enable buttons
+                    group.querySelectorAll('.merge-btn').forEach(btn => {
+                        btn.disabled = false;
+                        btn.textContent = 'Keep This One';
+                    });
+                }
+            } catch (err) {
+                showToast(`Network error: ${err.message}`, 'error');
+                group.querySelectorAll('.merge-btn').forEach(btn => {
+                    btn.disabled = false;
+                    btn.textContent = 'Keep This One';
+                });
+            }
+        }
+
+        function showToast(message, type) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `toast ${type}`;
+            setTimeout(() => {
+                toast.className = 'toast hidden';
+            }, 3000);
+        }
+
+        function updateSummary() {
+            const groups = document.querySelectorAll('.duplicate-group');
+            const summary = document.querySelector('.summary');
+            const endpoints = document.querySelectorAll('.endpoint-section');
+
+            if (groups.length === 0) {
+                summary.innerHTML = 'No duplicate performers found. Your library is clean!';
+                // Remove empty endpoint sections
+                endpoints.forEach(section => {
+                    if (section.querySelectorAll('.duplicate-group').length === 0) {
+                        section.remove();
+                    }
+                });
+            } else {
+                const endpointCount = document.querySelectorAll('.endpoint-section').length;
+                summary.innerHTML = `Found <strong>${groups.length}</strong> duplicate group${groups.length !== 1 ? 's' : ''} across <strong>${endpointCount}</strong> endpoint${endpointCount !== 1 ? 's' : ''}`;
+            }
+        }
+    </script>
+</body>
+</html>
