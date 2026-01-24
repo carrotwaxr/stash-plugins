@@ -4,7 +4,8 @@
 **/.pytest_cache
 **/node_modules
 CLAUDE.md
-scripts/
+scripts/*
+!scripts/duplicate-performer-finder/
 
 # Environment files with secrets
 .env
