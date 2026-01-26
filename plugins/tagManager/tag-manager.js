@@ -947,6 +947,20 @@
   }
 
   /**
+   * Find a local tag by name or alias match (case-insensitive)
+   * @param {string} name - Name to search for
+   * @returns {object|undefined} - Matching local tag or undefined
+   */
+  function findLocalTagByName(name) {
+    if (!name) return undefined;
+    const lowerName = name.toLowerCase();
+    return localTags.find(t =>
+      t.name.toLowerCase() === lowerName ||
+      t.aliases?.some(a => a.toLowerCase() === lowerName)
+    );
+  }
+
+  /**
    * Check if a tag has a stash_id for a specific endpoint
    * @param {object} tag - Tag object with stash_ids array
    * @param {string} endpoint - Endpoint URL to check
