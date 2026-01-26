@@ -109,6 +109,86 @@ test('returns false for undefined endpoint', () => {
   assertEqual(hasStashIdForEndpoint(sampleTags[0], undefined), false);
 });
 
+// Test getFilteredTags behavior
+console.log('\n=== getFilteredTags endpoint-aware tests ===\n');
+
+// Simulated state
+let localTags = [];
+let selectedStashBox = null;
+let currentFilter = 'unmatched';
+
+function getFilteredTags() {
+  const endpoint = selectedStashBox?.endpoint;
+
+  const hasEndpointMatch = (tag) => hasStashIdForEndpoint(tag, endpoint);
+
+  const unmatchedTags = localTags.filter(t => !hasEndpointMatch(t));
+  const matchedTags = localTags.filter(t => hasEndpointMatch(t));
+
+  switch (currentFilter) {
+    case 'matched':
+      return { filtered: matchedTags, unmatched: unmatchedTags, matched: matchedTags };
+    case 'all':
+      return { filtered: localTags, unmatched: unmatchedTags, matched: matchedTags };
+    default: // 'unmatched'
+      return { filtered: unmatchedTags, unmatched: unmatchedTags, matched: matchedTags };
+  }
+}
+
+test('unmatched filter shows tags without stash_id for selected endpoint', () => {
+  localTags = sampleTags;
+  selectedStashBox = { endpoint: 'https://stashdb.org/graphql' };
+  currentFilter = 'unmatched';
+
+  const result = getFilteredTags();
+  // Tags 3, 4, 5 have no StashDB stash_id
+  assertEqual(result.filtered.length, 3);
+  assertEqual(result.unmatched.length, 3);
+  assertEqual(result.matched.length, 2);
+});
+
+test('unmatched filter is endpoint-specific', () => {
+  localTags = sampleTags;
+  selectedStashBox = { endpoint: 'https://pmvstash.org/graphql' };
+  currentFilter = 'unmatched';
+
+  const result = getFilteredTags();
+  // Only tag 2 (Brunette) has PMVstash stash_id
+  // So unmatched should be tags 1, 3, 4, 5
+  assertEqual(result.filtered.length, 4);
+  assertEqual(result.matched.length, 1);
+});
+
+test('matched filter shows tags with stash_id for selected endpoint', () => {
+  localTags = sampleTags;
+  selectedStashBox = { endpoint: 'https://stashdb.org/graphql' };
+  currentFilter = 'matched';
+
+  const result = getFilteredTags();
+  // Tags 1 and 2 have StashDB stash_id
+  assertEqual(result.filtered.length, 2);
+});
+
+test('all filter shows all tags', () => {
+  localTags = sampleTags;
+  selectedStashBox = { endpoint: 'https://stashdb.org/graphql' };
+  currentFilter = 'all';
+
+  const result = getFilteredTags();
+  assertEqual(result.filtered.length, 5);
+});
+
+test('handles null selectedStashBox gracefully', () => {
+  localTags = sampleTags;
+  selectedStashBox = null;
+  currentFilter = 'unmatched';
+
+  const result = getFilteredTags();
+  // With no endpoint, all tags should be "unmatched"
+  assertEqual(result.filtered.length, 5);
+  assertEqual(result.matched.length, 0);
+});
+
 // Summary
 console.log('\n=== Summary ===\n');
 console.log(`Passed: ${passed}`);

@@ -822,11 +822,15 @@
   }
 
   /**
-   * Get filtered tags based on current filter setting
+   * Get filtered tags based on current filter setting and selected endpoint
    */
   function getFilteredTags() {
-    const unmatchedTags = localTags.filter(t => !t.stash_ids || t.stash_ids.length === 0);
-    const matchedTags = localTags.filter(t => t.stash_ids && t.stash_ids.length > 0);
+    const endpoint = selectedStashBox?.endpoint;
+
+    const hasEndpointMatch = (tag) => hasStashIdForEndpoint(tag, endpoint);
+
+    const unmatchedTags = localTags.filter(t => !hasEndpointMatch(t));
+    const matchedTags = localTags.filter(t => hasEndpointMatch(t));
 
     switch (currentFilter) {
       case 'matched':
