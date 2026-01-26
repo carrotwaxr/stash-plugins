@@ -1023,7 +1023,9 @@
       `;
     }
 
-    // Group tags by category
+    const isSearching = browseSearchQuery.trim().length > 0;
+
+    // Group tags by category (for sidebar)
     const categories = {};
     const uncategorized = [];
 
@@ -1060,23 +1062,25 @@
         </div>`
       : '';
 
-    // Render tag list for selected category
+    // Render tag list based on search or category selection
     let tagListHtml = '';
-    if (browseCategory) {
+    if (isSearching) {
+      const searchResults = filterTagsBySearch(browseSearchQuery);
+      tagListHtml = renderSearchResults(searchResults);
+    } else if (browseCategory) {
       const tagsToShow = browseCategory === '__uncategorized__'
         ? uncategorized
         : (categories[browseCategory] || []);
-
       tagListHtml = renderBrowseTagList(tagsToShow);
     } else {
-      tagListHtml = `<div class="tm-browse-hint">Select a category to view tags</div>`;
+      tagListHtml = `<div class="tm-browse-hint">Select a category to view tags, or search above</div>`;
     }
 
     const selectedCount = selectedForImport.size;
 
     return `
       <div class="tm-browse">
-        <div class="tm-browse-sidebar">
+        <div class="tm-browse-sidebar ${isSearching ? 'tm-sidebar-hidden' : ''}">
           <div class="tm-browse-sidebar-header">
             <strong>Categories</strong>
             <span class="tm-total-tags">${stashdbTags.length} total</span>
@@ -1087,6 +1091,12 @@
           </div>
         </div>
         <div class="tm-browse-main">
+          <div class="tm-browse-search">
+            <input type="text" class="tm-browse-search-input" id="tm-browse-search"
+                   placeholder="Search tags by name or alias..."
+                   value="${escapeHtml(browseSearchQuery)}">
+            ${browseSearchQuery ? '<button type="button" class="tm-browse-search-clear" id="tm-search-clear">&times;</button>' : ''}
+          </div>
           <div class="tm-browse-toolbar">
             <div class="tm-selection-controls">
               <button class="btn btn-sm btn-secondary" id="tm-select-all">Select All</button>
