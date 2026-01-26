@@ -991,6 +991,15 @@
   opacity: 0.6;
 }
 
+.tm-can-link-row {
+  background-color: rgba(255, 193, 7, 0.1);
+}
+
+.tm-can-link {
+  color: #ffc107;
+  font-size: 0.85em;
+}
+
 .tm-browse-checkbox {
   flex-shrink: 0;
 }

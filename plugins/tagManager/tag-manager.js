@@ -34,6 +34,7 @@
   let selectedForImport = new Set(); // Tag IDs selected for import
   let browseSearchQuery = ''; // Search query for browse view
   let isImporting = false; // Guard against double-click on import
+  let browseFilter = 'all'; // 'all', 'unlinked', or 'linked' for browse tab
 
   /**
    * Set page title with retry to overcome Stash's title management
@@ -822,11 +823,15 @@
   }
 
   /**
-   * Get filtered tags based on current filter setting
+   * Get filtered tags based on current filter setting and selected endpoint
    */
   function getFilteredTags() {
-    const unmatchedTags = localTags.filter(t => !t.stash_ids || t.stash_ids.length === 0);
-    const matchedTags = localTags.filter(t => t.stash_ids && t.stash_ids.length > 0);
+    const endpoint = selectedStashBox?.endpoint;
+
+    const hasEndpointMatch = (tag) => hasStashIdForEndpoint(tag, endpoint);
+
+    const unmatchedTags = localTags.filter(t => !hasEndpointMatch(t));
+    const matchedTags = localTags.filter(t => hasEndpointMatch(t));
 
     switch (currentFilter) {
       case 'matched':
@@ -872,7 +877,8 @@
     if (statusEl) statusEl.textContent = 'Importing...';
     if (btnEl) btnEl.disabled = true;
 
-    let imported = 0;
+    let created = 0;
+    let linked = 0;
     let errors = 0;
 
     for (const stashdbId of selectedForImport) {
@@ -880,39 +886,69 @@
       if (!stashdbTag) continue;
 
       try {
-        // Create local tag with stash_id
-        const input = {
-          name: stashdbTag.name,
-          description: stashdbTag.description || '',
-          aliases: stashdbTag.aliases || [],
-          stash_ids: [{
-            endpoint: selectedStashBox.endpoint,
-            stash_id: stashdbId
-          }]
-        };
+        // Check if tag exists locally by name
+        const existingTag = findLocalTagByName(stashdbTag.name);
 
-        const query = `
-          mutation TagCreate($input: TagCreateInput!) {
-            tagCreate(input: $input) {
-              id
-              name
-            }
-          }
-        `;
+        if (existingTag) {
+          // UPDATE: Link existing tag to this endpoint
+          const existingStashIds = existingTag.stash_ids || [];
+          const filteredStashIds = existingStashIds.filter(
+            sid => sid.endpoint !== selectedStashBox.endpoint
+          );
 
-        const data = await graphqlRequest(query, { input });
-        if (data?.tagCreate) {
-          // Add to local tags
-          localTags.push({
-            id: data.tagCreate.id,
-            name: data.tagCreate.name,
-            aliases: stashdbTag.aliases || [],
-            stash_ids: input.stash_ids
+          await updateTag({
+            id: existingTag.id,
+            stash_ids: [...filteredStashIds, {
+              endpoint: selectedStashBox.endpoint,
+              stash_id: stashdbId
+            }]
           });
-          imported++;
+
+          // Update local state
+          const idx = localTags.findIndex(t => t.id === existingTag.id);
+          if (idx >= 0) {
+            localTags[idx].stash_ids = [...filteredStashIds, {
+              endpoint: selectedStashBox.endpoint,
+              stash_id: stashdbId
+            }];
+          }
+
+          linked++;
+        } else {
+          // CREATE: New tag with stash_id
+          const input = {
+            name: stashdbTag.name,
+            description: stashdbTag.description || '',
+            aliases: stashdbTag.aliases || [],
+            stash_ids: [{
+              endpoint: selectedStashBox.endpoint,
+              stash_id: stashdbId
+            }]
+          };
+
+          const query = `
+            mutation TagCreate($input: TagCreateInput!) {
+              tagCreate(input: $input) {
+                id
+                name
+              }
+            }
+          `;
+
+          const data = await graphqlRequest(query, { input });
+          if (data?.tagCreate) {
+            // Add to local tags
+            localTags.push({
+              id: data.tagCreate.id,
+              name: data.tagCreate.name,
+              aliases: stashdbTag.aliases || [],
+              stash_ids: input.stash_ids
+            });
+            created++;
+          }
         }
       } catch (e) {
-        console.error(`[tagManager] Failed to import "${stashdbTag.name}":`, e);
+        console.error(`[tagManager] Failed to import/link "${stashdbTag.name}":`, e);
         errors++;
       }
     }
@@ -920,9 +956,12 @@
     // Clear selection and re-render
     selectedForImport.clear();
 
-    const message = errors > 0
-      ? `Imported ${imported} tag${imported !== 1 ? 's' : ''}, ${errors} error${errors !== 1 ? 's' : ''}`
-      : `Imported ${imported} tag${imported !== 1 ? 's' : ''}`;
+    // Build result message
+    const parts = [];
+    if (created > 0) parts.push(`Created ${created} tag${created !== 1 ? 's' : ''}`);
+    if (linked > 0) parts.push(`linked ${linked} existing`);
+    if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
+    const message = parts.join(', ') || 'No changes';
 
     if (statusEl) statusEl.textContent = message;
 
@@ -943,6 +982,48 @@
   }
 
   /**
+   * Find a local tag by name or alias match (case-insensitive)
+   * @param {string} name - Name to search for
+   * @returns {object|undefined} - Matching local tag or undefined
+   */
+  function findLocalTagByName(name) {
+    if (!name) return undefined;
+    const lowerName = name.toLowerCase();
+    return localTags.find(t =>
+      t.name.toLowerCase() === lowerName ||
+      t.aliases?.some(a => a.toLowerCase() === lowerName)
+    );
+  }
+
+  /**
+   * Check if a tag has a stash_id for a specific endpoint
+   * @param {object} tag - Tag object with stash_ids array
+   * @param {string} endpoint - Endpoint URL to check
+   * @returns {boolean} - True if tag has stash_id for this endpoint
+   */
+  function hasStashIdForEndpoint(tag, endpoint) {
+    if (!tag || !endpoint) return false;
+    return tag.stash_ids?.some(sid => sid.endpoint === endpoint) ?? false;
+  }
+
+  /**
+   * Get a readable display name for a stash-box endpoint
+   * @param {object} stashBox - Stash-box object with endpoint and optionally name
+   * @returns {string} - Display name like "StashDB" or "pmvstash.org"
+   */
+  function getEndpointDisplayName(stashBox) {
+    if (!stashBox) return 'Stash-Box';
+    if (stashBox.name) return stashBox.name;
+    // Extract domain from endpoint URL
+    try {
+      const url = new URL(stashBox.endpoint);
+      return url.hostname.replace(/^www\./, '');
+    } catch {
+      return 'Stash-Box';
+    }
+  }
+
+  /**
    * Render list of tags for browse/import view
    */
   function renderBrowseTagList(tags) {
@@ -950,22 +1031,58 @@
       return '<div class="tm-browse-empty">No tags in this category</div>';
     }
 
+    const endpoint = selectedStashBox?.endpoint;
+
+    // Apply browse filter
+    let filteredTags = tags;
+    if (browseFilter === 'linked') {
+      filteredTags = tags.filter(tag => {
+        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
+        return hasStashIdForEndpoint(localMatch, endpoint);
+      });
+    } else if (browseFilter === 'unlinked') {
+      filteredTags = tags.filter(tag => {
+        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
+        return !hasStashIdForEndpoint(localMatch, endpoint);
+      });
+    }
+
+    if (filteredTags.length === 0) {
+      return '<div class="tm-browse-empty">No tags match the current filter</div>';
+    }
+
+    tags = filteredTags;
+
     const rows = tags.map(tag => {
-      const localTag = findLocalTagByStashId(tag.id);
-      const existsLocally = !!localTag;
+      // Check if linked to THIS endpoint specifically
+      const isLinkedToEndpoint = hasStashIdForEndpoint(
+        localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id)),
+        endpoint
+      );
+      // Check if tag exists locally by name (for smart import)
+      const existsByName = findLocalTagByName(tag.name);
+      const canLink = existsByName && !isLinkedToEndpoint;
+
       const isSelected = selectedForImport.has(tag.id);
 
+      let statusHtml = '';
+      if (isLinkedToEndpoint) {
+        statusHtml = `<span class="tm-local-exists" title="Already linked to ${escapeHtml(getEndpointDisplayName(selectedStashBox))}">✓ Linked</span>`;
+      } else if (canLink) {
+        statusHtml = `<span class="tm-can-link" title="Will link to existing tag: ${escapeHtml(existsByName.name)}">→ Link to "${escapeHtml(existsByName.name)}"</span>`;
+      }
+
       return `
-        <div class="tm-browse-tag ${existsLocally ? 'tm-exists-locally' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
+        <div class="tm-browse-tag ${isLinkedToEndpoint ? 'tm-exists-locally' : ''} ${canLink ? 'tm-can-link-row' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
           <label class="tm-browse-checkbox">
-            <input type="checkbox" ${isSelected ? 'checked' : ''} ${existsLocally ? 'disabled' : ''}>
+            <input type="checkbox" ${isSelected ? 'checked' : ''} ${isLinkedToEndpoint ? 'disabled' : ''}>
           </label>
           <div class="tm-browse-tag-info">
             <span class="tm-browse-tag-name">${escapeHtml(tag.name)}</span>
             ${tag.aliases?.length ? `<span class="tm-browse-tag-aliases">${escapeHtml(tag.aliases.slice(0, 3).join(', '))}</span>` : ''}
           </div>
           <div class="tm-browse-tag-status">
-            ${existsLocally ? `<span class="tm-local-exists" title="Linked to: ${escapeHtml(localTag.name)}">✓ Exists</span>` : ''}
+            ${statusHtml}
           </div>
         </div>
       `;
@@ -982,16 +1099,52 @@
       return `<div class="tm-browse-empty">No tags found matching "${escapeHtml(browseSearchQuery)}"</div>`;
     }
 
+    const endpoint = selectedStashBox?.endpoint;
+
+    // Apply browse filter
+    let filteredTags = tags;
+    if (browseFilter === 'linked') {
+      filteredTags = tags.filter(tag => {
+        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
+        return hasStashIdForEndpoint(localMatch, endpoint);
+      });
+    } else if (browseFilter === 'unlinked') {
+      filteredTags = tags.filter(tag => {
+        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
+        return !hasStashIdForEndpoint(localMatch, endpoint);
+      });
+    }
+
+    if (filteredTags.length === 0) {
+      return '<div class="tm-browse-empty">No tags match the current filter</div>';
+    }
+
+    tags = filteredTags;
+
     const rows = tags.map(tag => {
-      const localTag = findLocalTagByStashId(tag.id);
-      const existsLocally = !!localTag;
+      // Check if linked to THIS endpoint specifically
+      const isLinkedToEndpoint = hasStashIdForEndpoint(
+        localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id)),
+        endpoint
+      );
+      // Check if tag exists locally by name (for smart import)
+      const existsByName = findLocalTagByName(tag.name);
+      const canLink = existsByName && !isLinkedToEndpoint;
+
       const isSelected = selectedForImport.has(tag.id);
       const categoryName = tag.category?.name || 'Uncategorized';
 
+      let statusHtml = '';
+      if (isLinkedToEndpoint) {
+        statusHtml = `<span class="tm-local-exists" title="Already linked to ${escapeHtml(getEndpointDisplayName(selectedStashBox))}">✓ Linked</span>`;
+      } else if (canLink) {
+        statusHtml = `<span class="tm-can-link" title="Will link to existing tag: ${escapeHtml(existsByName.name)}">→ Link</span>`;
+      }
+
       return `
-        <div class="tm-browse-tag ${existsLocally ? 'tm-exists-locally' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
+        <div class="tm-browse-tag ${isLinkedToEndpoint ? 'tm-exists-locally' : ''} ${canLink ? 'tm-can-link-row' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
           <label class="tm-browse-checkbox">
-            <input type="checkbox" ${isSelected ? 'checked' : ''} ${existsLocally ? 'disabled' : ''}>
+            <input type="checkbox" ${isSelected ? 'checked' : ''} ${isLinkedToEndpoint ? 'disabled' : ''}>
           </label>
           <div class="tm-browse-tag-info">
             <span class="tm-browse-tag-name">${escapeHtml(tag.name)}</span>
@@ -999,7 +1152,7 @@
             ${tag.aliases?.length ? `<span class="tm-browse-tag-aliases">${escapeHtml(tag.aliases.slice(0, 3).join(', '))}</span>` : ''}
           </div>
           <div class="tm-browse-tag-status">
-            ${existsLocally ? `<span class="tm-local-exists" title="Linked to: ${escapeHtml(localTag.name)}">✓ Exists</span>` : ''}
+            ${statusHtml}
           </div>
         </div>
       `;
@@ -1105,6 +1258,13 @@
                 ${selectedCount > 0 ? `${selectedCount} tag${selectedCount > 1 ? 's' : ''} selected` : 'No tags selected'}
               </span>
             </div>
+            <div class="tm-browse-filters">
+              <select id="tm-browse-filter" class="form-control">
+                <option value="all" ${browseFilter === 'all' ? 'selected' : ''}>Show All</option>
+                <option value="unlinked" ${browseFilter === 'unlinked' ? 'selected' : ''}>Show Unlinked</option>
+                <option value="linked" ${browseFilter === 'linked' ? 'selected' : ''}>Show Linked</option>
+              </select>
+            </div>
             <button class="btn btn-primary" id="tm-import-selected" ${selectedCount === 0 ? 'disabled' : ''}>
               Import Selected
             </button>
@@ -1172,7 +1332,7 @@
 
           <div class="tm-tabs">
             <button class="tm-tab ${activeTab === 'match' ? 'tm-tab-active' : ''}" data-tab="match">Match Local Tags</button>
-            <button class="tm-tab ${activeTab === 'browse' ? 'tm-tab-active' : ''}" data-tab="browse">Browse StashDB</button>
+            <button class="tm-tab ${activeTab === 'browse' ? 'tm-tab-active' : ''}" data-tab="browse">Browse Stash-Box</button>
           </div>
 
           ${activeTab === 'match' ? `
@@ -1374,6 +1534,12 @@
       if (importBtn) {
         importBtn.addEventListener('click', () => handleImportSelected(container));
       }
+
+      // Browse filter dropdown
+      container.querySelector('#tm-browse-filter')?.addEventListener('change', (e) => {
+        browseFilter = e.target.value;
+        renderPage(container);
+      });
     }
 
     // Stash-box dropdown
@@ -1387,8 +1553,14 @@
         stashdbTags = null;
         matchResults = {};
         cacheStatus = null;
-        // Load cache for new endpoint
+        // Load cache status for new endpoint
         await loadCacheStatus();
+
+        // If on browse tab and cache exists, load it automatically
+        if (activeTab === 'browse' && cacheStatus?.exists && !cacheStatus?.expired) {
+          await loadStashdbTags(container);
+        }
+
         renderPage(container);
       }
     });
@@ -1825,7 +1997,7 @@
           </table>
 
           <div class="tm-stashid-note">
-            <strong>StashDB ID will be added:</strong> ${escapeHtml(stashdbTag.id)}
+            <strong>${escapeHtml(getEndpointDisplayName(selectedStashBox))} ID will be added:</strong> ${escapeHtml(stashdbTag.id)}
           </div>
           <div class="tm-modal-error" id="tm-diff-error" style="display: none;"></div>
         </div>
@@ -1942,10 +2114,15 @@
         selectedParentId
       });
 
-      // Build update input
+      // Build update input - preserve existing stash_ids from other endpoints
+      const existingStashIds = tag.stash_ids || [];
+      const filteredStashIds = existingStashIds.filter(
+        sid => sid.endpoint !== endpoint
+      );
+
       const updateInput = {
         id: tag.id,
-        stash_ids: [{
+        stash_ids: [...filteredStashIds, {
           endpoint: endpoint,
           stash_id: stashdbTag.id,
         }],
