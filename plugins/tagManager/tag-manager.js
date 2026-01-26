@@ -1553,8 +1553,14 @@
         stashdbTags = null;
         matchResults = {};
         cacheStatus = null;
-        // Load cache for new endpoint
+        // Load cache status for new endpoint
         await loadCacheStatus();
+
+        // If on browse tab and cache exists, load it automatically
+        if (activeTab === 'browse' && cacheStatus?.exists && !cacheStatus?.expired) {
+          await loadStashdbTags(container);
+        }
+
         renderPage(container);
       }
     });
