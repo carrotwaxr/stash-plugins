@@ -1204,7 +1204,7 @@
 
           <div class="tm-tabs">
             <button class="tm-tab ${activeTab === 'match' ? 'tm-tab-active' : ''}" data-tab="match">Match Local Tags</button>
-            <button class="tm-tab ${activeTab === 'browse' ? 'tm-tab-active' : ''}" data-tab="browse">Browse StashDB</button>
+            <button class="tm-tab ${activeTab === 'browse' ? 'tm-tab-active' : ''}" data-tab="browse">Browse Stash-Box</button>
           </div>
 
           ${activeTab === 'match' ? `
