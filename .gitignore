@@ -14,3 +14,6 @@ scripts/*
 .env.local
 **/.env
 **/.env.local
+
+# Git worktrees
+.worktrees/
