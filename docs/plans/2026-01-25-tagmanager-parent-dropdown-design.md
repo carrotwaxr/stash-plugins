@@ -2,7 +2,7 @@
 
 **Issue**: [#80](https://github.com/carrotwaxr/stash-plugins/issues/80)
 **Date**: 2026-01-25
-**Status**: Draft
+**Status**: Approved
 
 ## Problem Summary
 
