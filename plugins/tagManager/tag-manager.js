@@ -1030,22 +1030,38 @@
       return '<div class="tm-browse-empty">No tags in this category</div>';
     }
 
+    const endpoint = selectedStashBox?.endpoint;
+
     const rows = tags.map(tag => {
-      const localTag = findLocalTagByStashId(tag.id);
-      const existsLocally = !!localTag;
+      // Check if linked to THIS endpoint specifically
+      const isLinkedToEndpoint = hasStashIdForEndpoint(
+        localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id)),
+        endpoint
+      );
+      // Check if tag exists locally by name (for smart import)
+      const existsByName = findLocalTagByName(tag.name);
+      const canLink = existsByName && !isLinkedToEndpoint;
+
       const isSelected = selectedForImport.has(tag.id);
 
+      let statusHtml = '';
+      if (isLinkedToEndpoint) {
+        statusHtml = `<span class="tm-local-exists" title="Already linked to ${escapeHtml(getEndpointDisplayName(selectedStashBox))}">✓ Linked</span>`;
+      } else if (canLink) {
+        statusHtml = `<span class="tm-can-link" title="Will link to existing tag: ${escapeHtml(existsByName.name)}">→ Link to "${escapeHtml(existsByName.name)}"</span>`;
+      }
+
       return `
-        <div class="tm-browse-tag ${existsLocally ? 'tm-exists-locally' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
+        <div class="tm-browse-tag ${isLinkedToEndpoint ? 'tm-exists-locally' : ''} ${canLink ? 'tm-can-link-row' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
           <label class="tm-browse-checkbox">
-            <input type="checkbox" ${isSelected ? 'checked' : ''} ${existsLocally ? 'disabled' : ''}>
+            <input type="checkbox" ${isSelected ? 'checked' : ''} ${isLinkedToEndpoint ? 'disabled' : ''}>
           </label>
           <div class="tm-browse-tag-info">
             <span class="tm-browse-tag-name">${escapeHtml(tag.name)}</span>
             ${tag.aliases?.length ? `<span class="tm-browse-tag-aliases">${escapeHtml(tag.aliases.slice(0, 3).join(', '))}</span>` : ''}
           </div>
           <div class="tm-browse-tag-status">
-            ${existsLocally ? `<span class="tm-local-exists" title="Linked to: ${escapeHtml(localTag.name)}">✓ Exists</span>` : ''}
+            ${statusHtml}
           </div>
         </div>
       `;
@@ -1062,16 +1078,32 @@
       return `<div class="tm-browse-empty">No tags found matching "${escapeHtml(browseSearchQuery)}"</div>`;
     }
 
+    const endpoint = selectedStashBox?.endpoint;
+
     const rows = tags.map(tag => {
-      const localTag = findLocalTagByStashId(tag.id);
-      const existsLocally = !!localTag;
+      // Check if linked to THIS endpoint specifically
+      const isLinkedToEndpoint = hasStashIdForEndpoint(
+        localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id)),
+        endpoint
+      );
+      // Check if tag exists locally by name (for smart import)
+      const existsByName = findLocalTagByName(tag.name);
+      const canLink = existsByName && !isLinkedToEndpoint;
+
       const isSelected = selectedForImport.has(tag.id);
       const categoryName = tag.category?.name || 'Uncategorized';
 
+      let statusHtml = '';
+      if (isLinkedToEndpoint) {
+        statusHtml = `<span class="tm-local-exists" title="Already linked to ${escapeHtml(getEndpointDisplayName(selectedStashBox))}">✓ Linked</span>`;
+      } else if (canLink) {
+        statusHtml = `<span class="tm-can-link" title="Will link to existing tag: ${escapeHtml(existsByName.name)}">→ Link</span>`;
+      }
+
       return `
-        <div class="tm-browse-tag ${existsLocally ? 'tm-exists-locally' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
+        <div class="tm-browse-tag ${isLinkedToEndpoint ? 'tm-exists-locally' : ''} ${canLink ? 'tm-can-link-row' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
           <label class="tm-browse-checkbox">
-            <input type="checkbox" ${isSelected ? 'checked' : ''} ${existsLocally ? 'disabled' : ''}>
+            <input type="checkbox" ${isSelected ? 'checked' : ''} ${isLinkedToEndpoint ? 'disabled' : ''}>
           </label>
           <div class="tm-browse-tag-info">
             <span class="tm-browse-tag-name">${escapeHtml(tag.name)}</span>
@@ -1079,7 +1111,7 @@
             ${tag.aliases?.length ? `<span class="tm-browse-tag-aliases">${escapeHtml(tag.aliases.slice(0, 3).join(', '))}</span>` : ''}
           </div>
           <div class="tm-browse-tag-status">
-            ${existsLocally ? `<span class="tm-local-exists" title="Linked to: ${escapeHtml(localTag.name)}">✓ Exists</span>` : ''}
+            ${statusHtml}
           </div>
         </div>
       `;
