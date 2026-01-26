@@ -32,6 +32,7 @@
   let activeTab = 'match'; // 'match' or 'browse'
   let browseCategory = null; // Selected category in browse view
   let selectedForImport = new Set(); // Tag IDs selected for import
+  let browseSearchQuery = ''; // Search query for browse view
   let isImporting = false; // Guard against double-click on import
 
   /**
@@ -549,6 +550,23 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  /**
+   * Filter StashDB tags by search query (matches name and aliases)
+   */
+  function filterTagsBySearch(query) {
+    if (!query || !stashdbTags) return [];
+    const lowerQuery = query.toLowerCase().trim();
+    if (!lowerQuery) return [];
+
+    return stashdbTags.filter(tag => {
+      // Check tag name
+      if (tag.name.toLowerCase().includes(lowerQuery)) return true;
+      // Check aliases
+      if (tag.aliases?.some(alias => alias.toLowerCase().includes(lowerQuery))) return true;
+      return false;
+    });
   }
 
   /**
