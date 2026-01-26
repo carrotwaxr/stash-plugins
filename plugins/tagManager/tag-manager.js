@@ -943,6 +943,17 @@
   }
 
   /**
+   * Check if a tag has a stash_id for a specific endpoint
+   * @param {object} tag - Tag object with stash_ids array
+   * @param {string} endpoint - Endpoint URL to check
+   * @returns {boolean} - True if tag has stash_id for this endpoint
+   */
+  function hasStashIdForEndpoint(tag, endpoint) {
+    if (!tag || !endpoint) return false;
+    return tag.stash_ids?.some(sid => sid.endpoint === endpoint) ?? false;
+  }
+
+  /**
    * Render list of tags for browse/import view
    */
   function renderBrowseTagList(tags) {
