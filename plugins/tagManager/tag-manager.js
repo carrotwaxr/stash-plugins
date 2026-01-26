@@ -876,7 +876,8 @@
     if (statusEl) statusEl.textContent = 'Importing...';
     if (btnEl) btnEl.disabled = true;
 
-    let imported = 0;
+    let created = 0;
+    let linked = 0;
     let errors = 0;
 
     for (const stashdbId of selectedForImport) {
@@ -884,39 +885,69 @@
       if (!stashdbTag) continue;
 
       try {
-        // Create local tag with stash_id
-        const input = {
-          name: stashdbTag.name,
-          description: stashdbTag.description || '',
-          aliases: stashdbTag.aliases || [],
-          stash_ids: [{
-            endpoint: selectedStashBox.endpoint,
-            stash_id: stashdbId
-          }]
-        };
+        // Check if tag exists locally by name
+        const existingTag = findLocalTagByName(stashdbTag.name);
 
-        const query = `
-          mutation TagCreate($input: TagCreateInput!) {
-            tagCreate(input: $input) {
-              id
-              name
-            }
-          }
-        `;
+        if (existingTag) {
+          // UPDATE: Link existing tag to this endpoint
+          const existingStashIds = existingTag.stash_ids || [];
+          const filteredStashIds = existingStashIds.filter(
+            sid => sid.endpoint !== selectedStashBox.endpoint
+          );
 
-        const data = await graphqlRequest(query, { input });
-        if (data?.tagCreate) {
-          // Add to local tags
-          localTags.push({
-            id: data.tagCreate.id,
-            name: data.tagCreate.name,
-            aliases: stashdbTag.aliases || [],
-            stash_ids: input.stash_ids
+          await updateTag({
+            id: existingTag.id,
+            stash_ids: [...filteredStashIds, {
+              endpoint: selectedStashBox.endpoint,
+              stash_id: stashdbId
+            }]
           });
-          imported++;
+
+          // Update local state
+          const idx = localTags.findIndex(t => t.id === existingTag.id);
+          if (idx >= 0) {
+            localTags[idx].stash_ids = [...filteredStashIds, {
+              endpoint: selectedStashBox.endpoint,
+              stash_id: stashdbId
+            }];
+          }
+
+          linked++;
+        } else {
+          // CREATE: New tag with stash_id
+          const input = {
+            name: stashdbTag.name,
+            description: stashdbTag.description || '',
+            aliases: stashdbTag.aliases || [],
+            stash_ids: [{
+              endpoint: selectedStashBox.endpoint,
+              stash_id: stashdbId
+            }]
+          };
+
+          const query = `
+            mutation TagCreate($input: TagCreateInput!) {
+              tagCreate(input: $input) {
+                id
+                name
+              }
+            }
+          `;
+
+          const data = await graphqlRequest(query, { input });
+          if (data?.tagCreate) {
+            // Add to local tags
+            localTags.push({
+              id: data.tagCreate.id,
+              name: data.tagCreate.name,
+              aliases: stashdbTag.aliases || [],
+              stash_ids: input.stash_ids
+            });
+            created++;
+          }
         }
       } catch (e) {
-        console.error(`[tagManager] Failed to import "${stashdbTag.name}":`, e);
+        console.error(`[tagManager] Failed to import/link "${stashdbTag.name}":`, e);
         errors++;
       }
     }
@@ -924,9 +955,12 @@
     // Clear selection and re-render
     selectedForImport.clear();
 
-    const message = errors > 0
-      ? `Imported ${imported} tag${imported !== 1 ? 's' : ''}, ${errors} error${errors !== 1 ? 's' : ''}`
-      : `Imported ${imported} tag${imported !== 1 ? 's' : ''}`;
+    // Build result message
+    const parts = [];
+    if (created > 0) parts.push(`Created ${created} tag${created !== 1 ? 's' : ''}`);
+    if (linked > 0) parts.push(`linked ${linked} existing`);
+    if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
+    const message = parts.join(', ') || 'No changes';
 
     if (statusEl) statusEl.textContent = message;
 
