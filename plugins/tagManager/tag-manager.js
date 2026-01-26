@@ -958,6 +958,23 @@
   }
 
   /**
+   * Get a readable display name for a stash-box endpoint
+   * @param {object} stashBox - Stash-box object with endpoint and optionally name
+   * @returns {string} - Display name like "StashDB" or "pmvstash.org"
+   */
+  function getEndpointDisplayName(stashBox) {
+    if (!stashBox) return 'Stash-Box';
+    if (stashBox.name) return stashBox.name;
+    // Extract domain from endpoint URL
+    try {
+      const url = new URL(stashBox.endpoint);
+      return url.hostname.replace(/^www\./, '');
+    } catch {
+      return 'Stash-Box';
+    }
+  }
+
+  /**
    * Render list of tags for browse/import view
    */
   function renderBrowseTagList(tags) {
@@ -1840,7 +1857,7 @@
           </table>
 
           <div class="tm-stashid-note">
-            <strong>StashDB ID will be added:</strong> ${escapeHtml(stashdbTag.id)}
+            <strong>${escapeHtml(getEndpointDisplayName(selectedStashBox))} ID will be added:</strong> ${escapeHtml(stashdbTag.id)}
           </div>
           <div class="tm-modal-error" id="tm-diff-error" style="display: none;"></div>
         </div>
