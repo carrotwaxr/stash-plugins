@@ -1717,14 +1717,19 @@
     let selectedParentId = null;
     let createParentIfMissing = true;
     let parentMatches = [];
+    const existingParents = tag.parents || [];
 
     if (hasCategory) {
       // Check for saved mapping first
       const savedMapping = categoryMappings[stashdbTag.category.name];
       if (savedMapping) {
         selectedParentId = savedMapping;
+      } else if (existingParents.length > 0) {
+        // Tag already has a parent - use it
+        selectedParentId = existingParents[0].id;
+        createParentIfMissing = false;
       } else {
-        // Find local matches
+        // Find local matches by category name
         parentMatches = findLocalParentMatches(stashdbTag.category.name);
         if (parentMatches.length > 0) {
           selectedParentId = parentMatches[0].tag.id;
