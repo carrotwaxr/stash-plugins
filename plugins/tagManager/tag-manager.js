@@ -32,6 +32,7 @@
   let activeTab = 'match'; // 'match' or 'browse'
   let browseCategory = null; // Selected category in browse view
   let selectedForImport = new Set(); // Tag IDs selected for import
+  let browseSearchQuery = ''; // Search query for browse view
   let isImporting = false; // Guard against double-click on import
 
   /**
@@ -552,6 +553,23 @@
   }
 
   /**
+   * Filter StashDB tags by search query (matches name and aliases)
+   */
+  function filterTagsBySearch(query) {
+    if (!query || !stashdbTags) return [];
+    const lowerQuery = query.toLowerCase().trim();
+    if (!lowerQuery) return [];
+
+    return stashdbTags.filter(tag => {
+      // Check tag name
+      if (tag.name.toLowerCase().includes(lowerQuery)) return true;
+      // Check aliases
+      if (tag.aliases?.some(alias => alias.toLowerCase().includes(lowerQuery))) return true;
+      return false;
+    });
+  }
+
+  /**
    * Highlight character-level differences between two strings
    * Returns HTML with differing characters wrapped in spans
    */
@@ -957,6 +975,43 @@
   }
 
   /**
+   * Render search results as a flat list with category badges
+   */
+  function renderSearchResults(tags) {
+    if (!tags || tags.length === 0) {
+      return `<div class="tm-browse-empty">No tags found matching "${escapeHtml(browseSearchQuery)}"</div>`;
+    }
+
+    const rows = tags.map(tag => {
+      const localTag = findLocalTagByStashId(tag.id);
+      const existsLocally = !!localTag;
+      const isSelected = selectedForImport.has(tag.id);
+      const categoryName = tag.category?.name || 'Uncategorized';
+
+      return `
+        <div class="tm-browse-tag ${existsLocally ? 'tm-exists-locally' : ''}" data-stashdb-id="${escapeHtml(tag.id)}">
+          <label class="tm-browse-checkbox">
+            <input type="checkbox" ${isSelected ? 'checked' : ''} ${existsLocally ? 'disabled' : ''}>
+          </label>
+          <div class="tm-browse-tag-info">
+            <span class="tm-browse-tag-name">${escapeHtml(tag.name)}</span>
+            <span class="tm-tag-category-badge">${escapeHtml(categoryName)}</span>
+            ${tag.aliases?.length ? `<span class="tm-browse-tag-aliases">${escapeHtml(tag.aliases.slice(0, 3).join(', '))}</span>` : ''}
+          </div>
+          <div class="tm-browse-tag-status">
+            ${existsLocally ? `<span class="tm-local-exists" title="Linked to: ${escapeHtml(localTag.name)}">✓ Exists</span>` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="tm-search-results-count">${tags.length} tag${tags.length !== 1 ? 's' : ''} found</div>
+      ${rows}
+    `;
+  }
+
+  /**
    * Render the browse/import view
    */
   function renderBrowseView() {
@@ -968,7 +1023,9 @@
       `;
     }
 
-    // Group tags by category
+    const isSearching = browseSearchQuery.trim().length > 0;
+
+    // Group tags by category (for sidebar)
     const categories = {};
     const uncategorized = [];
 
@@ -1005,23 +1062,25 @@
         </div>`
       : '';
 
-    // Render tag list for selected category
+    // Render tag list based on search or category selection
     let tagListHtml = '';
-    if (browseCategory) {
+    if (isSearching) {
+      const searchResults = filterTagsBySearch(browseSearchQuery);
+      tagListHtml = renderSearchResults(searchResults);
+    } else if (browseCategory) {
       const tagsToShow = browseCategory === '__uncategorized__'
         ? uncategorized
         : (categories[browseCategory] || []);
-
       tagListHtml = renderBrowseTagList(tagsToShow);
     } else {
-      tagListHtml = `<div class="tm-browse-hint">Select a category to view tags</div>`;
+      tagListHtml = `<div class="tm-browse-hint">Select a category to view tags, or search above</div>`;
     }
 
     const selectedCount = selectedForImport.size;
 
     return `
       <div class="tm-browse">
-        <div class="tm-browse-sidebar">
+        <div class="tm-browse-sidebar ${isSearching ? 'tm-sidebar-hidden' : ''}">
           <div class="tm-browse-sidebar-header">
             <strong>Categories</strong>
             <span class="tm-total-tags">${stashdbTags.length} total</span>
@@ -1032,6 +1091,12 @@
           </div>
         </div>
         <div class="tm-browse-main">
+          <div class="tm-browse-search">
+            <input type="text" class="tm-browse-search-input" id="tm-browse-search"
+                   placeholder="Search tags by name or alias..."
+                   value="${escapeHtml(browseSearchQuery)}">
+            ${browseSearchQuery ? '<button type="button" class="tm-browse-search-clear" id="tm-search-clear">&times;</button>' : ''}
+          </div>
           <div class="tm-browse-toolbar">
             <div class="tm-selection-controls">
               <button class="btn btn-sm btn-secondary" id="tm-select-all">Select All</button>
@@ -1223,6 +1288,34 @@
 
     // Browse view handlers (only when browse tab active)
     if (activeTab === 'browse') {
+      // Search input with debounce
+      let searchTimeout = null;
+      const searchInput = container.querySelector('#tm-browse-search');
+      if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+          clearTimeout(searchTimeout);
+          searchTimeout = setTimeout(() => {
+            browseSearchQuery = e.target.value;
+            renderPage(container);
+            // Re-focus and restore cursor position
+            const newInput = container.querySelector('#tm-browse-search');
+            if (newInput) {
+              newInput.focus();
+              newInput.setSelectionRange(newInput.value.length, newInput.value.length);
+            }
+          }, 200);
+        });
+      }
+
+      // Clear search button
+      const clearBtn = container.querySelector('#tm-search-clear');
+      if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+          browseSearchQuery = '';
+          renderPage(container);
+        });
+      }
+
       // Category selection
       container.querySelectorAll('.tm-category-item').forEach(item => {
         item.addEventListener('click', () => {
