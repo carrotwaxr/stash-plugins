@@ -1957,10 +1957,15 @@
         selectedParentId
       });
 
-      // Build update input
+      // Build update input - preserve existing stash_ids from other endpoints
+      const existingStashIds = tag.stash_ids || [];
+      const filteredStashIds = existingStashIds.filter(
+        sid => sid.endpoint !== endpoint
+      );
+
       const updateInput = {
         id: tag.id,
-        stash_ids: [{
+        stash_ids: [...filteredStashIds, {
           endpoint: endpoint,
           stash_id: stashdbTag.id,
         }],
