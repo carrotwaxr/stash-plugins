@@ -1288,6 +1288,34 @@
 
     // Browse view handlers (only when browse tab active)
     if (activeTab === 'browse') {
+      // Search input with debounce
+      let searchTimeout = null;
+      const searchInput = container.querySelector('#tm-browse-search');
+      if (searchInput) {
+        searchInput.addEventListener('input', (e) => {
+          clearTimeout(searchTimeout);
+          searchTimeout = setTimeout(() => {
+            browseSearchQuery = e.target.value;
+            renderPage(container);
+            // Re-focus and restore cursor position
+            const newInput = container.querySelector('#tm-browse-search');
+            if (newInput) {
+              newInput.focus();
+              newInput.setSelectionRange(newInput.value.length, newInput.value.length);
+            }
+          }, 200);
+        });
+      }
+
+      // Clear search button
+      const clearBtn = container.querySelector('#tm-search-clear');
+      if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+          browseSearchQuery = '';
+          renderPage(container);
+        });
+      }
+
       // Category selection
       container.querySelectorAll('.tm-category-item').forEach(item => {
         item.addEventListener('click', () => {
