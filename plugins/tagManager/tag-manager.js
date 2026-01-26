@@ -216,6 +216,10 @@
               endpoint
               stash_id
             }
+            parents {
+              id
+              name
+            }
           }
         }
       }
