@@ -1983,12 +1983,22 @@
                     <div class="tm-parent-select">
                       <select id="tm-parent-select" class="form-control">
                         <option value="">-- No parent --</option>
-                        <option value="__create__" ${!selectedParentId ? 'selected' : ''}>Create "${escapeHtml(stashdbTag.category.name)}"</option>
-                        ${parentMatches.map(m => `
+                        ${existingParents.map(p => `
+                          <option value="${p.id}" ${selectedParentId === p.id ? 'selected' : ''}>
+                            ${escapeHtml(p.name)} (current parent)
+                          </option>
+                        `).join('')}
+                        ${(!existingParents.length && !parentMatches.length) ? `
+                          <option value="__create__" selected>Create "${escapeHtml(stashdbTag.category.name)}"</option>
+                        ` : ''}
+                        ${parentMatches.filter(m => !existingParents.some(p => p.id === m.tag.id)).map(m => `
                           <option value="${m.tag.id}" ${selectedParentId === m.tag.id ? 'selected' : ''}>
                             ${escapeHtml(m.tag.name)} (${m.matchType})
                           </option>
                         `).join('')}
+                        ${(existingParents.length || parentMatches.length) ? `
+                          <option value="__create__">Create "${escapeHtml(stashdbTag.category.name)}"</option>
+                        ` : ''}
                       </select>
                       <button type="button" class="btn btn-secondary btn-sm" id="tm-parent-search-btn">Search...</button>
                     </div>
