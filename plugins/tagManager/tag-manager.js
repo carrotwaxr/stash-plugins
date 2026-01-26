@@ -34,6 +34,7 @@
   let selectedForImport = new Set(); // Tag IDs selected for import
   let browseSearchQuery = ''; // Search query for browse view
   let isImporting = false; // Guard against double-click on import
+  let browseFilter = 'all'; // 'all', 'unlinked', or 'linked' for browse tab
 
   /**
    * Set page title with retry to overcome Stash's title management
@@ -1032,6 +1033,26 @@
 
     const endpoint = selectedStashBox?.endpoint;
 
+    // Apply browse filter
+    let filteredTags = tags;
+    if (browseFilter === 'linked') {
+      filteredTags = tags.filter(tag => {
+        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
+        return hasStashIdForEndpoint(localMatch, endpoint);
+      });
+    } else if (browseFilter === 'unlinked') {
+      filteredTags = tags.filter(tag => {
+        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
+        return !hasStashIdForEndpoint(localMatch, endpoint);
+      });
+    }
+
+    if (filteredTags.length === 0) {
+      return '<div class="tm-browse-empty">No tags match the current filter</div>';
+    }
+
+    tags = filteredTags;
+
     const rows = tags.map(tag => {
       // Check if linked to THIS endpoint specifically
       const isLinkedToEndpoint = hasStashIdForEndpoint(
@@ -1079,6 +1100,26 @@
     }
 
     const endpoint = selectedStashBox?.endpoint;
+
+    // Apply browse filter
+    let filteredTags = tags;
+    if (browseFilter === 'linked') {
+      filteredTags = tags.filter(tag => {
+        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
+        return hasStashIdForEndpoint(localMatch, endpoint);
+      });
+    } else if (browseFilter === 'unlinked') {
+      filteredTags = tags.filter(tag => {
+        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
+        return !hasStashIdForEndpoint(localMatch, endpoint);
+      });
+    }
+
+    if (filteredTags.length === 0) {
+      return '<div class="tm-browse-empty">No tags match the current filter</div>';
+    }
+
+    tags = filteredTags;
 
     const rows = tags.map(tag => {
       // Check if linked to THIS endpoint specifically
@@ -1216,6 +1257,13 @@
               <span class="tm-selection-info">
                 ${selectedCount > 0 ? `${selectedCount} tag${selectedCount > 1 ? 's' : ''} selected` : 'No tags selected'}
               </span>
+            </div>
+            <div class="tm-browse-filters">
+              <select id="tm-browse-filter" class="form-control">
+                <option value="all" ${browseFilter === 'all' ? 'selected' : ''}>Show All</option>
+                <option value="unlinked" ${browseFilter === 'unlinked' ? 'selected' : ''}>Show Unlinked</option>
+                <option value="linked" ${browseFilter === 'linked' ? 'selected' : ''}>Show Linked</option>
+              </select>
             </div>
             <button class="btn btn-primary" id="tm-import-selected" ${selectedCount === 0 ? 'disabled' : ''}>
               Import Selected
@@ -1486,6 +1534,12 @@
       if (importBtn) {
         importBtn.addEventListener('click', () => handleImportSelected(container));
       }
+
+      // Browse filter dropdown
+      container.querySelector('#tm-browse-filter')?.addEventListener('change', (e) => {
+        browseFilter = e.target.value;
+        renderPage(container);
+      });
     }
 
     // Stash-box dropdown
