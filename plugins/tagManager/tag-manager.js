@@ -216,6 +216,10 @@
               endpoint
               stash_id
             }
+            parents {
+              id
+              name
+            }
           }
         }
       }
@@ -1713,14 +1717,19 @@
     let selectedParentId = null;
     let createParentIfMissing = true;
     let parentMatches = [];
+    const existingParents = tag.parents || [];
 
     if (hasCategory) {
       // Check for saved mapping first
       const savedMapping = categoryMappings[stashdbTag.category.name];
       if (savedMapping) {
         selectedParentId = savedMapping;
+      } else if (existingParents.length > 0) {
+        // Tag already has a parent - use it
+        selectedParentId = existingParents[0].id;
+        createParentIfMissing = false;
       } else {
-        // Find local matches
+        // Find local matches by category name
         parentMatches = findLocalParentMatches(stashdbTag.category.name);
         if (parentMatches.length > 0) {
           selectedParentId = parentMatches[0].tag.id;
@@ -1974,12 +1983,22 @@
                     <div class="tm-parent-select">
                       <select id="tm-parent-select" class="form-control">
                         <option value="">-- No parent --</option>
-                        <option value="__create__" ${!selectedParentId ? 'selected' : ''}>Create "${escapeHtml(stashdbTag.category.name)}"</option>
-                        ${parentMatches.map(m => `
+                        ${existingParents.map(p => `
+                          <option value="${p.id}" ${selectedParentId === p.id ? 'selected' : ''}>
+                            ${escapeHtml(p.name)} (current parent)
+                          </option>
+                        `).join('')}
+                        ${(!existingParents.length && !parentMatches.length) ? `
+                          <option value="__create__" selected>Create "${escapeHtml(stashdbTag.category.name)}"</option>
+                        ` : ''}
+                        ${parentMatches.filter(m => !existingParents.some(p => p.id === m.tag.id)).map(m => `
                           <option value="${m.tag.id}" ${selectedParentId === m.tag.id ? 'selected' : ''}>
                             ${escapeHtml(m.tag.name)} (${m.matchType})
                           </option>
                         `).join('')}
+                        ${(existingParents.length || parentMatches.length) ? `
+                          <option value="__create__">Create "${escapeHtml(stashdbTag.category.name)}"</option>
+                        ` : ''}
                       </select>
                       <button type="button" class="btn btn-secondary btn-sm" id="tm-parent-search-btn">Search...</button>
                     </div>
