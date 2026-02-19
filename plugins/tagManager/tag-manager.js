@@ -882,6 +882,209 @@
   }
 
   /**
+   * Show a modal previewing category-to-parent-tag resolutions before import.
+   * @param {object} categoryResolutions - Output from resolveCategoryParents()
+   * @returns {Promise<{parentMap, remember, resolutions}|null|'cancel'>}
+   */
+  function showCategoryPreviewModal(categoryResolutions) {
+    return new Promise((resolve) => {
+      const currentResolutions = JSON.parse(JSON.stringify(categoryResolutions));
+      const catNames = Object.keys(currentResolutions);
+      const backdrop = document.createElement('div');
+      backdrop.className = 'tm-modal-backdrop';
+
+      const statusLabels = {
+        saved: 'Saved mapping',
+        exact: 'Matched',
+        create: 'Will create',
+        manual: 'Manual',
+      };
+      const statusClasses = {
+        saved: 'tm-cat-saved',
+        exact: 'tm-cat-exact',
+        create: 'tm-cat-create',
+        manual: 'tm-cat-manual',
+      };
+
+      function buildRow(catName) {
+        const info = currentResolutions[catName];
+        const badge = `<span class="tm-cat-resolution ${statusClasses[info.resolution] || ''}">${escapeHtml(statusLabels[info.resolution] || info.resolution)}</span>`;
+        return `<tr data-cat="${escapeHtml(catName)}">
+          <td>${escapeHtml(catName)}</td>
+          <td class="tm-cat-parent-name">${escapeHtml(info.parentTagName)}</td>
+          <td class="tm-cat-status">${badge}</td>
+          <td><button class="btn btn-secondary btn-sm tm-cat-change" data-cat="${escapeHtml(catName)}">Change</button></td>
+        </tr>`;
+      }
+
+      backdrop.innerHTML = `
+        <div class="tm-modal tm-modal-wide">
+          <div class="tm-modal-header">
+            <h3>Category Parents</h3>
+            <button class="tm-close-btn">&times;</button>
+          </div>
+          <div class="tm-modal-body">
+            <p class="tm-preview-intro">The selected tags belong to ${catNames.length} ${catNames.length === 1 ? 'category' : 'categories'}. Review the parent tag assignments below.</p>
+            <table class="tm-category-preview-table">
+              <thead>
+                <tr>
+                  <th>StashDB Category</th>
+                  <th>Parent Tag</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                ${catNames.map(c => buildRow(c)).join('')}
+              </tbody>
+            </table>
+            <label class="tm-remember-label">
+              <input type="checkbox" id="tm-remember-mappings" checked>
+              Remember these mappings
+            </label>
+          </div>
+          <div class="tm-modal-footer">
+            <button class="btn btn-secondary" id="tm-import-no-parents">Import without Parents</button>
+            <button class="btn btn-primary" id="tm-import-with-parents">Import with Parents</button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(backdrop);
+
+      function cleanup(result) {
+        backdrop.remove();
+        resolve(result);
+      }
+
+      // Close / cancel
+      backdrop.querySelector('.tm-close-btn').addEventListener('click', () => cleanup('cancel'));
+      backdrop.addEventListener('click', (e) => {
+        if (e.target === backdrop) cleanup('cancel');
+      });
+
+      // Import without parents
+      backdrop.querySelector('#tm-import-no-parents').addEventListener('click', () => cleanup(null));
+
+      // Import with parents
+      backdrop.querySelector('#tm-import-with-parents').addEventListener('click', () => {
+        const remember = backdrop.querySelector('#tm-remember-mappings').checked;
+        const parentMap = {};
+        for (const [catName, info] of Object.entries(currentResolutions)) {
+          parentMap[catName] = info.parentTagId;
+        }
+        cleanup({ parentMap, remember, resolutions: currentResolutions });
+      });
+
+      // Change buttons
+      backdrop.querySelectorAll('.tm-cat-change').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const catName = btn.dataset.cat;
+          const row = backdrop.querySelector(`tr[data-cat="${CSS.escape(catName)}"]`);
+          showCategoryParentSearch(catName, currentResolutions, row);
+        });
+      });
+    });
+  }
+
+  /**
+   * Show a tag search modal for changing a category's parent tag assignment.
+   * Opens above the preview modal (z-index 1060).
+   * @param {string} catName - Category name
+   * @param {object} currentResolutions - Mutable resolutions object
+   * @param {HTMLElement} row - Table row to update visually
+   */
+  function showCategoryParentSearch(catName, currentResolutions, row) {
+    const searchBackdrop = document.createElement('div');
+    searchBackdrop.className = 'tm-modal-backdrop tm-cat-search-backdrop';
+    searchBackdrop.style.zIndex = '1060';
+
+    searchBackdrop.innerHTML = `
+      <div class="tm-modal tm-modal-small">
+        <div class="tm-modal-header">
+          <h3>Search Parent Tag for "${escapeHtml(catName)}"</h3>
+          <button class="tm-close-btn">&times;</button>
+        </div>
+        <div class="tm-modal-body">
+          <input type="text" class="form-control tm-cat-search-input"
+                 placeholder="Search tags..." value="${escapeHtml(catName)}">
+          <div class="tm-search-results tm-cat-search-results">
+            <div class="tm-loading">Type to search...</div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(searchBackdrop);
+
+    const input = searchBackdrop.querySelector('.tm-cat-search-input');
+    const resultsEl = searchBackdrop.querySelector('.tm-cat-search-results');
+
+    function closeSearch() {
+      searchBackdrop.remove();
+    }
+
+    function doSearch() {
+      const term = input.value.trim().toLowerCase();
+      if (!term) {
+        resultsEl.innerHTML = '<div class="tm-loading">Type to search...</div>';
+        return;
+      }
+
+      const matches = localTags.filter(t =>
+        t.name.toLowerCase().includes(term) ||
+        t.aliases?.some(a => a.toLowerCase().includes(term))
+      ).slice(0, 10);
+
+      if (matches.length === 0) {
+        resultsEl.innerHTML = '<div class="tm-no-matches">No matching tags found</div>';
+        return;
+      }
+
+      resultsEl.innerHTML = matches.map(t => `
+        <div class="tm-search-result" data-tag-id="${t.id}">
+          <span class="tm-result-name">${escapeHtml(t.name)}</span>
+          ${t.aliases?.length ? `<span class="tm-result-aliases">${escapeHtml(t.aliases.slice(0, 3).join(', '))}</span>` : ''}
+        </div>
+      `).join('');
+
+      resultsEl.querySelectorAll('.tm-search-result').forEach(el => {
+        el.addEventListener('click', () => {
+          const tagId = el.dataset.tagId;
+          const tag = localTags.find(t => t.id === tagId);
+          if (tag) {
+            // Update resolution
+            currentResolutions[catName] = {
+              parentTagId: tag.id,
+              parentTagName: tag.name,
+              resolution: 'manual',
+              description: currentResolutions[catName]?.description || '',
+            };
+
+            // Update row display
+            if (row) {
+              const nameCell = row.querySelector('.tm-cat-parent-name');
+              const statusCell = row.querySelector('.tm-cat-status');
+              if (nameCell) nameCell.textContent = tag.name;
+              if (statusCell) statusCell.innerHTML = '<span class="tm-cat-resolution tm-cat-manual">Manual</span>';
+            }
+          }
+          closeSearch();
+        });
+      });
+    }
+
+    input.addEventListener('input', doSearch);
+    input.focus();
+    doSearch();
+
+    searchBackdrop.querySelector('.tm-close-btn').addEventListener('click', closeSearch);
+    searchBackdrop.addEventListener('click', (e) => {
+      if (e.target === searchBackdrop) closeSearch();
+    });
+  }
+
+  /**
    * Get filtered tags based on current filter setting and selected endpoint
    */
   function getFilteredTags() {
