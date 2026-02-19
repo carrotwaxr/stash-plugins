@@ -1325,6 +1325,89 @@
   }
 
   /**
+   * Update linked tags that are missing description or aliases from stash-box data.
+   * Finds all local tags linked to the current endpoint and backfills empty fields.
+   */
+  async function handleUpdateLinkedTags(container) {
+    if (isImporting) return;
+    const endpoint = selectedStashBox?.endpoint;
+    if (!stashdbTags || !endpoint) return;
+
+    // Find linked tags that need updating
+    const tagsToUpdate = [];
+    for (const stashdbTag of stashdbTags) {
+      const localTag = localTags.find(t =>
+        t.stash_ids?.some(sid => sid.stash_id === stashdbTag.id && sid.endpoint === endpoint)
+      );
+      if (!localTag) continue;
+
+      const needsDescription = !localTag.description && stashdbTag.description;
+      const stashdbAliases = stashdbTag.aliases || [];
+      const localAliases = localTag.aliases || [];
+      const localAliasesLower = new Set(localAliases.map(a => a.toLowerCase()));
+      const newAliases = stashdbAliases.filter(a => !localAliasesLower.has(a.toLowerCase()));
+      const needsAliases = newAliases.length > 0;
+
+      if (needsDescription || needsAliases) {
+        tagsToUpdate.push({ localTag, stashdbTag, needsDescription, newAliases });
+      }
+    }
+
+    if (tagsToUpdate.length === 0) {
+      showStatus('All linked tags are already up to date', 'info');
+      return;
+    }
+
+    if (!confirm(`Update ${tagsToUpdate.length} linked tag${tagsToUpdate.length !== 1 ? 's' : ''} with missing description/aliases from ${getEndpointDisplayName(selectedStashBox)}?`)) {
+      return;
+    }
+
+    isImporting = true;
+    const statusEl = container.querySelector('.tm-selection-info');
+    if (statusEl) statusEl.textContent = 'Updating linked tags...';
+
+    let updated = 0;
+    let errors = 0;
+
+    for (const { localTag, stashdbTag, needsDescription, newAliases } of tagsToUpdate) {
+      try {
+        const input = { id: localTag.id };
+        if (needsDescription) {
+          input.description = stashdbTag.description;
+        }
+        if (newAliases.length > 0) {
+          input.aliases = [...(localTag.aliases || []), ...newAliases];
+        }
+
+        await updateTag(input);
+
+        // Update local cache
+        const idx = localTags.findIndex(t => t.id === localTag.id);
+        if (idx >= 0) {
+          if (needsDescription) localTags[idx].description = stashdbTag.description;
+          if (newAliases.length > 0) localTags[idx].aliases = input.aliases;
+        }
+        updated++;
+      } catch (e) {
+        console.error(`[tagManager] Failed to update "${localTag.name}":`, e);
+        errors++;
+      }
+    }
+
+    const parts = [];
+    if (updated > 0) parts.push(`Updated ${updated} tag${updated !== 1 ? 's' : ''}`);
+    if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
+    const message = parts.join(', ') || 'No changes';
+
+    showStatus(message, errors > 0 ? 'warning' : 'success');
+
+    setTimeout(() => {
+      isImporting = false;
+      renderPage(container);
+    }, 1500);
+  }
+
+  /**
    * Check if a StashDB tag already exists locally
    */
   function findLocalTagByStashId(stashdbId) {
@@ -1623,6 +1706,9 @@
             <button class="btn btn-sm btn-secondary" id="tm-import-all" title="Import all unlinked tags from all categories">
               Import All Unlinked
             </button>
+            <button class="btn btn-sm btn-secondary" id="tm-update-linked" title="Update description and aliases for linked tags from stash-box data">
+              Update Linked Tags
+            </button>
           </div>
           <div class="tm-browse-tags">
             ${tagListHtml}
@@ -1918,6 +2004,12 @@
           selectedForImport = unlinkedIds;
           handleImportSelected(container);
         });
+      }
+
+      // Update Linked Tags button
+      const updateLinkedBtn = container.querySelector('#tm-update-linked');
+      if (updateLinkedBtn) {
+        updateLinkedBtn.addEventListener('click', () => handleUpdateLinkedTags(container));
       }
 
       // Browse filter dropdown
