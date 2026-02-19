@@ -20,6 +20,7 @@ import log
 
 # Import resilient StashDB API utilities
 import stashbox_api
+import theporndb_api
 
 # Create SSL context that doesn't verify certificates (for self-signed certs)
 SSL_CONTEXT = ssl.create_default_context()
@@ -591,14 +592,9 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
 # ============================================================================
 
 def query_stashdb_performer_scenes(stashdb_url, api_key, performer_stash_id, plugin_settings=None):
-    """Query StashDB for all scenes featuring a performer.
-
-    Uses stashbox_api module for:
-    - Retry with exponential backoff on 504/503/connection errors
-    - Rate limit detection and pause on 429
-    - Configurable delays between paginated requests
-    - Graceful degradation with partial results on failure
-    """
+    """Query StashDB/TPDB for all scenes featuring a performer."""
+    if theporndb_api.is_theporndb(stashdb_url):
+        return _tpdb_fetch_all_pages(api_key, "performer", performer_stash_id, plugin_settings)
     return stashbox_api.query_scenes_by_performer(
         stashdb_url, api_key, performer_stash_id,
         plugin_settings=plugin_settings
@@ -606,14 +602,9 @@ def query_stashdb_performer_scenes(stashdb_url, api_key, performer_stash_id, plu
 
 
 def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, plugin_settings=None):
-    """Query StashDB for all scenes from a studio.
-
-    Uses stashbox_api module for:
-    - Retry with exponential backoff on 504/503/connection errors
-    - Rate limit detection and pause on 429
-    - Configurable delays between paginated requests
-    - Graceful degradation with partial results on failure
-    """
+    """Query StashDB/TPDB for all scenes from a studio."""
+    if theporndb_api.is_theporndb(stashdb_url):
+        return _tpdb_fetch_all_pages(api_key, "studio", studio_stash_id, plugin_settings)
     return stashbox_api.query_scenes_by_studio(
         stashdb_url, api_key, studio_stash_id,
         plugin_settings=plugin_settings
@@ -621,18 +612,36 @@ def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, plugin_se
 
 
 def query_stashdb_tag_scenes(stashdb_url, api_key, tag_stash_id, plugin_settings=None):
-    """Query StashDB for all scenes with a tag.
-
-    Uses stashbox_api module for:
-    - Retry with exponential backoff on 504/503/connection errors
-    - Rate limit detection and pause on 429
-    - Configurable delays between paginated requests
-    - Graceful degradation with partial results on failure
-    """
+    """Query StashDB/TPDB for all scenes with a tag."""
+    if theporndb_api.is_theporndb(stashdb_url):
+        log.LogInfo("TPDB: Tag-based scene queries are not supported (different taxonomy)")
+        return []
     return stashbox_api.query_scenes_by_tag(
         stashdb_url, api_key, tag_stash_id,
         plugin_settings=plugin_settings
     )
+
+
+def _tpdb_fetch_all_pages(api_key, entity_type, entity_stash_id, plugin_settings=None):
+    """Fetch all pages of scenes from TPDB for the non-paginated code path."""
+    all_scenes = []
+    page = 1
+    max_pages = stashbox_api.get_config(plugin_settings, "max_pages_performer")
+
+    while page <= max_pages:
+        result = theporndb_api.query_scenes_page(
+            api_key, entity_type, entity_stash_id,
+            page=page, plugin_settings=plugin_settings
+        )
+        if not result or not result["scenes"]:
+            break
+        all_scenes.extend(result["scenes"])
+        if not result["has_more"]:
+            break
+        page += 1
+
+    log.LogInfo(f"TPDB: Fetched {len(all_scenes)} scenes for {entity_type}")
+    return all_scenes
 
 
 # ============================================================================
@@ -1230,14 +1239,24 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
             is_complete = True
             break
 
-        result = stashbox_api.query_scenes_page(
-            url, api_key, entity_type, entity_stash_id,
-            page=current_page,
-            per_page=100,
-            sort=sort,
-            direction=direction,
-            plugin_settings=plugin_settings
-        )
+        if theporndb_api.is_theporndb(url):
+            result = theporndb_api.query_scenes_page(
+                api_key, entity_type, entity_stash_id,
+                page=current_page,
+                per_page=100,
+                sort=sort,
+                direction=direction,
+                plugin_settings=plugin_settings
+            )
+        else:
+            result = stashbox_api.query_scenes_page(
+                url, api_key, entity_type, entity_stash_id,
+                page=current_page,
+                per_page=100,
+                sort=sort,
+                direction=direction,
+                plugin_settings=plugin_settings
+            )
 
         if not result:
             log.LogWarning(f"Failed to fetch StashDB page {current_page}")
@@ -1878,18 +1897,32 @@ def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", dire
     resume_offset = current_offset
 
     while len(collected) < page_size and pages_fetched < MAX_PAGES_PER_REQUEST:
-        result = stashbox_api.query_scenes_browse(
-            stashdb_url, stashdb_api_key,
-            page=current_page,
-            per_page=100,
-            sort=sort,
-            direction=direction,
-            performer_ids=list(performer_ids) if performer_ids else None,
-            studio_ids=list(studio_ids) if studio_ids else None,
-            tag_ids=list(tag_ids) if tag_ids else None,
-            excluded_tag_ids=excluded_tag_ids if excluded_tag_ids else None,
-            plugin_settings=plugin_settings
-        )
+        if theporndb_api.is_theporndb(stashdb_url):
+            result = theporndb_api.query_scenes_browse(
+                stashdb_api_key,
+                page=current_page,
+                per_page=100,
+                sort=sort,
+                direction=direction,
+                performer_ids=list(performer_ids) if performer_ids else None,
+                studio_ids=list(studio_ids) if studio_ids else None,
+                tag_ids=list(tag_ids) if tag_ids else None,
+                excluded_tag_ids=excluded_tag_ids if excluded_tag_ids else None,
+                plugin_settings=plugin_settings
+            )
+        else:
+            result = stashbox_api.query_scenes_browse(
+                stashdb_url, stashdb_api_key,
+                page=current_page,
+                per_page=100,
+                sort=sort,
+                direction=direction,
+                performer_ids=list(performer_ids) if performer_ids else None,
+                studio_ids=list(studio_ids) if studio_ids else None,
+                tag_ids=list(tag_ids) if tag_ids else None,
+                excluded_tag_ids=excluded_tag_ids if excluded_tag_ids else None,
+                plugin_settings=plugin_settings
+            )
 
         if not result:
             log.LogWarning(f"Failed to fetch browse page {current_page}")
