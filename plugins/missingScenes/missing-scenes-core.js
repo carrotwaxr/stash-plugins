@@ -257,9 +257,26 @@
       }
     }
 
+    // Matching tags (shown when tag filter is active)
+    const matchingTags = document.createElement("div");
+    matchingTags.className = "ms-scene-tags";
+    if (config.activeFilterTagIds && config.activeFilterTagIds.length > 0 && scene.tags) {
+      const filterSet = new Set(config.activeFilterTagIds);
+      const matched = scene.tags.filter((t) => filterSet.has(t.id));
+      for (const tag of matched) {
+        const pill = document.createElement("span");
+        pill.className = "ms-tag-pill";
+        pill.textContent = tag.name;
+        matchingTags.appendChild(pill);
+      }
+    }
+
     info.appendChild(title);
     info.appendChild(meta);
     info.appendChild(performers);
+    if (matchingTags.childElementCount > 0) {
+      info.appendChild(matchingTags);
+    }
 
     // Actions
     const actions = document.createElement("div");

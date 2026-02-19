@@ -38,6 +38,7 @@
   let filterFavoritePerformers = false;
   let filterFavoriteStudios = false;
   let filterFavoriteTags = false;
+  let activeFilterTagIds = [];
   let whisparrConfigured = false;
   let stashdbUrl = "";
 
@@ -174,6 +175,7 @@
           const card = createSceneCard(scene, {
             stashdbUrl: stashdbUrl || "https://stashdb.org",
             whisparrConfigured: whisparrConfigured,
+            activeFilterTagIds: activeFilterTagIds,
           });
           grid.appendChild(card);
         }
@@ -214,6 +216,7 @@
       hasMore = result.has_more;
       whisparrConfigured = result.whisparr_configured;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
+      activeFilterTagIds = result.active_filter_tag_ids || [];
 
       isLoading = false;
       renderPage(container, {
