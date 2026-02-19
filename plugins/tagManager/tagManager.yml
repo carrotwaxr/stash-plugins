@@ -30,6 +30,14 @@ settings:
     displayName: Scene Tag Sync - Dry Run
     description: Preview what tags would be added without making changes (caps at 200 scenes). Default is enabled for safety.
     type: BOOLEAN
+  preferStashBoxName:
+    displayName: Default to Stash-Box Name
+    description: In the merge dialog, default the Name selection to the stash-box value instead of keeping the local name.
+    type: BOOLEAN
+  preferStashBoxDescription:
+    displayName: Default to Stash-Box Description
+    description: In the merge dialog, default the Description selection to the stash-box value instead of keeping the local description.
+    type: BOOLEAN
   categoryMappings:
     displayName: Category Mappings (Internal)
     description: JSON mapping of StashDB categories to local parent tag IDs. Managed automatically.
