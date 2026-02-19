@@ -1125,11 +1125,29 @@
   }
 
   /**
-   * Handle importing selected StashDB tags
+   * Handle importing selected StashDB tags, with optional category parent assignment.
    */
   async function handleImportSelected(container) {
     if (selectedForImport.size === 0) return;
-    if (isImporting) return; // Prevent double-click
+    if (isImporting) return;
+
+    // Resolve categories among selected tags
+    const categoryResolutions = resolveCategoryParents(selectedForImport);
+    const hasCategories = Object.keys(categoryResolutions).length > 0;
+
+    let parentMap = null;
+    let remember = false;
+    let resolutions = null;
+
+    if (hasCategories) {
+      const result = await showCategoryPreviewModal(categoryResolutions);
+      if (result === 'cancel') return;
+      if (result !== null) {
+        parentMap = result.parentMap;
+        remember = result.remember;
+        resolutions = result.resolutions;
+      }
+    }
 
     isImporting = true;
 
@@ -1141,18 +1159,63 @@
 
     let created = 0;
     let linked = 0;
+    let parented = 0;
     let errors = 0;
+
+    // Pre-create parent tags that need creating
+    const createdParents = {};
+    if (parentMap) {
+      for (const [catName, parentTagId] of Object.entries(parentMap)) {
+        if (parentTagId === null) {
+          try {
+            const desc = resolutions[catName]?.description || '';
+            const newTag = await createTag({ name: catName, description: desc });
+            if (newTag) {
+              createdParents[catName] = newTag.id;
+              localTags.push({ id: newTag.id, name: newTag.name, aliases: [], stash_ids: [], parents: [] });
+            }
+          } catch (e) {
+            console.error(`[tagManager] Failed to create parent tag "${catName}":`, e);
+          }
+        }
+      }
+
+      // Backfill description on existing parent tags if empty
+      if (resolutions) {
+        for (const [catName, parentTagId] of Object.entries(parentMap)) {
+          if (parentTagId !== null && resolutions[catName]?.description) {
+            const parentTag = localTags.find(t => t.id === parentTagId);
+            if (parentTag && !parentTag.description) {
+              try {
+                await updateTag({ id: parentTagId, description: resolutions[catName].description });
+                parentTag.description = resolutions[catName].description;
+              } catch (e) {
+                console.warn(`[tagManager] Failed to backfill description for "${catName}":`, e);
+              }
+            }
+          }
+        }
+      }
+    }
 
     for (const stashdbId of selectedForImport) {
       const stashdbTag = stashdbTags.find(t => t.id === stashdbId);
       if (!stashdbTag) continue;
 
+      // Resolve parent ID for this tag's category
+      let parentId = null;
+      if (parentMap && stashdbTag.category) {
+        const catName = stashdbTag.category.name;
+        parentId = parentMap[catName] ?? createdParents[catName] ?? null;
+        if (parentId === null && createdParents[catName]) {
+          parentId = createdParents[catName];
+        }
+      }
+
       try {
-        // Check if tag exists locally by name
         const existingTag = findLocalTagByName(stashdbTag.name);
 
         if (existingTag) {
-          // UPDATE: Link existing tag to this endpoint
           const existingStashIds = existingTag.stash_ids || [];
           const filteredStashIds = existingStashIds.filter(
             sid => sid.endpoint !== selectedStashBox.endpoint
@@ -1166,7 +1229,6 @@
             }]
           });
 
-          // Update local state
           const idx = localTags.findIndex(t => t.id === existingTag.id);
           if (idx >= 0) {
             localTags[idx].stash_ids = [...filteredStashIds, {
@@ -1176,8 +1238,22 @@
           }
 
           linked++;
+
+          // Add parent if missing
+          if (parentId) {
+            const existingParentIds = (existingTag.parents || []).map(p => p.id);
+            if (!existingParentIds.includes(parentId)) {
+              await updateTag({
+                id: existingTag.id,
+                parent_ids: [...existingParentIds, parentId]
+              });
+              if (idx >= 0) {
+                localTags[idx].parents = [...(localTags[idx].parents || []), { id: parentId }];
+              }
+              parented++;
+            }
+          }
         } else {
-          // CREATE: New tag with stash_id
           const input = {
             name: stashdbTag.name,
             description: stashdbTag.description || '',
@@ -1187,6 +1263,10 @@
               stash_id: stashdbId
             }]
           };
+
+          if (parentId) {
+            input.parent_ids = [parentId];
+          }
 
           const query = `
             mutation TagCreate($input: TagCreateInput!) {
@@ -1199,14 +1279,15 @@
 
           const data = await graphqlRequest(query, { input });
           if (data?.tagCreate) {
-            // Add to local tags
             localTags.push({
               id: data.tagCreate.id,
               name: data.tagCreate.name,
               aliases: stashdbTag.aliases || [],
-              stash_ids: input.stash_ids
+              stash_ids: input.stash_ids,
+              parents: parentId ? [{ id: parentId }] : []
             });
             created++;
+            if (parentId) parented++;
           }
         }
       } catch (e) {
@@ -1215,19 +1296,31 @@
       }
     }
 
-    // Clear selection and re-render
+    // Save category mappings if requested
+    if (remember && resolutions) {
+      for (const [catName, info] of Object.entries(resolutions)) {
+        const finalId = info.parentTagId || createdParents[catName];
+        if (finalId) {
+          categoryMappings[catName] = finalId;
+        }
+      }
+      saveCategoryMappings();
+    }
+
     selectedForImport.clear();
 
-    // Build result message
     const parts = [];
     if (created > 0) parts.push(`Created ${created} tag${created !== 1 ? 's' : ''}`);
     if (linked > 0) parts.push(`linked ${linked} existing`);
+    if (parented > 0) {
+      const catCount = parentMap ? Object.keys(parentMap).length : 0;
+      parts.push(`set parents for ${parented} (${catCount} ${catCount === 1 ? 'category' : 'categories'})`);
+    }
     if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
     const message = parts.join(', ') || 'No changes';
 
     if (statusEl) statusEl.textContent = message;
 
-    // Re-render after short delay to show message, then reset import guard
     setTimeout(() => {
       isImporting = false;
       renderPage(container);
