@@ -827,6 +827,61 @@
   }
 
   /**
+   * Resolve parent tags for categories found among selected StashDB tags.
+   * Returns: { categoryName: { parentTagId, parentTagName, resolution, description } }
+   * resolution is one of: 'saved', 'exact', 'create'
+   */
+  function resolveCategoryParents(selectedIds) {
+    const result = {};
+
+    for (const stashdbId of selectedIds) {
+      const tag = stashdbTags.find(t => t.id === stashdbId);
+      if (!tag?.category) continue;
+
+      const catName = tag.category.name;
+      if (result[catName]) continue;
+
+      // 1. Check saved mapping
+      const savedId = categoryMappings[catName];
+      if (savedId) {
+        const savedTag = localTags.find(t => t.id === savedId);
+        if (savedTag) {
+          result[catName] = {
+            parentTagId: savedTag.id,
+            parentTagName: savedTag.name,
+            resolution: 'saved',
+            description: tag.category.description || '',
+          };
+          continue;
+        }
+      }
+
+      // 2. Exact name match
+      const matches = findLocalParentMatches(catName);
+      const exactMatch = matches.find(m => m.matchType === 'exact');
+      if (exactMatch) {
+        result[catName] = {
+          parentTagId: exactMatch.tag.id,
+          parentTagName: exactMatch.tag.name,
+          resolution: 'exact',
+          description: tag.category.description || '',
+        };
+        continue;
+      }
+
+      // 3. Will create
+      result[catName] = {
+        parentTagId: null,
+        parentTagName: catName,
+        resolution: 'create',
+        description: tag.category.description || '',
+      };
+    }
+
+    return result;
+  }
+
+  /**
    * Get filtered tags based on current filter setting and selected endpoint
    */
   function getFilteredTags() {
