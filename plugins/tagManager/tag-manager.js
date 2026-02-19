@@ -1207,9 +1207,6 @@
       if (parentMap && stashdbTag.category) {
         const catName = stashdbTag.category.name;
         parentId = parentMap[catName] ?? createdParents[catName] ?? null;
-        if (parentId === null && createdParents[catName]) {
-          parentId = createdParents[catName];
-        }
       }
 
       try {
