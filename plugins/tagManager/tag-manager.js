@@ -1620,6 +1620,9 @@
             <button class="btn btn-primary" id="tm-import-selected" ${selectedCount === 0 ? 'disabled' : ''}>
               Import Selected
             </button>
+            <button class="btn btn-sm btn-secondary" id="tm-import-all" title="Import all unlinked tags from all categories">
+              Import All Unlinked
+            </button>
           </div>
           <div class="tm-browse-tags">
             ${tagListHtml}
@@ -1885,6 +1888,36 @@
       const importBtn = container.querySelector('#tm-import-selected');
       if (importBtn) {
         importBtn.addEventListener('click', () => handleImportSelected(container));
+      }
+
+      // Import All Unlinked button
+      const importAllBtn = container.querySelector('#tm-import-all');
+      if (importAllBtn) {
+        importAllBtn.addEventListener('click', () => {
+          const endpoint = selectedStashBox?.endpoint;
+          if (!stashdbTags || !endpoint) return;
+
+          // Collect all unlinked StashDB tag IDs
+          const unlinkedIds = new Set();
+          for (const tag of stashdbTags) {
+            const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
+            if (!hasStashIdForEndpoint(localMatch, endpoint)) {
+              unlinkedIds.add(tag.id);
+            }
+          }
+
+          if (unlinkedIds.size === 0) {
+            showStatus('All tags are already linked', 'info');
+            return;
+          }
+
+          if (!confirm(`Import ${unlinkedIds.size} unlinked tag${unlinkedIds.size !== 1 ? 's' : ''} from all categories?`)) {
+            return;
+          }
+
+          selectedForImport = unlinkedIds;
+          handleImportSelected(container);
+        });
       }
 
       // Browse filter dropdown
