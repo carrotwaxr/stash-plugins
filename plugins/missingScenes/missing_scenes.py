@@ -1730,6 +1730,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "whisparr_configured": whisparr_configured,
         "filters_active": filters_active,
         "active_filters": active_filters,
+        "active_filter_tag_ids": list(favorite_tag_ids) if favorite_tag_ids else [],
         "excluded_tags_applied": len(excluded_tag_ids) > 0
     }
 
@@ -1773,6 +1774,13 @@ def format_scene(scene, stash_id):
     urls = scene.get("urls", [])
     primary_url = urls[0].get("url") if urls else None
 
+    # Format tags
+    tags = [
+        {"id": t.get("id"), "name": t.get("name")}
+        for t in scene.get("tags", [])
+        if t.get("id") and t.get("name")
+    ]
+
     return {
         "stash_id": stash_id,
         "title": scene.get("title") or "Unknown Title",
@@ -1784,6 +1792,7 @@ def format_scene(scene, stash_id):
         "thumbnail": thumbnail,
         "studio": studio_info,
         "performers": performers,
+        "tags": tags,
         "url": primary_url
     }
 
@@ -2012,6 +2021,7 @@ def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", dire
         "missing_scenes": formatted_scenes,
         "whisparr_configured": whisparr_configured,
         "filters_active": filters_active,
+        "active_filter_tag_ids": list(tag_ids) if tag_ids else [],
         "excluded_tags_applied": len(excluded_tag_ids) > 0
     }
 

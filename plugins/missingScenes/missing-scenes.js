@@ -39,6 +39,7 @@
   let filterFavoritePerformers = false;
   let filterFavoriteStudios = false;
   let filterFavoriteTags = false;
+  let activeFilterTagIds = [];
 
   /**
    * Find missing scenes for the current entity (paginated)
@@ -434,6 +435,7 @@
       const item = coreCreateSceneCard(scene, {
         stashdbUrl: stashdbUrl,
         whisparrConfigured: whisparrConfigured,
+        activeFilterTagIds: activeFilterTagIds,
         onWhisparrAdd: (scene, success, error) => {
           if (success) {
             setStatus(`Added "${scene.title}" to Whisparr`, "success");
@@ -692,6 +694,7 @@
 
       whisparrConfigured = result.whisparr_configured || false;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
+      activeFilterTagIds = result.active_filter_tag_ids || [];
 
       // Update pagination state
       currentCursor = result.cursor;

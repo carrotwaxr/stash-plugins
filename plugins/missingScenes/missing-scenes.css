@@ -257,6 +257,24 @@
   text-overflow: ellipsis;
 }
 
+/* Scene Tags (matching filter pills) */
+.ms-scene-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.ms-tag-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: #ddd;
+  background: #3a3a5c;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
 /* Scene Actions */
 .ms-scene-actions {
   display: flex;
