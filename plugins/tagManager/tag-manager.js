@@ -13,6 +13,8 @@
     enableSynonymSearch: true,
     fuzzyThreshold: 80,
     pageSize: 25,
+    preferStashBoxName: false,
+    preferStashBoxDescription: false,
   };
 
   // State
@@ -116,6 +118,8 @@
         enableSynonymSearch: pluginConfig.enableSynonymSearch !== false,
         fuzzyThreshold: parseInt(pluginConfig.fuzzyThreshold) || DEFAULTS.fuzzyThreshold,
         pageSize: parseInt(pluginConfig.pageSize) || DEFAULTS.pageSize,
+        preferStashBoxName: pluginConfig.preferStashBoxName === true,
+        preferStashBoxDescription: pluginConfig.preferStashBoxDescription === true,
       };
 
       // Load configured stash-boxes
@@ -2176,11 +2180,15 @@
     const match = matches[matchIndex];
     const stashdbTag = match.tag;
 
-    // Determine defaults: use StashDB value if local is empty
-    // For name: if local differs from StashDB, default to "keep + add alias"
+    // Determine defaults for name and description selections.
+    // Settings can override to always prefer stash-box values.
     const namesMatch = tag.name.toLowerCase() === stashdbTag.name.toLowerCase();
-    const nameDefault = !tag.name ? 'stashdb' : (namesMatch ? 'local' : 'local_add_alias');
-    const descDefault = tag.description ? 'local' : 'stashdb';
+    const nameDefault = settings.preferStashBoxName
+      ? 'stashdb'
+      : (!tag.name ? 'stashdb' : (namesMatch ? 'local' : 'local_add_alias'));
+    const descDefault = settings.preferStashBoxDescription
+      ? 'stashdb'
+      : (tag.description ? 'local' : 'stashdb');
 
     // Alias editing state - start with merged aliases
     let editableAliases = new Set([...(tag.aliases || []), ...(stashdbTag.aliases || [])]);
