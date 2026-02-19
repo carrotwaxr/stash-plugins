@@ -182,6 +182,35 @@ test('skips tags with null category', () => {
   assertEqual(Object.keys(result).length, 1); // Only Action
 });
 
+// --- Edge case tests ---
+console.log('\n=== Edge case tests ===\n');
+
+test('handles empty selection', () => {
+  const result = resolveCategoryParents([]);
+  assertEqual(result, {});
+});
+
+test('handles selection of only uncategorized tags', () => {
+  const result = resolveCategoryParents(['s4']);
+  assertEqual(result, {});
+});
+
+test('saved mapping takes priority over exact match', () => {
+  categoryMappings = { 'Action': '20' }; // Mapped to Clothing instead of Action
+  const result = resolveCategoryParents(['s1']);
+  assertEqual(result['Action'].parentTagId, '20');
+  assertEqual(result['Action'].parentTagName, 'Clothing');
+  assertEqual(result['Action'].resolution, 'saved');
+});
+
+test('handles mixed categorized and uncategorized tags', () => {
+  categoryMappings = {};
+  const result = resolveCategoryParents(['s1', 's4', 's2']);
+  assertEqual(Object.keys(result).length, 2); // Action + Accessories, not s4
+  assertEqual(result['Action'] !== undefined, true);
+  assertEqual(result['Accessories'] !== undefined, true);
+});
+
 // --- Summary ---
 console.log(`\n=== Summary ===\n`);
 console.log(`Passed: ${passed}`);
