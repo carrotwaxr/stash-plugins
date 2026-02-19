@@ -827,6 +827,264 @@
   }
 
   /**
+   * Resolve parent tags for categories found among selected StashDB tags.
+   * Returns: { categoryName: { parentTagId, parentTagName, resolution, description } }
+   * resolution is one of: 'saved', 'exact', 'create'
+   */
+  function resolveCategoryParents(selectedIds) {
+    const result = {};
+
+    for (const stashdbId of selectedIds) {
+      const tag = stashdbTags.find(t => t.id === stashdbId);
+      if (!tag?.category) continue;
+
+      const catName = tag.category.name;
+      if (result[catName]) continue;
+
+      // 1. Check saved mapping
+      const savedId = categoryMappings[catName];
+      if (savedId) {
+        const savedTag = localTags.find(t => t.id === savedId);
+        if (savedTag) {
+          result[catName] = {
+            parentTagId: savedTag.id,
+            parentTagName: savedTag.name,
+            resolution: 'saved',
+            description: tag.category.description || '',
+          };
+          continue;
+        }
+      }
+
+      // 2. Exact name match
+      const matches = findLocalParentMatches(catName);
+      const exactMatch = matches.find(m => m.matchType === 'exact');
+      if (exactMatch) {
+        result[catName] = {
+          parentTagId: exactMatch.tag.id,
+          parentTagName: exactMatch.tag.name,
+          resolution: 'exact',
+          description: tag.category.description || '',
+        };
+        continue;
+      }
+
+      // 3. Will create
+      result[catName] = {
+        parentTagId: null,
+        parentTagName: catName,
+        resolution: 'create',
+        description: tag.category.description || '',
+      };
+    }
+
+    return result;
+  }
+
+  /**
+   * Show a modal previewing category-to-parent-tag resolutions before import.
+   * @param {object} categoryResolutions - Output from resolveCategoryParents()
+   * @returns {Promise<{parentMap, remember, resolutions}|null|'cancel'>}
+   */
+  function showCategoryPreviewModal(categoryResolutions) {
+    return new Promise((resolve) => {
+      const currentResolutions = JSON.parse(JSON.stringify(categoryResolutions));
+      const catNames = Object.keys(currentResolutions);
+      const backdrop = document.createElement('div');
+      backdrop.className = 'tm-modal-backdrop';
+
+      const statusLabels = {
+        saved: 'Saved mapping',
+        exact: 'Matched',
+        create: 'Will create',
+        manual: 'Manual',
+      };
+      const statusClasses = {
+        saved: 'tm-cat-saved',
+        exact: 'tm-cat-exact',
+        create: 'tm-cat-create',
+        manual: 'tm-cat-manual',
+      };
+
+      function buildRow(catName) {
+        const info = currentResolutions[catName];
+        const badge = `<span class="tm-cat-resolution ${statusClasses[info.resolution] || ''}">${escapeHtml(statusLabels[info.resolution] || info.resolution)}</span>`;
+        return `<tr data-cat="${escapeHtml(catName)}">
+          <td>${escapeHtml(catName)}</td>
+          <td class="tm-cat-parent-name">${escapeHtml(info.parentTagName)}</td>
+          <td class="tm-cat-status">${badge}</td>
+          <td><button class="btn btn-secondary btn-sm tm-cat-change" data-cat="${escapeHtml(catName)}">Change</button></td>
+        </tr>`;
+      }
+
+      backdrop.innerHTML = `
+        <div class="tm-modal tm-modal-wide">
+          <div class="tm-modal-header">
+            <h3>Category Parents</h3>
+            <button class="tm-close-btn">&times;</button>
+          </div>
+          <div class="tm-modal-body">
+            <p class="tm-preview-intro">The selected tags belong to ${catNames.length} ${catNames.length === 1 ? 'category' : 'categories'}. Review the parent tag assignments below.</p>
+            <table class="tm-category-preview-table">
+              <thead>
+                <tr>
+                  <th>StashDB Category</th>
+                  <th>Parent Tag</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                ${catNames.map(c => buildRow(c)).join('')}
+              </tbody>
+            </table>
+            <label class="tm-remember-label">
+              <input type="checkbox" id="tm-remember-mappings" checked>
+              Remember these mappings
+            </label>
+          </div>
+          <div class="tm-modal-footer">
+            <button class="btn btn-secondary" id="tm-import-no-parents">Import without Parents</button>
+            <button class="btn btn-primary" id="tm-import-with-parents">Import with Parents</button>
+          </div>
+        </div>
+      `;
+
+      document.body.appendChild(backdrop);
+
+      function cleanup(result) {
+        backdrop.remove();
+        resolve(result);
+      }
+
+      // Close / cancel
+      backdrop.querySelector('.tm-close-btn').addEventListener('click', () => cleanup('cancel'));
+      backdrop.addEventListener('click', (e) => {
+        if (e.target === backdrop) cleanup('cancel');
+      });
+
+      // Import without parents
+      backdrop.querySelector('#tm-import-no-parents').addEventListener('click', () => cleanup(null));
+
+      // Import with parents
+      backdrop.querySelector('#tm-import-with-parents').addEventListener('click', () => {
+        const remember = backdrop.querySelector('#tm-remember-mappings').checked;
+        const parentMap = {};
+        for (const [catName, info] of Object.entries(currentResolutions)) {
+          parentMap[catName] = info.parentTagId;
+        }
+        cleanup({ parentMap, remember, resolutions: currentResolutions });
+      });
+
+      // Change buttons
+      backdrop.querySelectorAll('.tm-cat-change').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const catName = btn.dataset.cat;
+          const row = backdrop.querySelector(`tr[data-cat="${CSS.escape(catName)}"]`);
+          showCategoryParentSearch(catName, currentResolutions, row);
+        });
+      });
+    });
+  }
+
+  /**
+   * Show a tag search modal for changing a category's parent tag assignment.
+   * Opens above the preview modal (z-index 1060).
+   * @param {string} catName - Category name
+   * @param {object} currentResolutions - Mutable resolutions object
+   * @param {HTMLElement} row - Table row to update visually
+   */
+  function showCategoryParentSearch(catName, currentResolutions, row) {
+    const searchBackdrop = document.createElement('div');
+    searchBackdrop.className = 'tm-modal-backdrop tm-cat-search-backdrop';
+    searchBackdrop.style.zIndex = '1060';
+
+    searchBackdrop.innerHTML = `
+      <div class="tm-modal tm-modal-small">
+        <div class="tm-modal-header">
+          <h3>Search Parent Tag for "${escapeHtml(catName)}"</h3>
+          <button class="tm-close-btn">&times;</button>
+        </div>
+        <div class="tm-modal-body">
+          <input type="text" class="form-control tm-cat-search-input"
+                 placeholder="Search tags..." value="${escapeHtml(catName)}">
+          <div class="tm-search-results tm-cat-search-results">
+            <div class="tm-loading">Type to search...</div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(searchBackdrop);
+
+    const input = searchBackdrop.querySelector('.tm-cat-search-input');
+    const resultsEl = searchBackdrop.querySelector('.tm-cat-search-results');
+
+    function closeSearch() {
+      searchBackdrop.remove();
+    }
+
+    function doSearch() {
+      const term = input.value.trim().toLowerCase();
+      if (!term) {
+        resultsEl.innerHTML = '<div class="tm-loading">Type to search...</div>';
+        return;
+      }
+
+      const matches = localTags.filter(t =>
+        t.name.toLowerCase().includes(term) ||
+        t.aliases?.some(a => a.toLowerCase().includes(term))
+      ).slice(0, 10);
+
+      if (matches.length === 0) {
+        resultsEl.innerHTML = '<div class="tm-no-matches">No matching tags found</div>';
+        return;
+      }
+
+      resultsEl.innerHTML = matches.map(t => `
+        <div class="tm-search-result" data-tag-id="${t.id}">
+          <span class="tm-result-name">${escapeHtml(t.name)}</span>
+          ${t.aliases?.length ? `<span class="tm-result-aliases">${escapeHtml(t.aliases.slice(0, 3).join(', '))}</span>` : ''}
+        </div>
+      `).join('');
+
+      resultsEl.querySelectorAll('.tm-search-result').forEach(el => {
+        el.addEventListener('click', () => {
+          const tagId = el.dataset.tagId;
+          const tag = localTags.find(t => t.id === tagId);
+          if (tag) {
+            // Update resolution
+            currentResolutions[catName] = {
+              parentTagId: tag.id,
+              parentTagName: tag.name,
+              resolution: 'manual',
+              description: currentResolutions[catName]?.description || '',
+            };
+
+            // Update row display
+            if (row) {
+              const nameCell = row.querySelector('.tm-cat-parent-name');
+              const statusCell = row.querySelector('.tm-cat-status');
+              if (nameCell) nameCell.textContent = tag.name;
+              if (statusCell) statusCell.innerHTML = '<span class="tm-cat-resolution tm-cat-manual">Manual</span>';
+            }
+          }
+          closeSearch();
+        });
+      });
+    }
+
+    input.addEventListener('input', doSearch);
+    input.focus();
+    doSearch();
+
+    searchBackdrop.querySelector('.tm-close-btn').addEventListener('click', closeSearch);
+    searchBackdrop.addEventListener('click', (e) => {
+      if (e.target === searchBackdrop) closeSearch();
+    });
+  }
+
+  /**
    * Get filtered tags based on current filter setting and selected endpoint
    */
   function getFilteredTags() {
@@ -867,11 +1125,29 @@
   }
 
   /**
-   * Handle importing selected StashDB tags
+   * Handle importing selected StashDB tags, with optional category parent assignment.
    */
   async function handleImportSelected(container) {
     if (selectedForImport.size === 0) return;
-    if (isImporting) return; // Prevent double-click
+    if (isImporting) return;
+
+    // Resolve categories among selected tags
+    const categoryResolutions = resolveCategoryParents(selectedForImport);
+    const hasCategories = Object.keys(categoryResolutions).length > 0;
+
+    let parentMap = null;
+    let remember = false;
+    let resolutions = null;
+
+    if (hasCategories) {
+      const result = await showCategoryPreviewModal(categoryResolutions);
+      if (result === 'cancel') return;
+      if (result !== null) {
+        parentMap = result.parentMap;
+        remember = result.remember;
+        resolutions = result.resolutions;
+      }
+    }
 
     isImporting = true;
 
@@ -883,18 +1159,60 @@
 
     let created = 0;
     let linked = 0;
+    let parented = 0;
     let errors = 0;
+
+    // Pre-create parent tags that need creating
+    const createdParents = {};
+    if (parentMap) {
+      for (const [catName, parentTagId] of Object.entries(parentMap)) {
+        if (parentTagId === null) {
+          try {
+            const desc = resolutions[catName]?.description || '';
+            const newTag = await createTag({ name: catName, description: desc });
+            if (newTag) {
+              createdParents[catName] = newTag.id;
+              localTags.push({ id: newTag.id, name: newTag.name, aliases: [], stash_ids: [], parents: [] });
+            }
+          } catch (e) {
+            console.error(`[tagManager] Failed to create parent tag "${catName}":`, e);
+          }
+        }
+      }
+
+      // Backfill description on existing parent tags if empty
+      if (resolutions) {
+        for (const [catName, parentTagId] of Object.entries(parentMap)) {
+          if (parentTagId !== null && resolutions[catName]?.description) {
+            const parentTag = localTags.find(t => t.id === parentTagId);
+            if (parentTag && !parentTag.description) {
+              try {
+                await updateTag({ id: parentTagId, description: resolutions[catName].description });
+                parentTag.description = resolutions[catName].description;
+              } catch (e) {
+                console.warn(`[tagManager] Failed to backfill description for "${catName}":`, e);
+              }
+            }
+          }
+        }
+      }
+    }
 
     for (const stashdbId of selectedForImport) {
       const stashdbTag = stashdbTags.find(t => t.id === stashdbId);
       if (!stashdbTag) continue;
 
+      // Resolve parent ID for this tag's category
+      let parentId = null;
+      if (parentMap && stashdbTag.category) {
+        const catName = stashdbTag.category.name;
+        parentId = parentMap[catName] ?? createdParents[catName] ?? null;
+      }
+
       try {
-        // Check if tag exists locally by name
         const existingTag = findLocalTagByName(stashdbTag.name);
 
         if (existingTag) {
-          // UPDATE: Link existing tag to this endpoint
           const existingStashIds = existingTag.stash_ids || [];
           const filteredStashIds = existingStashIds.filter(
             sid => sid.endpoint !== selectedStashBox.endpoint
@@ -908,7 +1226,6 @@
             }]
           });
 
-          // Update local state
           const idx = localTags.findIndex(t => t.id === existingTag.id);
           if (idx >= 0) {
             localTags[idx].stash_ids = [...filteredStashIds, {
@@ -918,8 +1235,22 @@
           }
 
           linked++;
+
+          // Add parent if missing
+          if (parentId) {
+            const existingParentIds = (existingTag.parents || []).map(p => p.id);
+            if (!existingParentIds.includes(parentId)) {
+              await updateTag({
+                id: existingTag.id,
+                parent_ids: [...existingParentIds, parentId]
+              });
+              if (idx >= 0) {
+                localTags[idx].parents = [...(localTags[idx].parents || []), { id: parentId }];
+              }
+              parented++;
+            }
+          }
         } else {
-          // CREATE: New tag with stash_id
           const input = {
             name: stashdbTag.name,
             description: stashdbTag.description || '',
@@ -929,6 +1260,10 @@
               stash_id: stashdbId
             }]
           };
+
+          if (parentId) {
+            input.parent_ids = [parentId];
+          }
 
           const query = `
             mutation TagCreate($input: TagCreateInput!) {
@@ -941,14 +1276,15 @@
 
           const data = await graphqlRequest(query, { input });
           if (data?.tagCreate) {
-            // Add to local tags
             localTags.push({
               id: data.tagCreate.id,
               name: data.tagCreate.name,
               aliases: stashdbTag.aliases || [],
-              stash_ids: input.stash_ids
+              stash_ids: input.stash_ids,
+              parents: parentId ? [{ id: parentId }] : []
             });
             created++;
+            if (parentId) parented++;
           }
         }
       } catch (e) {
@@ -957,19 +1293,31 @@
       }
     }
 
-    // Clear selection and re-render
+    // Save category mappings if requested
+    if (remember && resolutions) {
+      for (const [catName, info] of Object.entries(resolutions)) {
+        const finalId = info.parentTagId || createdParents[catName];
+        if (finalId) {
+          categoryMappings[catName] = finalId;
+        }
+      }
+      saveCategoryMappings();
+    }
+
     selectedForImport.clear();
 
-    // Build result message
     const parts = [];
     if (created > 0) parts.push(`Created ${created} tag${created !== 1 ? 's' : ''}`);
     if (linked > 0) parts.push(`linked ${linked} existing`);
+    if (parented > 0) {
+      const catCount = parentMap ? Object.keys(parentMap).length : 0;
+      parts.push(`set parents for ${parented} (${catCount} ${catCount === 1 ? 'category' : 'categories'})`);
+    }
     if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
     const message = parts.join(', ') || 'No changes';
 
     if (statusEl) statusEl.textContent = message;
 
-    // Re-render after short delay to show message, then reset import guard
     setTimeout(() => {
       isImporting = false;
       renderPage(container);
