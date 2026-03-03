@@ -15,5 +15,8 @@ scripts/*
 **/.env
 **/.env.local
 
+# Simulation scripts (may contain local config)
+plugins/tagManager/simulate.py
+
 # Git worktrees
 .worktrees/
