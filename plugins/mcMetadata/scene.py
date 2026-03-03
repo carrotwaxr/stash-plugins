@@ -84,7 +84,7 @@ def process_scene(scene, stash, settings, api_key):
 
     # overwrite nfo named after file, at file location (use renamed path if applicable)
     nfo_path = replace_file_ext(target_video_path, "nfo")
-    __write_nfo(scene, nfo_path, settings)
+    __write_nfo(scene, nfo_path, settings, target_video_path)
 
     # copy any performer images to people directory
     for performer in scene["performers"] or []:
@@ -323,13 +323,14 @@ def __move_file_graphql(stash, file_id, dest_folder, dest_basename):
         return False
 
 
-def __write_nfo(scene, filepath, settings):
+def __write_nfo(scene, filepath, settings, video_path=None):
     """Write NFO file for a scene.
 
     Args:
         scene: Scene dict with metadata
         filepath: Destination path for NFO file
         settings: Plugin settings dict
+        video_path: Path to the video file (for poster thumb references)
     """
     # Check if we should skip existing NFO files
     skip_existing = settings.get("nfo_skip_existing", False)
@@ -338,7 +339,7 @@ def __write_nfo(scene, filepath, settings):
         return
 
     try:
-        nfo_xml = build_nfo_xml(scene)
+        nfo_xml = build_nfo_xml(scene, settings=settings, video_path=video_path)
 
         if settings["dry_run"]:
             if os.path.exists(filepath):

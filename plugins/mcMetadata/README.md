@@ -1,8 +1,8 @@
 # mcMetadata Plugin for [Stash](https://github.com/stashapp/stash)
 
-**Version**: 1.2.2
+**Version**: 1.3.0
 
-This plugin is for users who manage their collection with Stash but serve content via Jellyfin or Emby. Instead of relying on those media servers' scrapers, mcMetadata leverages your Stash database to generate `.nfo` metadata files and performer images that Jellyfin/Emby can use.
+This plugin is for users who manage their collection with Stash but serve content via Jellyfin, Emby, or Plex. Instead of relying on those media servers' scrapers, mcMetadata leverages your Stash database to generate `.nfo` metadata files and performer images that your media server can use.
 
 ## Features
 
@@ -61,7 +61,7 @@ All settings are configured through Stash's UI at **Settings → Plugins → mcM
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | **Enable Actor Images** | Boolean | Off | Copy performer images to media server metadata folder |
-| **Media Server Type** | String | `jellyfin` | Target media server: `jellyfin` or `emby` |
+| **Media Server Type** | String | `jellyfin` | Target media server: `jellyfin`, `emby`, or `plex` |
 | **Actor Metadata Path** | String | - | Path to media server's People metadata folder |
 
 ## Template Variables
@@ -123,6 +123,12 @@ Use these variables in your **Renamer Path Template**:
 - **Actor Metadata Path**: `<emby-config>/metadata/People/`
 - **Folder Structure**: `People/Jane Doe/folder.jpg` (no subfolders)
 
+### Plex
+
+- **Scene Posters**: `{name}-poster.jpg` files are picked up natively by Plex
+- **NFO Files**: Plex does not read `.nfo` files by default. You need a third-party NFO agent such as [XBMCnfoMoviesImporter](https://github.com/gboudreau/XBMCnfoMoviesImporter.bundle) to import NFO metadata
+- **Performer Images**: Plex manages performer images internally and does not support external People folders. The "Enable Actor Images" setting has no effect when using Plex
+
 ## Troubleshooting
 
 Enable debug logging at **Settings → Logs** and set Log Level to Debug. The plugin logs detailed information prefixed with `[DRY RUN]` when in dry run mode.
@@ -139,6 +145,11 @@ Common issues:
 - `stashapp-tools>=0.2.59` (installed automatically)
 
 ## Changelog
+
+### v1.3.0
+- Added Plex as a supported media server (poster files work natively, NFO requires third-party agent, performer images not supported)
+- Fixed image download validation to prevent corrupt/truncated files (Content-Length check, minimum size, JPEG EOI/PNG IEND markers, retry logic)
+- Added NFO artwork references: `<thumb aspect="poster">` for scene poster and `<thumb>` tags in `<actor>` blocks for performer images
 
 ### v1.2.2
 - Added "Require StashDB Link" setting for hook processing (Issue #14)

@@ -35,7 +35,7 @@ SETTINGS_BOOLEANS = [
 ]
 
 # Valid values for specific settings
-VALID_MEDIA_SERVERS = ["emby", "jellyfin"]
+VALID_MEDIA_SERVERS = ["emby", "jellyfin", "plex"]
 VALID_MULTI_FILE_MODES = ["all", "primary_only", "skip"]
 
 

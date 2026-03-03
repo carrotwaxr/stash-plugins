@@ -73,7 +73,7 @@ def process_performer(performer, settings, api_key, overwrite=False):
         log.debug(f"Skipping performer {performer_name}: no image available")
         return
 
-    image_path = __get_actor_image_path(performer_name, settings)
+    image_path = get_actor_image_path(performer_name, settings)
     if not image_path:
         log.warning(f"Could not determine image path for performer {performer_name}")
         return
@@ -107,7 +107,7 @@ def process_performer(performer, settings, api_key, overwrite=False):
     download_image(image_url, image_path, settings)
 
 
-def __get_actor_image_path(performer_name, settings):
+def get_actor_image_path(performer_name, settings):
     """Get the destination path for a performer image based on media server type.
 
     Args:
@@ -115,7 +115,7 @@ def __get_actor_image_path(performer_name, settings):
         settings: Plugin settings dict
 
     Returns:
-        str: Full path for the performer image, or None if invalid
+        str: Full path for the performer image, or None if invalid or unsupported
     """
     if not performer_name:
         return None
@@ -134,6 +134,10 @@ def __get_actor_image_path(performer_name, settings):
     elif media_server == "emby":
         # Emby: /metadata/People/John Doe/folder.jpg (no A-Z subfolders)
         return os.path.join(base_path, performer_name, "folder.jpg")
+    elif media_server == "plex":
+        # Plex manages performer images internally; no People folder to export to
+        log.info(f"Plex does not support external performer images, skipping {performer_name}")
+        return None
     else:
         log.warning(f"Unknown media server type: {media_server}")
         return None
