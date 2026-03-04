@@ -20,7 +20,40 @@ def escape_xml(text):
     return escape(str(text), {'"': '&quot;', "'": '&apos;'})
 
 
-def build_nfo_xml(scene):
+def _get_actor_thumb_path(performer_name, settings):
+    """Get the local actor image path for NFO <thumb> tags.
+
+    Only returns a path when actor images are enabled and the media server
+    supports external performer images.
+
+    Args:
+        performer_name: Performer name (unescaped)
+        settings: Plugin settings dict
+
+    Returns:
+        str or None: Local path to performer image, or None
+    """
+    if not settings:
+        return None
+    if not settings.get("enable_actor_images", False):
+        return None
+
+    # Import here to avoid circular imports
+    from performer import get_actor_image_path
+    return get_actor_image_path(performer_name, settings)
+
+
+def build_nfo_xml(scene, settings=None, video_path=None):
+    """Build NFO XML for a scene.
+
+    Args:
+        scene: Scene dict from Stash API
+        settings: Plugin settings dict (optional, enables artwork references)
+        video_path: Path to the video file (optional, enables poster thumb tag)
+
+    Returns:
+        str: NFO XML content
+    """
     ret = """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <movie>
     <name>{title}</name>
@@ -34,7 +67,7 @@ def build_nfo_xml(scene):
     <premiered>{date}</premiered>
     <releasedate>{date}</releasedate>
     <year>{year}</year>
-    <studio>{studio}</studio>{performers}
+    <studio>{studio}</studio>{poster_thumb}{performers}
     <genre>Adult</genre>{tags}
     <uniqueid type="stash">{id}</uniqueid>
 </movie>"""
@@ -64,6 +97,13 @@ def build_nfo_xml(scene):
     if scene["studio"] is not None:
         studio = escape_xml(scene["studio"]["name"])
 
+    # Poster thumb tag referencing local poster image
+    poster_thumb = ""
+    if video_path:
+        base = os.path.splitext(os.path.basename(video_path))[0]
+        poster_filename = f"{base}-poster.jpg"
+        poster_thumb = INDENTED_NEWLINE + f'<thumb aspect="poster">{escape_xml(poster_filename)}</thumb>'
+
     performers = INDENTED_NEWLINE
     i = 0
 
@@ -71,14 +111,21 @@ def build_nfo_xml(scene):
         if i != 0:
             performers = performers + INDENTED_NEWLINE
         performer_name = escape_xml(p["name"])
+
+        # Build optional <thumb> tag for actor image
+        actor_thumb = ""
+        actor_image_path = _get_actor_thumb_path(p["name"], settings)
+        if actor_image_path:
+            actor_thumb = "\n        <thumb>{}</thumb>".format(escape_xml(actor_image_path))
+
         performers = (
             performers
             + """<actor>
         <name>{}</name>
         <role>{}</role>
         <order>{}</order>
-        <type>Actor</type>
-    </actor>""".format(performer_name, performer_name, i)
+        <type>Actor</type>{}
+    </actor>""".format(performer_name, performer_name, i, actor_thumb)
         )
         i += 1
     if performers == INDENTED_NEWLINE:
@@ -104,5 +151,6 @@ def build_nfo_xml(scene):
         year=year,
         studio=studio,
         performers=performers,
+        poster_thumb=poster_thumb,
         details=details,
     )

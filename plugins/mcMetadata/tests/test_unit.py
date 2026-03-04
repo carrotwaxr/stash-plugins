@@ -8,9 +8,14 @@ Run with: python -m pytest tests/test_unit.py -v
 import os
 import sys
 import unittest
+from unittest.mock import MagicMock
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Mock stashapi before importing any plugin modules (not available outside Stash runtime)
+sys.modules["stashapi"] = MagicMock()
+sys.modules["stashapi.log"] = MagicMock()
 
 from utils.nfo import escape_xml, build_nfo_xml
 
@@ -184,15 +189,14 @@ class TestPerformerImagePath(unittest.TestCase):
 
     def test_jellyfin_path_has_letter_subfolder(self):
         """Jellyfin should use A-Z letter subfolders."""
-        # Import here to avoid needing stashapi at module level
-        from performer import _TestablePerformer
+        from performer import get_actor_image_path
 
         settings = {
             "media_server": "jellyfin",
             "actor_metadata_path": "/metadata/People"
         }
 
-        path = _TestablePerformer.get_image_path("Jane Doe", settings)
+        path = get_actor_image_path("Jane Doe", settings)
 
         # Normalize path separators for cross-platform testing
         path = path.replace("\\", "/")
@@ -200,14 +204,14 @@ class TestPerformerImagePath(unittest.TestCase):
 
     def test_emby_path_no_letter_subfolder(self):
         """Emby should NOT use A-Z letter subfolders (Issue #11)."""
-        from performer import _TestablePerformer
+        from performer import get_actor_image_path
 
         settings = {
             "media_server": "emby",
             "actor_metadata_path": "/metadata/People"
         }
 
-        path = _TestablePerformer.get_image_path("Jane Doe", settings)
+        path = get_actor_image_path("Jane Doe", settings)
 
         # Normalize path separators for cross-platform testing
         path = path.replace("\\", "/")
@@ -216,15 +220,15 @@ class TestPerformerImagePath(unittest.TestCase):
 
     def test_emby_path_differs_from_jellyfin(self):
         """Emby and Jellyfin should produce different paths (Issue #11)."""
-        from performer import _TestablePerformer
+        from performer import get_actor_image_path
 
         base_settings = {"actor_metadata_path": "/metadata/People"}
 
-        jellyfin_path = _TestablePerformer.get_image_path(
+        jellyfin_path = get_actor_image_path(
             "Jane Doe", {**base_settings, "media_server": "jellyfin"}
         ).replace("\\", "/")
 
-        emby_path = _TestablePerformer.get_image_path(
+        emby_path = get_actor_image_path(
             "Jane Doe", {**base_settings, "media_server": "emby"}
         ).replace("\\", "/")
 
@@ -235,51 +239,128 @@ class TestPerformerImagePath(unittest.TestCase):
 
     def test_jellyfin_uses_name_first_letter(self):
         """Jellyfin should use the first letter of the name."""
-        from performer import _TestablePerformer
+        from performer import get_actor_image_path
 
         settings = {
             "media_server": "jellyfin",
             "actor_metadata_path": "/metadata/People"
         }
 
-        path = _TestablePerformer.get_image_path("alice smith", settings)
+        path = get_actor_image_path("alice smith", settings)
 
         # Normalize path separators for cross-platform testing
         path = path.replace("\\", "/")
         # First letter should be lowercase 'a' since that's the name
         self.assertEqual(path, "/metadata/People/a/alice smith/folder.jpg")
 
+    def test_plex_returns_none(self):
+        """Plex should return None (no external performer image support)."""
+        from performer import get_actor_image_path
 
-# Create testable wrapper to expose private function
-class _TestablePerformer:
-    """Wrapper to expose private performer functions for testing."""
+        settings = {
+            "media_server": "plex",
+            "actor_metadata_path": "/metadata/People"
+        }
 
-    @staticmethod
-    def get_image_path(performer_name, settings):
-        """Wrapper for __get_actor_image_path."""
-        import os
+        path = get_actor_image_path("Jane Doe", settings)
+        self.assertIsNone(path)
 
-        if not performer_name:
-            return None
+    def test_unknown_server_returns_none(self):
+        """Unknown media server should return None."""
+        from performer import get_actor_image_path
 
-        base_path = settings.get("actor_metadata_path", "")
-        if not base_path:
-            return None
+        settings = {
+            "media_server": "unknown",
+            "actor_metadata_path": "/metadata/People"
+        }
 
-        media_server = settings.get("media_server", "jellyfin")
-        first_letter = performer_name[0]
-
-        if media_server == "jellyfin":
-            return os.path.join(base_path, first_letter, performer_name, "folder.jpg")
-        elif media_server == "emby":
-            return os.path.join(base_path, performer_name, "folder.jpg")
-        else:
-            return None
+        path = get_actor_image_path("Jane Doe", settings)
+        self.assertIsNone(path)
 
 
-# Inject the testable class into performer module namespace
-import performer
-performer._TestablePerformer = _TestablePerformer
+class TestNfoArtworkReferences(unittest.TestCase):
+    """Test NFO artwork thumb tags."""
+
+    def setUp(self):
+        self.mock_scene = {
+            "id": "123",
+            "title": "Test Scene",
+            "details": "A test scene",
+            "date": "2024-01-15",
+            "rating100": 80,
+            "studio": {"name": "Test Studio"},
+            "performers": [
+                {"name": "Jane Doe"},
+                {"name": "John Smith"}
+            ],
+            "tags": [{"name": "Tag1"}],
+            "files": [{"path": "/videos/Test Scene.mp4"}]
+        }
+
+    def test_poster_thumb_when_video_path_provided(self):
+        """NFO should include poster thumb tag when video_path is given."""
+        nfo = build_nfo_xml(self.mock_scene, video_path="/videos/Test Scene.mp4")
+
+        self.assertIn('<thumb aspect="poster">Test Scene-poster.jpg</thumb>', nfo)
+
+    def test_no_poster_thumb_without_video_path(self):
+        """NFO should not include poster thumb when video_path is None."""
+        nfo = build_nfo_xml(self.mock_scene)
+
+        self.assertNotIn('<thumb aspect="poster">', nfo)
+
+    def test_actor_thumb_with_jellyfin_settings(self):
+        """Actor blocks should include thumb tags when actor images enabled."""
+        settings = {
+            "enable_actor_images": True,
+            "media_server": "jellyfin",
+            "actor_metadata_path": "/metadata/People"
+        }
+
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+
+        self.assertIn("<thumb>/metadata/People/J/Jane Doe/folder.jpg</thumb>", nfo)
+        self.assertIn("<thumb>/metadata/People/J/John Smith/folder.jpg</thumb>", nfo)
+
+    def test_no_actor_thumb_without_settings(self):
+        """Actor blocks should not include thumb tags when no settings."""
+        nfo = build_nfo_xml(self.mock_scene)
+
+        self.assertNotIn("<thumb>", nfo)
+
+    def test_no_actor_thumb_when_images_disabled(self):
+        """Actor blocks should not include thumb tags when actor images disabled."""
+        settings = {
+            "enable_actor_images": False,
+            "media_server": "jellyfin",
+            "actor_metadata_path": "/metadata/People"
+        }
+
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+
+        # Should not have actor thumbs (poster thumb also absent without video_path)
+        self.assertNotIn("<thumb>", nfo)
+
+    def test_no_actor_thumb_for_plex(self):
+        """Plex should not generate actor thumb tags (no People folder support)."""
+        settings = {
+            "enable_actor_images": True,
+            "media_server": "plex",
+            "actor_metadata_path": "/metadata/People"
+        }
+
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+
+        # Actor blocks should exist but without thumb tags
+        self.assertIn("<name>Jane Doe</name>", nfo)
+        self.assertNotIn("<thumb>", nfo)
+
+    def test_backward_compatible_no_args(self):
+        """build_nfo_xml() should work with just scene arg (backward compatible)."""
+        nfo = build_nfo_xml(self.mock_scene)
+
+        self.assertIn("<title>Test Scene</title>", nfo)
+        self.assertNotIn("<thumb", nfo)
 
 
 class TestRequireStashIdSetting(unittest.TestCase):
