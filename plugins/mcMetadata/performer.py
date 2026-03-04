@@ -75,7 +75,6 @@ def process_performer(performer, settings, api_key, overwrite=False):
 
     image_path = get_actor_image_path(performer_name, settings)
     if not image_path:
-        log.warning(f"Could not determine image path for performer {performer_name}")
         return
 
     image_url = f"{performer['image_path']}&apikey={api_key}"
@@ -136,7 +135,7 @@ def get_actor_image_path(performer_name, settings):
         return os.path.join(base_path, performer_name, "folder.jpg")
     elif media_server == "plex":
         # Plex manages performer images internally; no People folder to export to
-        log.info(f"Plex does not support external performer images, skipping {performer_name}")
+        log.debug(f"Plex does not support external performer images, skipping {performer_name}")
         return None
     else:
         log.warning(f"Unknown media server type: {media_server}")
