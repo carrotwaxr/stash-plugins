@@ -18,7 +18,7 @@
   async function browseStashdb(options = {}) {
     return runPluginOperation({
       operation: "browse_stashdb",
-      page_size: options.pageSize || 50,
+      page_size: options.pageSize || pageSize,
       cursor: options.cursor || null,
       sort: options.sort || "DATE",
       direction: options.direction || "DESC",
@@ -39,6 +39,7 @@
   let filterFavoriteStudios = false;
   let filterFavoriteTags = false;
   let activeFilterTagIds = [];
+  let pageSize = 50;
   let whisparrConfigured = false;
   let stashdbUrl = "";
 
@@ -72,6 +73,10 @@
       { value: "UPDATED_AT", label: "Last Updated" },
       { value: "TRENDING", label: "Trending" },
     ].map(opt => `<option value="${opt.value}" ${sortField === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('');
+
+    const pageSizeOptions = [25, 50, 100]
+      .map(n => `<option value="${n}" ${pageSize === n ? 'selected' : ''}>${n}</option>`)
+      .join('');
 
     const directionOptions = [
       { value: "DESC", label: "Newest First" },
@@ -115,6 +120,15 @@
     // Load more button visibility
     const showLoadMore = hasMore && scenes.length > 0;
 
+    let loadMoreText = 'Load More';
+    if (stats && hasMore) {
+      const estimatedRemaining = stats.total_on_stashdb - scenes.length;
+      if (estimatedRemaining > 0) {
+        const nextBatch = Math.min(pageSize, estimatedRemaining);
+        loadMoreText = `Load More (${nextBatch})`;
+      }
+    }
+
     container.innerHTML = `
       <div class="ms-browse-page">
         <div class="ms-browse-header">
@@ -146,6 +160,10 @@
             <select id="ms-sort-direction" class="ms-sort-select">
               ${directionOptions}
             </select>
+            <label>Per page:</label>
+            <select id="ms-page-size" class="ms-sort-select">
+              ${pageSizeOptions}
+            </select>
           </div>
         </div>
 
@@ -157,7 +175,7 @@
 
         <div class="ms-browse-footer">
           <button class="ms-btn ms-btn-secondary" id="ms-load-more-btn" style="display: ${showLoadMore ? 'inline-block' : 'none'};" ${loading ? 'disabled' : ''}>
-            Load More
+            ${loadMoreText}
           </button>
         </div>
       </div>
@@ -202,7 +220,7 @@
 
     try {
       const result = await browseStashdb({
-        pageSize: 50,
+        pageSize: pageSize,
         cursor: currentCursor,
         sort: sortField,
         direction: sortDirection,
@@ -269,6 +287,11 @@
 
     container.querySelector('#ms-sort-direction')?.addEventListener('change', (e) => {
       sortDirection = e.target.value;
+      performSearch(container, true);
+    });
+
+    container.querySelector('#ms-page-size')?.addEventListener('change', (e) => {
+      pageSize = parseInt(e.target.value, 10);
       performSearch(container, true);
     });
 
