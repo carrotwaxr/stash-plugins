@@ -14,6 +14,9 @@ import urllib.parse
 import urllib.error
 import ssl
 import base64
+import os
+import time
+import hashlib
 
 # Import Stash-compatible logging
 import log
@@ -37,6 +40,45 @@ _local_stash_id_cache: dict[str, set[str]] = {}
 
 # Metadata about the cache
 _cache_metadata: dict[str, dict] = {}
+
+# Disk cache configuration
+CACHE_TTL_SECONDS = 300  # 5 minutes
+
+def _get_cache_filepath(endpoint: str) -> str:
+    """Get the file path for a cached endpoint's stash_ids."""
+    endpoint_hash = hashlib.md5(endpoint.encode()).hexdigest()[:12]
+    cache_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(cache_dir, f".cache_stashids_{endpoint_hash}.json")
+
+def _read_cache_from_disk(endpoint: str) -> set[str] | None:
+    """Read cached stash_ids from disk if fresh enough. Returns None if stale/missing."""
+    filepath = _get_cache_filepath(endpoint)
+    try:
+        if not os.path.exists(filepath):
+            return None
+        mtime = os.path.getmtime(filepath)
+        if time.time() - mtime > CACHE_TTL_SECONDS:
+            log.LogDebug(f"Cache file expired for {endpoint}")
+            return None
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        stash_ids = set(data.get("stash_ids", []))
+        log.LogInfo(f"Loaded {len(stash_ids)} stash_ids from disk cache for {endpoint}")
+        return stash_ids
+    except Exception as e:
+        log.LogDebug(f"Failed to read cache from disk: {e}")
+        return None
+
+def _write_cache_to_disk(endpoint: str, stash_ids: set[str]) -> None:
+    """Write stash_ids to disk cache."""
+    filepath = _get_cache_filepath(endpoint)
+    try:
+        data = {"stash_ids": sorted(stash_ids), "endpoint": endpoint, "count": len(stash_ids)}
+        with open(filepath, 'w') as f:
+            json.dump(data, f)
+        log.LogDebug(f"Wrote {len(stash_ids)} stash_ids to disk cache")
+    except Exception as e:
+        log.LogWarning(f"Failed to write cache to disk: {e}")
 
 
 # ============================================================================
@@ -987,15 +1029,28 @@ def whisparr_get_status_map(whisparr_url, api_key):
 def get_or_build_cache(endpoint: str) -> set[str]:
     """Get or build the local stash_id cache for a given endpoint.
 
-    Returns a set of stash_ids that exist in local Stash for the endpoint.
-    Uses cached data if available.
+    Checks: 1) in-memory cache, 2) disk cache, 3) builds from scratch.
     """
     from datetime import datetime
 
+    # 1. Check in-memory cache (same process only)
     if endpoint in _local_stash_id_cache:
         return _local_stash_id_cache[endpoint]
 
+    # 2. Check disk cache (survives across process invocations)
+    disk_cache = _read_cache_from_disk(endpoint)
+    if disk_cache is not None:
+        _local_stash_id_cache[endpoint] = disk_cache
+        _cache_metadata[endpoint] = {
+            "count": len(disk_cache),
+            "built_at": datetime.now().isoformat(),
+            "source": "disk"
+        }
+        return disk_cache
+
+    # 3. Build from scratch
     log.LogInfo(f"Building local stash_id cache for {endpoint}...")
+    build_start = time.time()
 
     stash_ids = set()
     page = 1
@@ -1033,19 +1088,23 @@ def get_or_build_cache(endpoint: str) -> set[str]:
                 if sid.get("endpoint") == endpoint:
                     stash_ids.add(sid.get("stash_id"))
 
-        # Check if we've fetched all pages
         if page * per_page >= total_count:
             break
         page += 1
 
+    build_time_ms = int((time.time() - build_start) * 1000)
+
+    # Save to both memory and disk
     _local_stash_id_cache[endpoint] = stash_ids
     _cache_metadata[endpoint] = {
         "count": len(stash_ids),
-        "built_at": datetime.now().isoformat()
+        "built_at": datetime.now().isoformat(),
+        "source": "built",
+        "build_time_ms": build_time_ms
     }
+    _write_cache_to_disk(endpoint, stash_ids)
 
-    log.LogInfo(f"Cache built: {len(stash_ids)} scenes with stash_ids for {endpoint}")
-
+    log.LogInfo(f"Cache built: {len(stash_ids)} scenes with stash_ids for {endpoint} ({build_time_ms}ms)")
     return stash_ids
 
 
@@ -1731,7 +1790,12 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "filters_active": filters_active,
         "active_filters": active_filters,
         "active_filter_tag_ids": list(favorite_tag_ids) if favorite_tag_ids else [],
-        "excluded_tags_applied": len(excluded_tag_ids) > 0
+        "excluded_tags_applied": len(excluded_tag_ids) > 0,
+        "cache_info": {
+            "source": _cache_metadata.get(stashdb_url, {}).get("source", "unknown"),
+            "count": _cache_metadata.get(stashdb_url, {}).get("count", 0),
+            "build_time_ms": _cache_metadata.get(stashdb_url, {}).get("build_time_ms", 0),
+        },
     }
 
 
@@ -2022,7 +2086,12 @@ def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", dire
         "whisparr_configured": whisparr_configured,
         "filters_active": filters_active,
         "active_filter_tag_ids": list(tag_ids) if tag_ids else [],
-        "excluded_tags_applied": len(excluded_tag_ids) > 0
+        "excluded_tags_applied": len(excluded_tag_ids) > 0,
+        "cache_info": {
+            "source": _cache_metadata.get(stashdb_url, {}).get("source", "unknown"),
+            "count": _cache_metadata.get(stashdb_url, {}).get("count", 0),
+            "build_time_ms": _cache_metadata.get(stashdb_url, {}).get("build_time_ms", 0),
+        },
     }
 
 

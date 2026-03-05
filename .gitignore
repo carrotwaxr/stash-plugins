@@ -20,3 +20,6 @@ plugins/tagManager/simulate.py
 
 # Git worktrees
 .worktrees/
+
+# Missing Scenes disk cache files
+**/.cache_stashids_*
