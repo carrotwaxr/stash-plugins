@@ -1073,6 +1073,7 @@ def get_or_build_cache(endpoint: str) -> set[str]:
     stash_ids = set()
     page = 1
     per_page = 100
+    build_start = time.time()
 
     while True:
         result = stash_graphql("""
@@ -1114,6 +1115,7 @@ def get_or_build_cache(endpoint: str) -> set[str]:
 
     # Save to both memory and disk
     _local_stash_id_cache[endpoint] = stash_ids
+    build_time_ms = int((time.time() - build_start) * 1000)
     _cache_metadata[endpoint] = {
         "count": len(stash_ids),
         "built_at": datetime.now().isoformat(),

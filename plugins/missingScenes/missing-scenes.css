@@ -713,6 +713,13 @@
   vertical-align: middle;
 }
 
+/* Loading detail text */
+.ms-loading-detail {
+  font-size: 12px;
+  color: #666;
+  margin-top: -8px;
+}
+
 /* Responsive adjustments for browse page */
 @media (max-width: 768px) {
   .ms-browse-controls {
