@@ -93,12 +93,29 @@
       statsText += " missing scenes";
       if (stats.filters_active) statsText += " (filtered)";
       if (stats.excluded_tags_applied) statsText += " (content filtered)";
+      if (stats.cache_info) {
+        const ci = stats.cache_info;
+        if (ci.source === "built") {
+          statsText += ` | Index: ${ci.count.toLocaleString()} scenes (built in ${(ci.build_time_ms / 1000).toFixed(1)}s)`;
+        } else if (ci.source !== "unknown") {
+          statsText += ` | Index: ${ci.count.toLocaleString()} scenes (cached)`;
+        }
+      }
     }
 
     // Build results content - placeholder for now, will be replaced with DOM elements
     let resultsPlaceholder;
     if (loading && scenes.length === 0) {
-      resultsPlaceholder = '<div class="ms-placeholder">Loading...</div>';
+      resultsPlaceholder = `
+        <div class="ms-placeholder">
+          <div class="ms-spinner"></div>
+          <div>Loading missing scenes...</div>
+          <div class="ms-loading-detail">Building scene index (this may take a moment)</div>
+        </div>
+      `;
+    } else if (loading && scenes.length > 0) {
+      // Loading more - don't replace existing content, just show in footer
+      resultsPlaceholder = '';
     } else if (error) {
       resultsPlaceholder = `
         <div class="ms-placeholder ms-error">
@@ -246,6 +263,7 @@
           is_complete: result.is_complete,
           filters_active: result.filters_active,
           excluded_tags_applied: result.excluded_tags_applied,
+          cache_info: result.cache_info || null,
         }
       });
 

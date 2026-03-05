@@ -1073,6 +1073,7 @@ def get_or_build_cache(endpoint: str) -> set[str]:
     stash_ids = set()
     page = 1
     per_page = 100
+    build_start = time.time()
 
     while True:
         result = stash_graphql("""
@@ -1114,6 +1115,7 @@ def get_or_build_cache(endpoint: str) -> set[str]:
 
     # Save to both memory and disk
     _local_stash_id_cache[endpoint] = stash_ids
+    build_time_ms = int((time.time() - build_start) * 1000)
     _cache_metadata[endpoint] = {
         "count": len(stash_ids),
         "built_at": datetime.now().isoformat(),
@@ -1124,6 +1126,16 @@ def get_or_build_cache(endpoint: str) -> set[str]:
 
     log.LogInfo(f"Cache built: {len(stash_ids)} scenes with stash_ids for {endpoint} ({build_time_ms}ms)")
     return stash_ids
+
+
+def _get_cache_info(endpoint: str) -> dict:
+    """Get cache metadata for API responses."""
+    meta = _cache_metadata.get(endpoint, {})
+    return {
+        "source": meta.get("source", "unknown"),
+        "count": meta.get("count", 0),
+        "build_time_ms": meta.get("build_time_ms", 0),
+    }
 
 
 def count_local_scenes_for_entity(endpoint: str, entity_type: str, entity_id: str) -> int:
