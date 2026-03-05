@@ -1128,6 +1128,16 @@ def get_or_build_cache(endpoint: str) -> set[str]:
     return stash_ids
 
 
+def _get_cache_info(endpoint: str) -> dict:
+    """Get cache metadata for API responses."""
+    meta = _cache_metadata.get(endpoint, {})
+    return {
+        "source": meta.get("source", "unknown"),
+        "count": meta.get("count", 0),
+        "build_time_ms": meta.get("build_time_ms", 0),
+    }
+
+
 def count_local_scenes_for_entity(endpoint: str, entity_type: str, entity_id: str) -> int:
     """Count local scenes that match an entity AND have a stash_id for the endpoint.
 

@@ -95,10 +95,10 @@
       if (stats.excluded_tags_applied) statsText += " (content filtered)";
       if (stats.cache_info) {
         const ci = stats.cache_info;
-        if (ci.source === "disk") {
-          statsText += ` | Index: ${ci.count.toLocaleString()} scenes (cached)`;
-        } else if (ci.source === "built") {
+        if (ci.source === "built") {
           statsText += ` | Index: ${ci.count.toLocaleString()} scenes (built in ${(ci.build_time_ms / 1000).toFixed(1)}s)`;
+        } else if (ci.source !== "unknown") {
+          statsText += ` | Index: ${ci.count.toLocaleString()} scenes (cached)`;
         }
       }
     }
@@ -110,7 +110,7 @@
         <div class="ms-placeholder">
           <div class="ms-spinner"></div>
           <div>Loading missing scenes...</div>
-          <div class="ms-loading-detail">Building scene index (first load may take a moment)</div>
+          <div class="ms-loading-detail">Building scene index (this may take a moment)</div>
         </div>
       `;
     } else if (loading && scenes.length > 0) {
