@@ -72,13 +72,29 @@ def _read_cache_from_disk(endpoint: str) -> set[str] | None:
 def _write_cache_to_disk(endpoint: str, stash_ids: set[str]) -> None:
     """Write stash_ids to disk cache."""
     filepath = _get_cache_filepath(endpoint)
+    tmp_path = filepath + ".tmp"
     try:
         data = {"stash_ids": sorted(stash_ids), "endpoint": endpoint, "count": len(stash_ids)}
-        with open(filepath, 'w') as f:
+        with open(tmp_path, 'w') as f:
             json.dump(data, f)
+        os.replace(tmp_path, filepath)
         log.LogDebug(f"Wrote {len(stash_ids)} stash_ids to disk cache")
     except Exception as e:
         log.LogWarning(f"Failed to write cache to disk: {e}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def _get_cache_info(endpoint: str) -> dict:
+    """Get cache metadata for API responses."""
+    meta = _cache_metadata.get(endpoint, {})
+    return {
+        "source": meta.get("source", "unknown"),
+        "count": meta.get("count", 0),
+        "build_time_ms": meta.get("build_time_ms", 0),
+    }
 
 
 # ============================================================================
@@ -1035,6 +1051,8 @@ def get_or_build_cache(endpoint: str) -> set[str]:
 
     # 1. Check in-memory cache (same process only)
     if endpoint in _local_stash_id_cache:
+        if endpoint not in _cache_metadata:
+            _cache_metadata[endpoint] = {"source": "memory", "count": len(_local_stash_id_cache[endpoint])}
         return _local_stash_id_cache[endpoint]
 
     # 2. Check disk cache (survives across process invocations)
@@ -1791,11 +1809,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "active_filters": active_filters,
         "active_filter_tag_ids": list(favorite_tag_ids) if favorite_tag_ids else [],
         "excluded_tags_applied": len(excluded_tag_ids) > 0,
-        "cache_info": {
-            "source": _cache_metadata.get(stashdb_url, {}).get("source", "unknown"),
-            "count": _cache_metadata.get(stashdb_url, {}).get("count", 0),
-            "build_time_ms": _cache_metadata.get(stashdb_url, {}).get("build_time_ms", 0),
-        },
+        "cache_info": _get_cache_info(stashdb_url),
     }
 
 
@@ -2087,11 +2101,7 @@ def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", dire
         "filters_active": filters_active,
         "active_filter_tag_ids": list(tag_ids) if tag_ids else [],
         "excluded_tags_applied": len(excluded_tag_ids) > 0,
-        "cache_info": {
-            "source": _cache_metadata.get(stashdb_url, {}).get("source", "unknown"),
-            "count": _cache_metadata.get(stashdb_url, {}).get("count", 0),
-            "build_time_ms": _cache_metadata.get(stashdb_url, {}).get("build_time_ms", 0),
-        },
+        "cache_info": _get_cache_info(stashdb_url),
     }
 
 
