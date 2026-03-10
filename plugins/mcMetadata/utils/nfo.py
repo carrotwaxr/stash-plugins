@@ -1,8 +1,6 @@
 import os
 from xml.sax.saxutils import escape
 
-INDENTED_NEWLINE = "\n    "
-
 
 def escape_xml(text):
     """Escape special XML characters in text.
@@ -48,29 +46,15 @@ def build_nfo_xml(scene, settings=None, video_path=None):
 
     Args:
         scene: Scene dict from Stash API
-        settings: Plugin settings dict (optional, enables artwork references)
+        settings: Plugin settings dict (optional, enables artwork references and field exclusion)
         video_path: Path to the video file (optional, enables poster thumb tag)
 
     Returns:
         str: NFO XML content
     """
-    ret = """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
-<movie>
-    <name>{title}</name>
-    <title>{title}</title>
-    <originaltitle>{title}</originaltitle>
-    <sorttitle>{title}</sorttitle>
-    <criticrating>{custom_rating}</criticrating>
-    <rating>{rating}</rating>
-    <userrating>{rating}</userrating>
-    <plot><![CDATA[{details}]]></plot>
-    <premiered>{date}</premiered>
-    <releasedate>{date}</releasedate>
-    <year>{year}</year>
-    <studio>{studio}</studio>{poster_thumb}{performers}
-    <genre>Adult</genre>{tags}
-    <uniqueid type="stash">{id}</uniqueid>
-</movie>"""
+    exclude = set()
+    if settings:
+        exclude = set(settings.get("nfo_exclude_fields") or [])
 
     id = scene["id"]
     details = scene["details"] or ""
@@ -97,60 +81,61 @@ def build_nfo_xml(scene, settings=None, video_path=None):
     if scene["studio"] is not None:
         studio = escape_xml(scene["studio"]["name"])
 
-    # Poster thumb tag referencing local poster image
-    poster_thumb = ""
+    # Build XML lines, filtering excluded fields
+    lines = ['<?xml version="1.0" encoding="utf-8" standalone="yes"?>', '<movie>']
+
+    field_lines = {
+        "name": f"    <name>{title}</name>",
+        "title": f"    <title>{title}</title>",
+        "originaltitle": f"    <originaltitle>{title}</originaltitle>",
+        "sorttitle": f"    <sorttitle>{title}</sorttitle>",
+        "criticrating": f"    <criticrating>{custom_rating}</criticrating>",
+        "rating": f"    <rating>{rating}</rating>",
+        "userrating": f"    <userrating>{rating}</userrating>",
+        "plot": f"    <plot><![CDATA[{details}]]></plot>",
+        "premiered": f"    <premiered>{date}</premiered>",
+        "releasedate": f"    <releasedate>{date}</releasedate>",
+        "year": f"    <year>{year}</year>",
+        "studio": f"    <studio>{studio}</studio>",
+    }
+
+    for field_name, line in field_lines.items():
+        if field_name not in exclude:
+            lines.append(line)
+
+    # Poster thumb (always included if video_path provided)
     if video_path:
         base = os.path.splitext(os.path.basename(video_path))[0]
         poster_filename = f"{base}-poster.jpg"
-        poster_thumb = INDENTED_NEWLINE + f'<thumb aspect="poster">{escape_xml(poster_filename)}</thumb>'
+        lines.append(f'    <thumb aspect="poster">{escape_xml(poster_filename)}</thumb>')
 
-    performers = INDENTED_NEWLINE
-    i = 0
-
-    for p in scene["performers"]:
-        if i != 0:
-            performers = performers + INDENTED_NEWLINE
+    # Performers (always included)
+    for i, p in enumerate(scene["performers"]):
         performer_name = escape_xml(p["name"])
-
-        # Build optional <thumb> tag for actor image
         actor_thumb = ""
         actor_image_path = _get_actor_thumb_path(p["name"], settings)
         if actor_image_path:
-            actor_thumb = "\n        <thumb>{}</thumb>".format(escape_xml(actor_image_path))
+            actor_thumb = f"\n        <thumb>{escape_xml(actor_image_path)}</thumb>"
 
-        performers = (
-            performers
-            + """<actor>
-        <name>{}</name>
-        <role>{}</role>
-        <order>{}</order>
-        <type>Actor</type>{}
-    </actor>""".format(performer_name, performer_name, i, actor_thumb)
-        )
-        i += 1
-    if performers == INDENTED_NEWLINE:
-        performers = ""
+        lines.append(f"""    <actor>
+        <name>{performer_name}</name>
+        <role>{performer_name}</role>
+        <order>{i}</order>
+        <type>Actor</type>{actor_thumb}
+    </actor>""")
 
-    tags = INDENTED_NEWLINE
-    iTwo = 0
+    # Genre (excludable)
+    if "genre" not in exclude:
+        lines.append("    <genre>Adult</genre>")
+
+    # Tags (always included)
     for t in scene["tags"]:
-        if iTwo != 0:
-            tags = tags + INDENTED_NEWLINE
-        tags = tags + """<tag>{}</tag>""".format(escape_xml(t["name"]))
-        iTwo += 1
-    if tags == INDENTED_NEWLINE:
-        tags = ""
+        lines.append(f"    <tag>{escape_xml(t['name'])}</tag>")
 
-    return ret.format(
-        title=title,
-        custom_rating=custom_rating,
-        rating=rating,
-        id=id,
-        tags=tags,
-        date=date,
-        year=year,
-        studio=studio,
-        performers=performers,
-        poster_thumb=poster_thumb,
-        details=details,
-    )
+    # Unique ID (excludable)
+    if "uniqueid" not in exclude:
+        lines.append(f'    <uniqueid type="stash">{id}</uniqueid>')
+
+    lines.append("</movie>")
+
+    return "\n".join(lines)

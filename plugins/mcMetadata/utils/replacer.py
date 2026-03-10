@@ -178,6 +178,49 @@ def __get_replacer_regex(key):
     return r"\$" + key[1:] + r"(?=[^a-zA-Z]|$)"
 
 
+def resolve_conditionals(template, scene):
+    """Resolve conditional blocks in a template string.
+
+    Syntax: {literal$Variableliteral} — the entire block (including literal
+    text) is included only if ALL $Variables inside resolve to non-empty values.
+    If any variable raises ValueError or resolves empty, the whole block is removed.
+
+    Blocks without any $Variables are left as-is (treated as literal braces).
+
+    Args:
+        template: Template string potentially containing {conditional} blocks
+        scene: Scene dict for variable resolution
+
+    Returns:
+        str: Template with conditional blocks resolved
+    """
+    def _resolve_block(match):
+        block_content = match.group(1)
+
+        # Find all $Variables in this block
+        var_matches = re.findall(r'\$[A-Za-z]+', block_content)
+        if not var_matches:
+            # No variables — treat braces as literal
+            return match.group(0)
+
+        # Check each variable resolves to a non-empty value
+        resolved = block_content
+        for var in var_matches:
+            if var not in replacers:
+                return ""  # Unknown variable — remove block
+            try:
+                value = replacers[var](scene)
+                if not value:
+                    return ""
+                resolved = re.sub(__get_replacer_regex(var), value, resolved)
+            except (ValueError, KeyError):
+                return ""  # Variable can't resolve — remove block
+
+        return resolved
+
+    return re.sub(r'\{([^}]*\$[A-Za-z][^}]*)\}', _resolve_block, template)
+
+
 def get_new_path(scene, basepath, template, budget):
     try:
         log.debug("Determining what the renamed filepath would be")
@@ -186,6 +229,9 @@ def get_new_path(scene, basepath, template, budget):
         __, ext = os.path.splitext(video_path)
         # subtract the file extension from our budget
         budget -= len(ext)
+
+        # Resolve conditional blocks before standard replacement
+        template = resolve_conditionals(template, scene)
 
         if len(basepath) + len(template) > budget:
             raise ValueError(
