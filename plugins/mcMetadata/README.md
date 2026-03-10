@@ -1,6 +1,6 @@
 # mcMetadata Plugin for [Stash](https://github.com/stashapp/stash)
 
-**Version**: 1.3.0
+**Version**: 1.4.0
 
 This plugin is for users who manage their collection with Stash but serve content via Jellyfin, Emby, or Plex. Instead of relying on those media servers' scrapers, mcMetadata leverages your Stash database to generate `.nfo` metadata files and performer images that your media server can use.
 
@@ -37,6 +37,7 @@ All settings are configured through Stash's UI at **Settings → Plugins → mcM
 | **Dry Run Mode** | Boolean | On | Preview changes without making them. Check logs to see what would happen. |
 | **Enable Scene Update Hook** | Boolean | Off | Automatically process scenes when you update them. |
 | **Require StashDB Link (Hook Only)** | Boolean | Off | Only process scenes linked to StashDB when using the hook. Enable this if you only want NFOs generated for curated StashDB content. |
+| **Hook Trigger Mode** | String | `always` | When to process scenes via hook: `always` (every save) or `on_organized` (only when scene is marked Organized). Useful if you make incremental edits and want to trigger metadata generation only when you're done. |
 
 ### File Renamer Settings
 
@@ -55,6 +56,7 @@ All settings are configured through Stash's UI at **Settings → Plugins → mcM
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | **Skip Existing NFO Files** | Boolean | Off | Don't overwrite NFO files that already exist |
+| **NFO Exclude Fields** | String | - | Comma-separated list of fields to omit from NFO files. Available: `name`, `title`, `originaltitle`, `sorttitle`, `criticrating`, `rating`, `userrating`, `plot`, `premiered`, `releasedate`, `year`, `studio`, `uniqueid`, `genre` |
 
 ### Actor Image Settings
 
@@ -82,6 +84,17 @@ Use these variables in your **Renamer Path Template**:
 | `$FemalePerformers` | Female performer names only |
 | `$MalePerformers` | Male performer names only |
 | `$Tags` | All scene tags (space-separated) |
+
+### Conditional Blocks
+
+Wrap parts of your template in `{curly braces}` to include them only when a variable has a value:
+
+| Template | With Date | Without Date |
+|----------|-----------|--------------|
+| `{$ReleaseDate - }$Title` | `2024-01-15 - My Scene` | `My Scene` |
+| `$Studio/{$ReleaseYear/}$Title` | `Studio/2024/My Scene` | `Studio/My Scene` |
+
+If a block contains multiple variables, ALL must have values for the block to appear.
 
 **Uniqueness Requirement**: Templates must contain either:
 - `$StashID`, OR
@@ -145,6 +158,11 @@ Common issues:
 - `stashapp-tools>=0.2.59` (installed automatically)
 
 ## Changelog
+
+### v1.4.0
+- Added `hookTriggerMode` setting: choose to process scenes on every save (`always`) or only when marked Organized (`on_organized`) (#111)
+- Added conditional template blocks: `{$ReleaseDate - }$Title` includes text only when the variable has a value (#112)
+- Added `nfoExcludeFields` setting to omit specific fields from NFO files (#113)
 
 ### v1.3.0
 - Added Plex as a supported media server (poster files work natively, NFO requires third-party agent, performer images not supported)

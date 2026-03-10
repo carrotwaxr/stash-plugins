@@ -18,6 +18,7 @@ sys.modules["stashapi"] = MagicMock()
 sys.modules["stashapi.log"] = MagicMock()
 
 from utils.nfo import escape_xml, build_nfo_xml
+from utils.replacer import get_new_path, resolve_conditionals
 
 
 class TestEscapeXml(unittest.TestCase):
@@ -436,6 +437,197 @@ class TestRequireStashIdSetting(unittest.TestCase):
 
         self.assertEqual(len(stash_ids), 0)
         self.assertFalse(bool(stash_ids))  # Empty list is falsy
+
+
+class TestNfoExcludeFields(unittest.TestCase):
+    """Test NFO field exclusion (#113)."""
+
+    def setUp(self):
+        self.mock_scene = {
+            "id": "123",
+            "title": "Test Scene",
+            "details": "Description",
+            "date": "2024-01-15",
+            "rating100": 80,
+            "studio": {"name": "Test Studio"},
+            "performers": [{"name": "Jane Doe"}],
+            "tags": [{"name": "Tag1"}],
+            "files": [{"path": "/path/to/video.mp4"}],
+        }
+
+    def test_no_exclusions_produces_all_fields(self):
+        """Empty exclude list should produce all fields (backward compatible)."""
+        settings = {"nfo_exclude_fields": []}
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+        self.assertIn("<criticrating>", nfo)
+        self.assertIn("<uniqueid", nfo)
+        self.assertIn("<rating>", nfo)
+        self.assertIn("<userrating>", nfo)
+
+    def test_exclude_uniqueid(self):
+        """Should omit uniqueid when excluded."""
+        settings = {"nfo_exclude_fields": ["uniqueid"]}
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+        self.assertNotIn("<uniqueid", nfo)
+        self.assertIn("<title>", nfo)
+
+    def test_exclude_rating_fields(self):
+        """Should omit all rating fields when excluded."""
+        settings = {"nfo_exclude_fields": ["criticrating", "rating", "userrating"]}
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+        self.assertNotIn("<criticrating>", nfo)
+        self.assertNotIn("<rating>", nfo)
+        self.assertNotIn("<userrating>", nfo)
+        self.assertIn("<title>", nfo)
+
+    def test_exclude_multiple_fields(self):
+        """Should handle excluding multiple unrelated fields."""
+        settings = {"nfo_exclude_fields": ["sorttitle", "originaltitle", "year"]}
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+        self.assertNotIn("<sorttitle>", nfo)
+        self.assertNotIn("<originaltitle>", nfo)
+        self.assertNotIn("<year>", nfo)
+        self.assertIn("<title>", nfo)
+        self.assertIn("<premiered>", nfo)
+
+    def test_exclude_does_not_affect_performers(self):
+        """Performers should always be included regardless of exclusions."""
+        settings = {"nfo_exclude_fields": ["uniqueid", "criticrating"]}
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+        self.assertIn("<actor>", nfo)
+        self.assertIn("<name>Jane Doe</name>", nfo)
+
+    def test_exclude_does_not_affect_tags(self):
+        """Tags should always be included regardless of exclusions."""
+        settings = {"nfo_exclude_fields": ["uniqueid"]}
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+        self.assertIn("<tag>Tag1</tag>", nfo)
+
+    def test_exclude_genre(self):
+        """Should omit genre when excluded."""
+        settings = {"nfo_exclude_fields": ["genre"]}
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+        self.assertNotIn("<genre>", nfo)
+
+    def test_no_settings_produces_all_fields(self):
+        """No settings at all should produce all fields (backward compatible)."""
+        nfo = build_nfo_xml(self.mock_scene)
+        self.assertIn("<criticrating>", nfo)
+        self.assertIn("<uniqueid", nfo)
+
+    def test_none_exclude_list_produces_all_fields(self):
+        """None exclude list treated as empty."""
+        settings = {"nfo_exclude_fields": None}
+        nfo = build_nfo_xml(self.mock_scene, settings=settings)
+        self.assertIn("<criticrating>", nfo)
+
+
+class TestConditionalTemplates(unittest.TestCase):
+    """Test conditional template block syntax (#112)."""
+
+    def setUp(self):
+        """Scene with all fields populated."""
+        self.full_scene = {
+            "id": "1",
+            "title": "Test Title",
+            "date": "2024-01-15",
+            "studio": {"name": "TestStudio", "parent_studio": None},
+            "stash_ids": [{"stash_id": "abc123", "endpoint": "https://stashdb.org"}],
+            "performers": [],
+            "tags": [],
+            "files": [{"path": "/video.mp4", "height": 1080, "width": 1920}],
+        }
+        self.no_date_scene = {**self.full_scene, "date": None}
+
+    def test_conditional_included_when_var_has_value(self):
+        """Block should be included when variable resolves."""
+        result = resolve_conditionals("{$ReleaseDate - }$Title", self.full_scene)
+        self.assertEqual(result, "2024-01-15 - $Title")
+
+    def test_conditional_removed_when_var_empty(self):
+        """Block should be removed when variable has no value."""
+        result = resolve_conditionals("{$ReleaseDate - }$Title", self.no_date_scene)
+        self.assertEqual(result, "$Title")
+
+    def test_multiple_conditionals(self):
+        """Multiple conditional blocks should each resolve independently."""
+        result = resolve_conditionals("{$ReleaseDate - }{$Studio/}$Title", self.full_scene)
+        self.assertEqual(result, "2024-01-15 - TestStudio/$Title")
+
+    def test_conditional_with_no_vars_passes_through(self):
+        """Braces with no variables inside are literal text."""
+        result = resolve_conditionals("{novar}$Title", self.full_scene)
+        self.assertEqual(result, "{novar}$Title")
+
+    def test_conditional_var_at_start_of_block(self):
+        """`{$ReleaseDate}` with no surrounding text should work."""
+        result = resolve_conditionals("{$ReleaseDate}$Title", self.full_scene)
+        self.assertEqual(result, "2024-01-15$Title")
+
+    def test_conditional_var_at_end_of_block(self):
+        """`{- $ReleaseDate}` should work."""
+        result = resolve_conditionals("{- $ReleaseDate}$Title", self.full_scene)
+        self.assertEqual(result, "- 2024-01-15$Title")
+
+    def test_conditional_multiple_vars_all_present(self):
+        """Block with multiple vars should be included when all resolve."""
+        result = resolve_conditionals("{$Studio $ReleaseDate - }$Title", self.full_scene)
+        self.assertEqual(result, "TestStudio 2024-01-15 - $Title")
+
+    def test_conditional_multiple_vars_one_missing(self):
+        """Block with multiple vars should be removed if any var missing."""
+        result = resolve_conditionals("{$Studio $ReleaseDate - }$Title", self.no_date_scene)
+        self.assertEqual(result, "$Title")
+
+    def test_end_to_end_with_conditional(self):
+        """Full get_new_path with conditional template should work."""
+        template = "{$ReleaseDate - }$Title"
+        path = get_new_path(self.full_scene, "/base/", template, 250)
+        self.assertEqual(path, "/base/2024-01-15 - Test Title.mp4")
+
+    def test_end_to_end_conditional_empty(self):
+        """Full get_new_path with empty conditional should produce clean output."""
+        template = "{$ReleaseDate - }$Title"
+        path = get_new_path(self.no_date_scene, "/base/", template, 250)
+        self.assertEqual(path, "/base/Test Title.mp4")
+
+
+class TestHookTriggerMode(unittest.TestCase):
+    """Test hookTriggerMode setting behavior (#111)."""
+
+    def test_always_mode_processes_unorganized_scene(self):
+        """'always' mode should process scenes regardless of organized status."""
+        settings = {"hook_trigger_mode": "always"}
+        scene = {"id": "1", "organized": False}
+        should_skip = settings.get("hook_trigger_mode", "always") == "on_organized" and not scene.get("organized", False)
+        self.assertFalse(should_skip)
+
+    def test_always_mode_processes_organized_scene(self):
+        """'always' mode should process organized scenes too."""
+        settings = {"hook_trigger_mode": "always"}
+        scene = {"id": "1", "organized": True}
+        should_skip = settings.get("hook_trigger_mode", "always") == "on_organized" and not scene.get("organized", False)
+        self.assertFalse(should_skip)
+
+    def test_on_organized_skips_unorganized_scene(self):
+        """'on_organized' mode should skip unorganized scenes."""
+        settings = {"hook_trigger_mode": "on_organized"}
+        scene = {"id": "1", "organized": False}
+        should_skip = settings.get("hook_trigger_mode", "always") == "on_organized" and not scene.get("organized", False)
+        self.assertTrue(should_skip)
+
+    def test_on_organized_processes_organized_scene(self):
+        """'on_organized' mode should process organized scenes."""
+        settings = {"hook_trigger_mode": "on_organized"}
+        scene = {"id": "1", "organized": True}
+        should_skip = settings.get("hook_trigger_mode", "always") == "on_organized" and not scene.get("organized", False)
+        self.assertFalse(should_skip)
+
+    def test_default_mode_is_always(self):
+        """Missing hookTriggerMode should default to 'always'."""
+        settings = {}
+        mode = settings.get("hook_trigger_mode", "always")
+        self.assertEqual(mode, "always")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ mcMetadata - Stash Plugin for Media Center Metadata Generation
 Generates NFO files for Jellyfin/Emby, organizes video files according to
 configurable templates, and exports performer images to media server folders.
 
-Version: 1.2.3
+Version: 1.4.0
 """
 
 import json
@@ -87,6 +87,7 @@ def get_settings(stash_instance):
         "log_file_path": plugin_config.get("logFilePath", ""),  # Optional file logging
         "enable_hook": plugin_config.get("enableHook", False),  # Default off for safety
         "require_stash_id": plugin_config.get("requireStashId", False),  # Default off - process all scenes
+        "hook_trigger_mode": plugin_config.get("hookTriggerMode", "always"),
         "enable_renamer": plugin_config.get("enableRenamer", False),
         "renamer_path": plugin_config.get("renamerPath", ""),
         "renamer_path_template": plugin_config.get(
@@ -98,6 +99,11 @@ def get_settings(stash_instance):
         "renamer_enable_mark_organized": plugin_config.get("renamerMarkOrganized", True),
         "renamer_multi_file_mode": plugin_config.get("renamerMultiFileMode", "all"),
         "nfo_skip_existing": plugin_config.get("nfoSkipExisting", False),
+        "nfo_exclude_fields": [
+            f.strip().lower()
+            for f in plugin_config.get("nfoExcludeFields", "").split(",")
+            if f.strip()
+        ],
         "enable_actor_images": plugin_config.get("enableActorImages", False),
         "media_server": plugin_config.get("mediaServer", "jellyfin"),
         "actor_metadata_path": plugin_config.get("actorMetadataPath", ""),
@@ -184,11 +190,19 @@ def main():
                 log.debug(f"Scene {scene_id} has no StashID, skipping (requireStashId is enabled)")
                 return
 
-            # Early exit if scene is already organized (prevents cascading hook invocations)
-            # When renamer marks scenes as organized, this acts as a "already processed" flag
-            if SETTINGS.get("renamer_enable_mark_organized", False) and scene.get("organized", False):
-                log.debug(f"Scene {scene_id} already organized, skipping to prevent hook cascade")
+            # Check hook trigger mode (#111)
+            hook_trigger_mode = SETTINGS.get("hook_trigger_mode", "always")
+            if hook_trigger_mode == "on_organized" and not scene.get("organized", False):
+                log.debug(f"Scene {scene_id} not organized, skipping (hookTriggerMode=on_organized)")
                 return
+
+            # Cascade protection: skip already-organized scenes to prevent re-firing
+            # after the plugin marks a scene as organized during rename.
+            # Skip this check in on_organized mode — user explicitly wants organized triggers.
+            if hook_trigger_mode != "on_organized":
+                if SETTINGS.get("renamer_enable_mark_organized", False) and scene.get("organized", False):
+                    log.debug(f"Scene {scene_id} already organized, skipping to prevent hook cascade")
+                    return
 
             log.info(f"Processing scene {scene_id}")
             process_scene(scene, stash, SETTINGS, api_key)
