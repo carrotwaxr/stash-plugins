@@ -403,9 +403,6 @@
         updateFilterStatus();
       }
     });
-
-    // Add keyboard navigation for preview
-    document.addEventListener("keydown", handlePreviewKeydown);
   }
 
   /**
@@ -639,6 +636,9 @@
       };
       img.src = result.image;
       overlay.style.display = "flex";
+
+      // Add keyboard listener when opening preview
+      document.addEventListener("keydown", handlePreviewKeydown);
     }
   };
 
@@ -682,6 +682,7 @@
       overlay.style.display = "none";
     }
     previewImage = null;
+    document.removeEventListener("keydown", handlePreviewKeydown);
   };
 
   /**
