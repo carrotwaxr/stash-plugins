@@ -657,7 +657,6 @@
       overlay.style.display = "none";
     }
     previewImage = null;
-    document.removeEventListener("keydown", handlePreviewKeydown);
   };
 
   /**
