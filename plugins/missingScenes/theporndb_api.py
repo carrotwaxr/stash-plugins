@@ -184,18 +184,26 @@ def transform_scene(rest_scene: dict) -> dict:
     else:
         scene["studio"] = None
 
-    # Images: from posters array
+    # Images: from posters (can be a list of objects or a dict of size→url)
     posters = rest_scene.get("posters") or []
-    scene["images"] = [
-        {
-            "id": poster.get("id"),
-            "url": poster.get("url"),
-            "width": poster.get("width", 0),
-            "height": poster.get("height", 0),
-        }
-        for poster in posters
-        if poster.get("url")
-    ]
+    if isinstance(posters, dict):
+        # Dict format: {"full": "url", "large": "url", ...} — take the first available
+        scene["images"] = [
+            {"id": None, "url": url, "width": 0, "height": 0}
+            for url in posters.values()
+            if isinstance(url, str) and url
+        ][:1]  # Just need one thumbnail
+    else:
+        scene["images"] = [
+            {
+                "id": poster.get("id"),
+                "url": poster.get("url"),
+                "width": poster.get("width", 0),
+                "height": poster.get("height", 0),
+            }
+            for poster in posters
+            if poster.get("url")
+        ]
 
     # Performers: nest under performer key to match GraphQL shape
     rest_performers = rest_scene.get("performers") or []
