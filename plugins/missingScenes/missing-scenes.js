@@ -22,7 +22,7 @@
   let whisparrConfigured = false;
   let stashdbUrl = "";
 
-  // Endpoint selection state (for tags with multiple stash-box links)
+  // Endpoint selection state (for entities with multiple stash-box links)
   let availableEndpoints = []; // [{endpoint, name, stash_id}]
   let selectedEndpoint = null;
 
@@ -291,7 +291,7 @@
     container.id = "ms-endpoint-selector";
 
     const label = document.createElement("label");
-    label.textContent = "Search on: ";
+    label.textContent = "Source: ";
     label.htmlFor = "ms-endpoint-dropdown";
 
     const select = document.createElement("select");
@@ -614,44 +614,38 @@
     setStatus("Checking endpoints...", "loading");
 
     try {
-      // For tags, check available endpoints first
-      if (currentEntityType === "tag") {
-        const endpointInfo = await getEndpoints(currentEntityType, currentEntityId);
-        availableEndpoints = endpointInfo.available_endpoints || [];
-        selectedEndpoint = endpointInfo.default_endpoint;
+      // Check available endpoints for this entity
+      const endpointInfo = await getEndpoints(currentEntityType, currentEntityId);
+      availableEndpoints = endpointInfo.available_endpoints || [];
+      selectedEndpoint = endpointInfo.default_endpoint;
 
-        if (availableEndpoints.length === 0) {
-          showError(`This tag is not linked to any configured stash-box. Please link it first.`);
-          setStatus("Tag not linked to stash-box", "error");
-          isLoading = false;
-          return;
-        }
-
-        // Show endpoint selector if multiple valid endpoints and no clear default
-        if (availableEndpoints.length > 1 && !endpointInfo.default_endpoint) {
-          // Insert selector into modal header
-          const statsEl = document.getElementById("ms-stats");
-          if (statsEl) {
-            const selector = createEndpointSelector(
-              availableEndpoints,
-              availableEndpoints[0].endpoint,
-              (newEndpoint) => {
-                // Re-run search with new endpoint
-                selectedEndpoint = newEndpoint;
-                performSearch();
-              }
-            );
-            statsEl.parentNode.insertBefore(selector, statsEl);
-          }
-          selectedEndpoint = availableEndpoints[0].endpoint;
-        }
-      } else {
-        // For performers/studios, clear endpoint state
-        availableEndpoints = [];
-        selectedEndpoint = null;
+      if (availableEndpoints.length === 0) {
+        showError(`This ${currentEntityType} is not linked to any configured stash-box. Add a StashDB link first.`);
+        setStatus("Not linked to stash-box", "error");
+        isLoading = false;
+        return;
       }
 
-      await performSearch();
+      // Show endpoint selector if multiple endpoints available
+      if (availableEndpoints.length > 1) {
+        const statsEl = document.getElementById("ms-stats");
+        if (statsEl) {
+          const selector = createEndpointSelector(
+            availableEndpoints,
+            selectedEndpoint || availableEndpoints[0].endpoint,
+            (newEndpoint) => {
+              selectedEndpoint = newEndpoint;
+              performSearch(true);
+            }
+          );
+          statsEl.parentNode.insertBefore(selector, statsEl);
+        }
+        if (!selectedEndpoint) {
+          selectedEndpoint = availableEndpoints[0].endpoint;
+        }
+      }
+
+      await performSearch(true);
     } catch (error) {
       console.error("[MissingScenes] Search failed:", error);
       showError(error.message || "Failed to search for missing scenes");

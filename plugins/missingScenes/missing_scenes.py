@@ -1887,7 +1887,8 @@ def format_scene(scene, stash_id):
     }
 
 
-def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", direction="DESC",
+def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor=None,
+                   sort="DATE", direction="DESC",
                    filter_favorite_performers=False, filter_favorite_studios=False,
                    filter_favorite_tags=False):
     """
@@ -1895,6 +1896,7 @@ def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", dire
 
     Args:
         plugin_settings: Plugin configuration
+        endpoint_override: Optional endpoint URL to use (from UI dropdown)
         page_size: Number of missing scenes per page
         cursor: Pagination cursor
         sort: Sort field
@@ -1921,8 +1923,8 @@ def browse_stashdb(plugin_settings, page_size=50, cursor=None, sort="DATE", dire
     if not stashbox_configs:
         return {"error": "No stash-box endpoints configured in Stash settings"}
 
-    # Use configured or first endpoint
-    target_endpoint = plugin_settings.get("stashBoxEndpoint", "").strip()
+    # Use endpoint override, configured default, or first endpoint
+    target_endpoint = endpoint_override or plugin_settings.get("stashBoxEndpoint", "").strip()
     stashbox = None
 
     if target_endpoint:
@@ -2616,6 +2618,7 @@ def main():
                 output = find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=endpoint)
 
         elif operation == "browse_stashdb":
+            endpoint = args.get("endpoint")
             page_size = args.get("page_size", PAGE_SIZE_DEFAULT)
             cursor = args.get("cursor")
             sort = args.get("sort", "DATE")
@@ -2626,6 +2629,7 @@ def main():
 
             output = browse_stashdb(
                 plugin_settings=plugin_settings,
+                endpoint_override=endpoint,
                 page_size=page_size,
                 cursor=cursor,
                 sort=sort,
@@ -2685,8 +2689,32 @@ def main():
                         "entity_name": entity.get("name"),
                         "available_endpoints": available,
                         "default_endpoint": default_endpoint,
-                        "show_selector": len(available) > 1 and not default_endpoint
                     }
+
+        elif operation == "get_all_endpoints":
+            configured_boxes = get_stashbox_config()
+            preferred = plugin_settings.get("stashBoxEndpoint", "").strip()
+
+            endpoints = []
+            for box in configured_boxes:
+                endpoints.append({
+                    "endpoint": box["endpoint"],
+                    "name": box.get("name", box["endpoint"]),
+                })
+
+            default_endpoint = None
+            if preferred:
+                for ep in endpoints:
+                    if ep["endpoint"] == preferred:
+                        default_endpoint = preferred
+                        break
+            if not default_endpoint and endpoints:
+                default_endpoint = endpoints[0]["endpoint"]
+
+            output = {
+                "available_endpoints": endpoints,
+                "default_endpoint": default_endpoint,
+            }
 
         elif operation:
             output = {"error": f"Unknown operation: {operation}"}

@@ -13,10 +13,17 @@
   } = Core;
 
   /**
+   * Fetch all configured stash-box endpoints
+   */
+  async function getAllEndpoints() {
+    return runPluginOperation({ operation: "get_all_endpoints" });
+  }
+
+  /**
    * Browse StashDB for missing scenes
    */
   async function browseStashdb(options = {}) {
-    return runPluginOperation({
+    const args = {
       operation: "browse_stashdb",
       page_size: options.pageSize || pageSize,
       cursor: options.cursor || null,
@@ -25,7 +32,11 @@
       filter_favorite_performers: options.filterFavoritePerformers || false,
       filter_favorite_studios: options.filterFavoriteStudios || false,
       filter_favorite_tags: options.filterFavoriteTags || false,
-    });
+    };
+    if (selectedEndpoint) {
+      args.endpoint = selectedEndpoint;
+    }
+    return runPluginOperation(args);
   }
 
   // Page state (module-scoped for persistence)
@@ -42,6 +53,8 @@
   let pageSize = 50;
   let whisparrConfigured = false;
   let stashdbUrl = "";
+  let availableEndpoints = [];
+  let selectedEndpoint = null;
 
   /**
    * Set page title with retry to overcome Stash's title management
@@ -146,6 +159,20 @@
       }
     }
 
+    // Build endpoint dropdown (only if multiple endpoints configured)
+    let endpointDropdown = '';
+    if (availableEndpoints.length > 1) {
+      const epOptions = availableEndpoints.map(ep =>
+        `<option value="${escapeHtml(ep.endpoint)}" ${selectedEndpoint === ep.endpoint ? 'selected' : ''}>${escapeHtml(ep.name)}</option>`
+      ).join('');
+      endpointDropdown = `
+        <div class="ms-endpoint-selector ms-browse-endpoint-selector">
+          <label for="ms-endpoint-dropdown">Source:</label>
+          <select id="ms-endpoint-dropdown" class="ms-endpoint-dropdown">${epOptions}</select>
+        </div>
+      `;
+    }
+
     container.innerHTML = `
       <div class="ms-browse-page">
         <div class="ms-browse-header">
@@ -154,6 +181,7 @@
         </div>
 
         <div class="ms-browse-controls">
+          ${endpointDropdown}
           <div class="ms-filter-controls">
             <label class="ms-filter-checkbox">
               <input type="checkbox" id="ms-filter-performers" ${filterPerformersChecked}>
@@ -281,6 +309,12 @@
    * Setup control handlers (filters, sort, load more)
    */
   function setupControlHandlers(container) {
+    // Endpoint dropdown
+    container.querySelector('#ms-endpoint-dropdown')?.addEventListener('change', (e) => {
+      selectedEndpoint = e.target.value;
+      performSearch(container, true);
+    });
+
     // Filter checkboxes
     container.querySelector('#ms-filter-performers')?.addEventListener('change', (e) => {
       filterFavoritePerformers = e.target.checked;
@@ -338,6 +372,15 @@
         currentCursor = null;
         hasMore = true;
         isLoading = false;
+
+        // Fetch available endpoints before first search
+        try {
+          const epInfo = await getAllEndpoints();
+          availableEndpoints = epInfo.available_endpoints || [];
+          selectedEndpoint = epInfo.default_endpoint || (availableEndpoints[0]?.endpoint);
+        } catch (e) {
+          console.error("[MissingScenes] Failed to fetch endpoints:", e);
+        }
 
         // Initial render and load
         renderPage(containerRef.current, { loading: true, error: null, scenes: [], stats: null });
