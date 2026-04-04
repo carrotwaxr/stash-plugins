@@ -163,7 +163,7 @@
     let endpointDropdown = '';
     if (availableEndpoints.length > 1) {
       const epOptions = availableEndpoints.map(ep =>
-        `<option value="${ep.endpoint}" ${selectedEndpoint === ep.endpoint ? 'selected' : ''}>${escapeHtml(ep.name)}</option>`
+        `<option value="${escapeHtml(ep.endpoint)}" ${selectedEndpoint === ep.endpoint ? 'selected' : ''}>${escapeHtml(ep.name)}</option>`
       ).join('');
       endpointDropdown = `
         <div class="ms-endpoint-selector ms-browse-endpoint-selector">

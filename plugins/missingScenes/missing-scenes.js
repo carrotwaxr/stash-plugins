@@ -291,7 +291,7 @@
     container.id = "ms-endpoint-selector";
 
     const label = document.createElement("label");
-    label.textContent = "Search on: ";
+    label.textContent = "Source: ";
     label.htmlFor = "ms-endpoint-dropdown";
 
     const select = document.createElement("select");

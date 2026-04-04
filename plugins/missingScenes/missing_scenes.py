@@ -2689,7 +2689,6 @@ def main():
                         "entity_name": entity.get("name"),
                         "available_endpoints": available,
                         "default_endpoint": default_endpoint,
-                        "show_selector": len(available) > 1
                     }
 
         elif operation == "get_all_endpoints":
