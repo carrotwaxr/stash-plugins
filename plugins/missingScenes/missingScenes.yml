@@ -17,8 +17,8 @@ ui:
 settings:
   # Stash-box endpoint selection
   stashBoxEndpoint:
-    displayName: Stash-Box Endpoint
-    description: Which stash-box to query for missing scenes. Leave empty to use the first configured endpoint (usually StashDB). Enter the full GraphQL URL (e.g., https://stashdb.org/graphql).
+    displayName: Default Stash-Box Endpoint
+    description: Default stash-box endpoint selected in the UI dropdown. Leave empty to use the first configured endpoint. Enter the full GraphQL URL (e.g., https://stashdb.org/graphql).
     type: STRING
 
   # Whisparr integration (optional)

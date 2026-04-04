@@ -471,7 +471,7 @@
   }
 }
 
-/* Endpoint selector for tags with multiple stash-box links */
+/* Endpoint selector for entities with multiple stash-box links */
 .ms-endpoint-selector {
   display: flex;
   align-items: center;
@@ -479,6 +479,13 @@
   padding: 0.5rem 1rem;
   background: var(--ms-bg-secondary, #1a1a1a);
   border-bottom: 1px solid var(--ms-border, #333);
+}
+
+/* Browse page endpoint selector - no bottom border, integrates with controls */
+.ms-browse-endpoint-selector {
+  border-bottom: none;
+  padding: 0;
+  background: none;
 }
 
 .ms-endpoint-selector label {
