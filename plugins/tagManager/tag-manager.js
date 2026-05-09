@@ -5,20 +5,14 @@
   const ROUTE_PATH = "/plugins/tag-manager";
   const HIERARCHY_ROUTE_PATH = "/plugins/tag-hierarchy";
 
-  // Default settings
-  const DEFAULTS = {
-    stashdbEndpoint: "https://stashdb.org/graphql",
-    stashdbApiKey: "",
-    enableFuzzySearch: true,
-    enableSynonymSearch: true,
-    fuzzyThreshold: 80,
-    pageSize: 25,
-    preferStashBoxName: false,
-    preferStashBoxDescription: false,
-  };
+  const STASHDB_ENDPOINT = "https://stashdb.org/graphql";
+  const STASHDB_API_KEY = "";
+
+  // Default settings are loaded from shared default_settings.json.
+  let DEFAULTS = {};
 
   // State
-  let settings = { ...DEFAULTS };
+  let settings = {};
   let stashBoxes = []; // Configured stash-box endpoints from Stash
   let selectedStashBox = null; // Currently selected stash-box
   let stashdbTags = null; // Cached tags for selected endpoint
@@ -61,6 +55,16 @@
   }
 
   /**
+   * Get URL for a plugin asset file.
+   */
+  function getPluginAssetUrl(assetPath) {
+    const baseEl = document.querySelector("base");
+    const baseURL = baseEl ? baseEl.getAttribute("href") : "/";
+    const normalizedAssetPath = assetPath.replace(/^\/+/, "");
+    return `${baseURL}plugin/${PLUGIN_ID}/assets/${normalizedAssetPath}`;
+  }
+
+  /**
    * Make a GraphQL request to local Stash
    */
   async function graphqlRequest(query, variables = {}) {
@@ -90,6 +94,88 @@
   }
 
   /**
+   * Load plugin config map from stash
+   */
+  async function getPluginConfig() {
+    const query = `
+      query Configuration {
+        configuration {
+          plugins
+        }
+      }
+    `;
+    const data = await graphqlRequest(query);
+    return data?.configuration?.plugins?.[PLUGIN_ID] || {};
+  }
+
+  /**
+   * Merge `partialInput` into the current plugin settings and persist.
+   *
+   * Stash overwrites `plugins.settings.<pluginId>` on each `configurePlugin` call,
+   * so we load the existing map, shallow-merge, then send the full object.
+   *
+   * @param {Record<string, unknown>} partialInput
+   * @returns {Promise<Record<string, unknown>>} The saved settings map
+   */
+  async function savePluginConfigPatch(partialInput) {
+    const current = await getPluginConfig();
+
+    // Merge new settings with existing settings
+    const next = { ...current, ...partialInput };
+
+    // Send the full object to the backend
+    const mutation = `
+      mutation ConfigurePlugin($plugin_id: ID!, $input: Map!) {
+        configurePlugin(plugin_id: $plugin_id, input: $input)
+      }
+    `;
+    await graphqlRequest(mutation, {
+      plugin_id: PLUGIN_ID,
+      input: next,
+    });
+
+    return next;
+  }
+
+  /**
+   * Bootstrap plugin defaults from `default_settings.json`.
+   *
+   * This runs once during startup, caches the defaults in memory, and backfills
+   * only missing keys in Stash plugin configuration. Existing user values are
+   * preserved.
+   */
+  async function initializeDefaultSettings() {
+    // Load default settings
+    const response = await fetch(getPluginAssetUrl("default_settings.json"), {
+      method: "GET",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch default settings file: ${response.status}`);
+    }
+
+    DEFAULTS = await response.json();
+    if (Object.keys(settings).length === 0) {
+      settings = { ...DEFAULTS };
+    }
+
+    // Compute keys that are missing in stash settings
+    const pluginConfig = await getPluginConfig();
+    const missingDefaults = {};
+    for (const [key, value] of Object.entries(DEFAULTS)) {
+      if (pluginConfig[key] === undefined || pluginConfig[key] === null) {
+        missingDefaults[key] = value;
+      }
+    }
+
+    // Add missing defaults to stash settings without overwriting existing user values
+    if (Object.keys(missingDefaults).length > 0) {
+      await savePluginConfigPatch(missingDefaults);
+      console.info("[tagManager] Persisted missing defaults:", Object.keys(missingDefaults));
+    }
+  }
+
+  /**
    * Get plugin settings and stash-box endpoints from Stash configuration
    */
   async function loadSettings() {
@@ -112,14 +198,14 @@
       const pluginConfig = data?.configuration?.plugins?.[PLUGIN_ID] || {};
 
       settings = {
-        stashdbEndpoint: pluginConfig.stashdbEndpoint || DEFAULTS.stashdbEndpoint,
-        stashdbApiKey: pluginConfig.stashdbApiKey || DEFAULTS.stashdbApiKey,
-        enableFuzzySearch: pluginConfig.enableFuzzySearch !== false,
-        enableSynonymSearch: pluginConfig.enableSynonymSearch !== false,
+        stashdbEndpoint: pluginConfig.stashdbEndpoint || STASHDB_ENDPOINT,
+        stashdbApiKey: pluginConfig.stashdbApiKey || STASHDB_API_KEY,
+        enableFuzzySearch: pluginConfig.enableFuzzySearch ?? DEFAULTS.enableFuzzySearch,
+        enableSynonymSearch: pluginConfig.enableSynonymSearch ?? DEFAULTS.enableSynonymSearch,
         fuzzyThreshold: parseInt(pluginConfig.fuzzyThreshold) || DEFAULTS.fuzzyThreshold,
         pageSize: parseInt(pluginConfig.pageSize) || DEFAULTS.pageSize,
-        preferStashBoxName: pluginConfig.preferStashBoxName === true,
-        preferStashBoxDescription: pluginConfig.preferStashBoxDescription === true,
+        preferStashBoxName: pluginConfig.preferStashBoxName ?? DEFAULTS.preferStashBoxName,
+        preferStashBoxDescription: pluginConfig.preferStashBoxDescription ?? DEFAULTS.preferStashBoxDescription,
       };
 
       // Load configured stash-boxes
@@ -185,17 +271,8 @@
    */
   async function saveCategoryMappings() {
     try {
-      const query = `
-        mutation ConfigurePlugin($plugin_id: ID!, $input: Map!) {
-          configurePlugin(plugin_id: $plugin_id, input: $input)
-        }
-      `;
-
-      await graphqlRequest(query, {
-        plugin_id: PLUGIN_ID,
-        input: {
-          categoryMappings: JSON.stringify(categoryMappings)
-        }
+      await savePluginConfigPatch({
+        categoryMappings: JSON.stringify(categoryMappings)
       });
       console.debug("[tagManager] Saved category mappings");
     } catch (e) {
@@ -4517,6 +4594,7 @@
   }
 
   // Initialize
+  initializeDefaultSettings();
   registerRoute();
   setupNavButtonInjection();
   console.log('[tagManager] Plugin loaded');

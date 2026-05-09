@@ -18,7 +18,6 @@ import sys
 import time
 
 import log
-from stashapi.stashapp import StashInterface
 from stashdb_api import search_tags_by_name, query_all_tags
 from matcher import TagMatcher, load_synonyms
 from blacklist import Blacklist
@@ -33,6 +32,26 @@ CACHE_MAX_AGE_HOURS = 24  # Cache expires after 24 hours
 def get_plugin_dir():
     """Get the plugin directory path."""
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def load_default_settings():
+    """
+    Load canonical plugin defaults from shared JSON file.
+
+    Returns:
+        Dict with default plugin settings.
+    """
+    defaults_path = os.path.join(get_plugin_dir(), "default_settings.json")
+    try:
+        with open(defaults_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"Failed to load default settings file '{defaults_path}': {e}") from e
+
+
+# Canonical plugin defaults (single source of truth for Python + JS).
+# Note: tagManager.yml settings schema does not support "default" fields.
+DEFAULT_PLUGIN_SETTINGS = load_default_settings()
 
 
 def get_cache_dir():
@@ -212,13 +231,15 @@ def get_settings_from_config(stash_config):
     config = stash_config or {}
 
     return {
+        # Legacy plugin-level stashdbEndpoint/stashdbApiKey are intentionally
+        # not part of YAML defaults. Stash-box endpoints are preferred.
         "stashdb_url": config.get("stashdbEndpoint", "https://stashdb.org/graphql"),
         "stashdb_api_key": config.get("stashdbApiKey", ""),
-        "enable_fuzzy": config.get("enableFuzzySearch") != False,  # Default True
-        "enable_synonyms": config.get("enableSynonymSearch") != False,  # Default True
-        "fuzzy_threshold": int(config.get("fuzzyThreshold", 80)),
-        "page_size": int(config.get("pageSize", 25)),
-        "tag_blacklist": config.get("tagBlacklist", ""),
+        "enable_fuzzy": config.get("enableFuzzySearch", DEFAULT_PLUGIN_SETTINGS["enableFuzzySearch"]),
+        "enable_synonyms": config.get("enableSynonymSearch", DEFAULT_PLUGIN_SETTINGS["enableSynonymSearch"]),
+        "fuzzy_threshold": int(config.get("fuzzyThreshold", DEFAULT_PLUGIN_SETTINGS["fuzzyThreshold"])),
+        "page_size": int(config.get("pageSize", DEFAULT_PLUGIN_SETTINGS["pageSize"])),
+        "tag_blacklist": config.get("tagBlacklist", DEFAULT_PLUGIN_SETTINGS["tagBlacklist"]),
     }
 
 
@@ -239,26 +260,26 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
     log.LogDebug(f"Searching for tag: {tag_name}")
 
     # Load blacklist from settings
-    blacklist = Blacklist(settings.get('tag_blacklist', ''))
+    blacklist = Blacklist(settings["tag_blacklist"])
 
     # First try StashDB's name search (searches name + aliases)
     api_matches = search_tags_by_name(stashdb_url, stashdb_api_key, tag_name, limit=20)
 
     # If we have cached tags, also do local fuzzy matching
     local_matches = []
-    if stashdb_tags and settings.get("enable_fuzzy", True):
+    if stashdb_tags and settings["enable_fuzzy"]:
         synonyms_path = os.path.join(get_plugin_dir(), "synonyms.json")
         synonyms = load_synonyms(synonyms_path)
 
         matcher = TagMatcher(
             stashdb_tags,
             synonyms=synonyms,
-            fuzzy_threshold=settings.get("fuzzy_threshold", 80)
+            fuzzy_threshold=settings["fuzzy_threshold"]
         )
         local_matches = matcher.find_matches(
             tag_name,
-            enable_fuzzy=settings.get("enable_fuzzy", True),
-            enable_synonyms=settings.get("enable_synonyms", True),
+            enable_fuzzy=settings["enable_fuzzy"],
+            enable_synonyms=settings["enable_synonyms"],
             limit=20
         )
 
@@ -406,6 +427,7 @@ def handle_sync_scene_tags(server_connection, stash_config, api_key):
         Dict with sync results
     """
     from stashdb_scene_sync import sync_scene_tags
+    from stashapi.stashapp import StashInterface
 
     # Initialize Stash interface with API key for long-running operations
     # Session cookies can expire during long sync operations (see stash#5332)
@@ -435,11 +457,8 @@ def handle_sync_scene_tags(server_connection, stash_config, api_key):
     log.LogInfo(f"Using stash-box endpoint: {stashdb_url}")
 
     # Get dry_run setting from plugin config
-    try:
-        plugin_config = stash_config.get("plugins", {}).get(PLUGIN_ID, {})
-        dry_run = plugin_config.get("syncDryRun", True)  # Default to safe mode
-    except Exception:
-        dry_run = True
+    plugin_config = stash_config.get("plugins", {}).get(PLUGIN_ID, {})
+    dry_run = plugin_config.get("syncDryRun", DEFAULT_PLUGIN_SETTINGS["syncDryRun"])
 
     sync_settings = {
         "dry_run": dry_run
@@ -514,6 +533,9 @@ def main():
 
     if mode == "sync_scene_tags":
         log.LogInfo("Starting scene tag sync task")
+        
+        from stashapi.stashapp import StashInterface
+        
         # Get stash config for stash-box credentials and API key
         stash = StashInterface(server_connection)
         try:
