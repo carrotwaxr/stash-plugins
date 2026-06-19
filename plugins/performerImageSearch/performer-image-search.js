@@ -501,6 +501,7 @@
       console.error("[PerformerImageSearch] Search error:", e);
     } finally {
       isLoading = false;
+      renderResults();
       updateFilterStatus();
     }
   };
