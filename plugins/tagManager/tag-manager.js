@@ -109,32 +109,55 @@
   }
 
   /**
+   * Serialize async config writes so concurrent read-merge-write patches can't
+   * clobber each other. Each enqueued task runs after the prior one settles and
+   * resolves to its own result; a failure never poisons the chain.
+   */
+  function createConfigWriteQueue() {
+    let chain = Promise.resolve();
+    return function enqueue(task) {
+      const result = chain.then(task, task);
+      chain = result.then(() => {}, () => {});
+      return result;
+    };
+  }
+  const _enqueueConfigWrite = createConfigWriteQueue();
+
+  /**
+   * Verify that every key in `written` round-tripped into the persisted `readback`.
+   */
+  function valuesPersisted(written, readback) {
+    return Object.keys(written).every(
+      (k) => JSON.stringify(readback?.[k]) === JSON.stringify(written[k])
+    );
+  }
+
+  /**
    * Merge `partialInput` into the current plugin settings and persist.
    *
    * Stash overwrites `plugins.settings.<pluginId>` on each `configurePlugin` call,
-   * so we load the existing map, shallow-merge, then send the full object.
+   * so we load the existing map, shallow-merge, then send the full object. Writes
+   * are serialized through a single queue: each patch merges onto the latest
+   * persisted config (not a stale snapshot), so concurrent savers don't clobber.
    *
    * @param {Record<string, unknown>} partialInput
    * @returns {Promise<Record<string, unknown>>} The saved settings map
    */
-  async function savePluginConfigPatch(partialInput) {
-    const current = await getPluginConfig();
-
-    // Merge new settings with existing settings
-    const next = { ...current, ...partialInput };
-
-    // Send the full object to the backend
+  async function _writeFullConfig(next) {
     const mutation = `
       mutation ConfigurePlugin($plugin_id: ID!, $input: Map!) {
         configurePlugin(plugin_id: $plugin_id, input: $input)
       }
     `;
-    await graphqlRequest(mutation, {
-      plugin_id: PLUGIN_ID,
-      input: next,
-    });
-
+    await graphqlRequest(mutation, { plugin_id: PLUGIN_ID, input: next });
     return next;
+  }
+
+  function savePluginConfigPatch(partialInput) {
+    return _enqueueConfigWrite(async () => {
+      const current = await getPluginConfig();
+      return _writeFullConfig({ ...current, ...partialInput });
+    });
   }
 
   /**
@@ -159,20 +182,36 @@
       settings = { ...DEFAULTS };
     }
 
-    // Compute keys that are missing in stash settings
-    const pluginConfig = await getPluginConfig();
-    const missingDefaults = {};
-    for (const [key, value] of Object.entries(DEFAULTS)) {
-      if (pluginConfig[key] === undefined || pluginConfig[key] === null) {
-        missingDefaults[key] = value;
+    // Backfill missing defaults atomically inside the config-write queue: read the
+    // LATEST persisted config and write in one critical section, so this can never
+    // clobber a concurrent user save (e.g. category mappings) with a stale default.
+    await _enqueueConfigWrite(async () => {
+      const pluginConfig = await getPluginConfig();
+      const missingDefaults = {};
+      for (const [key, value] of Object.entries(DEFAULTS)) {
+        if (pluginConfig[key] === undefined || pluginConfig[key] === null) {
+          missingDefaults[key] = value;
+        }
       }
-    }
+      if (Object.keys(missingDefaults).length > 0) {
+        await _writeFullConfig({ ...pluginConfig, ...missingDefaults });
+        console.info("[tagManager] Persisted missing defaults:", Object.keys(missingDefaults));
+      }
+    });
+  }
 
-    // Add missing defaults to stash settings without overwriting existing user values
-    if (Object.keys(missingDefaults).length > 0) {
-      await savePluginConfigPatch(missingDefaults);
-      console.info("[tagManager] Persisted missing defaults:", Object.keys(missingDefaults));
+  /**
+   * Idempotent gate so the backfill runs exactly once and callers can await it
+   * (ensures DEFAULTS is populated before settings are read). Never rejects.
+   */
+  let _initDefaultsPromise = null;
+  function ensureDefaultsInitialized() {
+    if (!_initDefaultsPromise) {
+      _initDefaultsPromise = initializeDefaultSettings().catch((e) => {
+        console.error("[tagManager] initializeDefaultSettings failed:", e);
+      });
     }
+    return _initDefaultsPromise;
   }
 
   /**
@@ -206,6 +245,7 @@
         pageSize: parseInt(pluginConfig.pageSize) || DEFAULTS.pageSize,
         preferStashBoxName: pluginConfig.preferStashBoxName ?? DEFAULTS.preferStashBoxName,
         preferStashBoxDescription: pluginConfig.preferStashBoxDescription ?? DEFAULTS.preferStashBoxDescription,
+        leaveParentTagsAlone: pluginConfig.leaveParentTagsAlone ?? DEFAULTS.leaveParentTagsAlone,
       };
 
       // Load configured stash-boxes
@@ -270,13 +310,22 @@
    * Save category mappings to plugin settings
    */
   async function saveCategoryMappings() {
+    const written = { categoryMappings: JSON.stringify(categoryMappings) };
     try {
-      await savePluginConfigPatch({
-        categoryMappings: JSON.stringify(categoryMappings)
-      });
+      await savePluginConfigPatch(written);
+      // Verify it actually round-tripped — a silent drop was the root of #122.
+      const readback = await getPluginConfig();
+      if (!valuesPersisted(written, readback)) {
+        throw new Error("category mappings did not round-trip");
+      }
       console.debug("[tagManager] Saved category mappings");
+      return true;
     } catch (e) {
       console.error("[tagManager] Failed to save category mappings:", e);
+      if (typeof showToast === "function") {
+        showToast("Failed to save category mappings — they may not persist.", "error");
+      }
+      return false;
     }
   }
 
@@ -308,6 +357,48 @@
 
     const data = await graphqlRequest(query);
     return data?.findTags?.tags || [];
+  }
+
+  // --- #124 reactivity: keep localTags in sync with the server ----------------
+  let _activeContainer = null;   // set while the Tag Manager page is mounted
+  let _refreshTimer = null;
+
+  /**
+   * Drop selections for tags that no longer exist (e.g. merged away). Pure.
+   */
+  function reconcileSelections(prevSelectedIds, freshTags) {
+    const ids = new Set(freshTags.map((t) => t.id));
+    const next = new Set();
+    for (const id of prevSelectedIds) {
+      if (ids.has(id)) next.add(id);
+    }
+    return next;
+  }
+
+  /**
+   * Re-fetch local tags and re-render so the UI reflects changes made here or in
+   * another tab (#124). Modals live on document.body, so re-rendering the page
+   * container is safe under an open modal; only an active import loop defers it
+   * (the import does its own render, then calls this for server-truth reconcile).
+   */
+  async function refreshLocalTags() {
+    if (!_activeContainer || isImporting) return;
+    try {
+      localTags = await fetchLocalTags();
+      selectedForImport = reconcileSelections(selectedForImport, localTags);
+      if (_activeContainer) renderPage(_activeContainer);
+    } catch (e) {
+      console.error("[tagManager] Failed to refresh local tags:", e);
+    }
+  }
+
+  /** Debounced refresh for focus/visibility events. */
+  function scheduleRefresh() {
+    if (_refreshTimer) clearTimeout(_refreshTimer);
+    _refreshTimer = setTimeout(() => {
+      _refreshTimer = null;
+      refreshLocalTags();
+    }, 300);
   }
 
   /**
@@ -810,6 +901,7 @@
 
       showStatus(`Merged "${sourceTag.name}" into "${destinationTag.name}" and linked to StashDB`, 'success');
       renderPage(container);
+      await refreshLocalTags(); // #124: pull server truth after the merge
 
       return { success: true };
     } catch (e) {
@@ -905,6 +997,14 @@
 
     // Limit to top 5
     return matches.slice(0, 5);
+  }
+
+  /**
+   * #126: whether to create/assign category parent tags during sync/import.
+   * False when the user has opted to leave their own tag hierarchy untouched.
+   */
+  function shouldResolveParents(settings) {
+    return !settings.leaveParentTagsAlone;
   }
 
   /**
@@ -1212,21 +1312,24 @@
     if (selectedForImport.size === 0) return;
     if (isImporting) return;
 
-    // Resolve categories among selected tags
-    const categoryResolutions = resolveCategoryParents(selectedForImport);
-    const hasCategories = Object.keys(categoryResolutions).length > 0;
-
     let parentMap = null;
     let remember = false;
     let resolutions = null;
 
-    if (hasCategories) {
-      const result = await showCategoryPreviewModal(categoryResolutions);
-      if (result === 'cancel') return;
-      if (result !== null) {
-        parentMap = result.parentMap;
-        remember = result.remember;
-        resolutions = result.resolutions;
+    // #126: when "leave parent tags alone" is on, import flat — skip the category
+    // preview modal and all parent creation/assignment (parentMap stays null).
+    if (shouldResolveParents(settings)) {
+      const categoryResolutions = resolveCategoryParents(selectedForImport);
+      const hasCategories = Object.keys(categoryResolutions).length > 0;
+
+      if (hasCategories) {
+        const result = await showCategoryPreviewModal(categoryResolutions);
+        if (result === 'cancel') return;
+        if (result !== null) {
+          parentMap = result.parentMap;
+          remember = result.remember;
+          resolutions = result.resolutions;
+        }
       }
     }
 
@@ -1382,7 +1485,7 @@
           categoryMappings[catName] = finalId;
         }
       }
-      saveCategoryMappings();
+      await saveCategoryMappings();
     }
 
     selectedForImport.clear();
@@ -1402,6 +1505,7 @@
     setTimeout(() => {
       isImporting = false;
       renderPage(container);
+      refreshLocalTags(); // #124: reconcile with server truth after import
     }, 1500);
   }
 
@@ -1485,6 +1589,7 @@
     setTimeout(() => {
       isImporting = false;
       renderPage(container);
+      refreshLocalTags(); // #124: reconcile with server truth after import
     }, 1500);
   }
 
@@ -2716,9 +2821,9 @@
       // Use sanitized aliases
       updateInput.aliases = sanitizedAliases;
 
-      // Handle parent tag from category
+      // Handle parent tag from category (#126: skipped when leaving parents alone)
       let parentTagId = null;
-      if (hasCategory && selectedParentId) {
+      if (shouldResolveParents(settings) && hasCategory && selectedParentId) {
         if (selectedParentId === '__create__') {
           // Create the parent tag
           try {
@@ -2751,7 +2856,7 @@
         const rememberCheckbox = modal.querySelector('#tm-remember-mapping');
         if (rememberCheckbox?.checked && parentTagId) {
           categoryMappings[stashdbTag.category.name] = parentTagId;
-          saveCategoryMappings(); // Fire and forget
+          await saveCategoryMappings();
         }
       }
 
@@ -3191,6 +3296,9 @@
         setPageTitle("Tag Matcher | Stash");
         containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
 
+        // Ensure defaults are loaded/backfilled before reading settings, so
+        // loadSettings sees a populated DEFAULTS and the backfill can't race.
+        await ensureDefaultsInitialized();
         await loadSettings();
         await loadCategoryMappings();
         await loadBlacklist();
@@ -3232,10 +3340,30 @@
 
         setInitialized(true);
         console.debug("[tagManager] Initialization complete");
+        _activeContainer = containerRef.current;
         renderPage(containerRef.current);
       }
 
       init();
+
+      // #124: refresh tag data when returning to the tab (e.g. after fixing a
+      // conflicting tag elsewhere). Listeners are cleaned up on unmount.
+      const onFocus = () => scheduleRefresh();
+      const onVisibility = () => {
+        if (document.visibilityState === "visible") scheduleRefresh();
+      };
+      window.addEventListener("focus", onFocus);
+      document.addEventListener("visibilitychange", onVisibility);
+
+      return () => {
+        window.removeEventListener("focus", onFocus);
+        document.removeEventListener("visibilitychange", onVisibility);
+        if (_refreshTimer) {
+          clearTimeout(_refreshTimer);
+          _refreshTimer = null;
+        }
+        _activeContainer = null;
+      };
     }, []);
 
     return React.createElement('div', {
@@ -4594,7 +4722,7 @@
   }
 
   // Initialize
-  initializeDefaultSettings();
+  ensureDefaultsInitialized();
   registerRoute();
   setupNavButtonInjection();
   console.log('[tagManager] Plugin loaded');
