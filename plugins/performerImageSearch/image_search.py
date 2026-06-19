@@ -150,69 +150,66 @@ def filter_by_size_and_layout(results, size_filter="All", layout_filter="All"):
 def search_babepedia(name, max_results=50):
     """
     Search Babepedia for performer images.
-    Babepedia has curated photos of adult performers.
-    Fetches from main page and gallery pages.
+
+    Pulls the performer's profile photos plus the gallery preview images that
+    Babepedia lists on the main /babe/<name> page. The numbered gallery pages
+    are JS/ad-rendered and not worth following, so we harvest the gallery
+    preview thumbnails (/galleries-thumbs/<gallery>/NN.jpg) shown on the profile
+    and map each to its full-size image under /galleries/.
+
+    Note: Babepedia sits behind Cloudflare and may return 403 from some servers;
+    such failures are logged (and surfaced to the UI) rather than swallowed.
     """
     results = []
 
     try:
         # Babepedia uses underscores in URLs
         url_name = name.replace(" ", "_")
-        base_url = f"https://www.babepedia.com/babe/{urllib.parse.quote(url_name)}"
-        log.LogDebug(f"[Babepedia] Base URL: {base_url}")
+        url = f"https://www.babepedia.com/babe/{urllib.parse.quote(url_name)}"
+        log.LogDebug(f"[Babepedia] Fetching: {url}")
 
-        # Pages to try: main page and gallery subpages
-        urls_to_try = [
-            base_url,
-            f"{base_url}/gallery",
-            f"{base_url}/pics",
-        ]
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html = response.read().decode("utf-8", errors="ignore")
 
         seen = set()
 
-        for url in urls_to_try:
+        # 1. Profile photos: href="/pics/Name.jpg" (full-size; *_thumb3.jpg are thumbs)
+        for match in re.findall(r'href="(/pics/[^"]+\.jpg)"', html):
+            if "_thumb" in match or match in seen:
+                continue
+            seen.add(match)
+            image_url = f"https://www.babepedia.com{match}"
+            thumb_url = image_url.replace(".jpg", "_thumb3.jpg")
+            results.append({
+                "thumbnail": thumb_url,
+                "image": image_url,
+                "title": f"{name} - Babepedia",
+                "source": "Babepedia",
+                "width": 0,
+                "height": 0,
+            })
+            if len(results) >= max_results:
+                return results
+
+        # 2. Gallery previews: "/galleries-thumbs/<gallery>/NN.jpg". The full-size
+        #    image lives at the same path under "/galleries/".
+        for thumb in re.findall(r'["\'](/galleries-thumbs/[^"\']+\.jpg)["\']', html):
+            if thumb in seen:
+                continue
+            seen.add(thumb)
+            thumb_url = f"https://www.babepedia.com{thumb}"
+            image_url = thumb_url.replace("/galleries-thumbs/", "/galleries/")
+            results.append({
+                "thumbnail": thumb_url,
+                "image": image_url,
+                "title": f"{name} - Babepedia",
+                "source": "Babepedia",
+                "width": 0,
+                "height": 0,
+            })
             if len(results) >= max_results:
                 break
-
-            try:
-                log.LogDebug(f"[Babepedia] Fetching: {url}")
-                req = urllib.request.Request(url, headers=HEADERS)
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    html = response.read().decode('utf-8', errors='ignore')
-
-                # Extract image links - format: href="/pics/Name.jpg"
-                pattern = r'href="(/pics/[^"]+\.jpg)"'
-                matches = re.findall(pattern, html)
-                log.LogDebug(f"[Babepedia] Found {len(matches)} image links on {url}")
-
-                for match in matches:
-                    if match in seen:
-                        continue
-                    seen.add(match)
-
-                    # Build full URLs
-                    image_url = f"https://www.babepedia.com{match}"
-                    # Thumbnail is the same but with _thumb3 suffix
-                    thumb_url = image_url.replace(".jpg", "_thumb3.jpg")
-
-                    results.append({
-                        "thumbnail": thumb_url,
-                        "image": image_url,
-                        "title": f"{name} - Babepedia",
-                        "source": "Babepedia",
-                        "width": 0,
-                        "height": 0,
-                    })
-
-                    if len(results) >= max_results:
-                        break
-
-            except urllib.error.HTTPError as e:
-                log.LogDebug(f"[Babepedia] HTTP {e.code} for {url}")
-                continue
-            except Exception as e:
-                log.LogDebug(f"[Babepedia] Error fetching {url}: {e}")
-                continue
 
         log.LogInfo(f"[Babepedia] Found {len(results)} images for: {name}")
 

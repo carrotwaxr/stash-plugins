@@ -51,6 +51,7 @@
   let seenImageUrls = new Set(); // For deduplication across sources
   let completedSources = []; // Track which sources have completed
   let pendingSources = []; // Track which sources are still loading
+  let sourceErrors = []; // Track per-source failures: { source, message }
 
   /**
    * Get the GraphQL endpoint URL
@@ -230,6 +231,16 @@
       showStatus(`Found ${filteredResults.length} images (${loaded}/${total} loaded)${sourceStatus}`, "loading");
     } else if (loaded < total) {
       showStatus(`Found ${filteredResults.length} images (loading ${loaded}/${total}...)`, "loading");
+    } else if (total === 0 && sourceErrors.length >= SOURCES.length && sourceErrors.length > 0) {
+      // Every source failed - almost always the server cannot reach the image
+      // sites (no internet egress, DNS, or the sites blocking the server IP).
+      showStatus(`Couldn't reach any image source (${sourceErrors.length} failed). Check the Stash server's internet access. First error: ${sourceErrors[0].message}`, "error");
+    } else if (total === 0 && sourceErrors.length > 0) {
+      showStatus(`No images found - ${sourceErrors.length} of ${SOURCES.length} sources failed (e.g. ${sourceErrors[0].message})`, "error");
+    } else if (total === 0) {
+      showStatus(`No images found for "${currentPerformerName}"`, "success");
+    } else if (sourceErrors.length > 0) {
+      showStatus(`${filteredResults.length} of ${total} images match filters (${sourceErrors.length} source${sourceErrors.length > 1 ? "s" : ""} failed)`, "success");
     } else {
       showStatus(`${filteredResults.length} of ${total} images match filters`, "success");
     }
@@ -300,6 +311,7 @@
     seenImageUrls = new Set();
     completedSources = [];
     pendingSources = [];
+    sourceErrors = [];
   }
 
   /**
@@ -436,6 +448,9 @@
       return results.length;
     } catch (e) {
       console.error(`[PerformerImageSearch] ${source}: Search failed:`, e);
+      // Record the failure so it can be surfaced to the user instead of being
+      // silently reported as "0 of 0 images match filters".
+      sourceErrors.push({ source, message: e?.message || String(e) });
       // Move from pending to completed even on error
       pendingSources = pendingSources.filter(s => s !== source);
       completedSources.push(source);
@@ -463,6 +478,7 @@
     seenImageUrls = new Set();
     completedSources = [];
     pendingSources = [...SOURCES];
+    sourceErrors = [];
     isLoading = true;
 
     console.debug(`[PerformerImageSearch] Starting search for: "${query}" (performer: ${currentPerformerName})`);
@@ -485,6 +501,7 @@
       console.error("[PerformerImageSearch] Search error:", e);
     } finally {
       isLoading = false;
+      renderResults();
       updateFilterStatus();
     }
   };
@@ -520,7 +537,15 @@
 
     if (filteredResults.length === 0) {
       if (allResults.length === 0) {
-        resultsContainer.innerHTML = '<div class="pis-placeholder">No images found</div>';
+        let msg;
+        if (isLoading) {
+          msg = "Searching...";
+        } else if (sourceErrors.length >= SOURCES.length && sourceErrors.length > 0) {
+          msg = "Couldn't reach any image source. Check that the Stash server has internet access, then try again.";
+        } else {
+          msg = "No images found for this performer.";
+        }
+        resultsContainer.innerHTML = `<div class="pis-placeholder">${msg}</div>`;
       } else {
         resultsContainer.innerHTML = '<div class="pis-placeholder">No images match current filters</div>';
       }
