@@ -41,6 +41,11 @@ def test_babepedia():
         assert result["image"].endswith(".jpg"), f"Babepedia: Expected .jpg image: {result['image']}"
         print(f"  OK: {result['image'][:60]}...")
 
+    # Gallery previews must be mapped to full-size (/galleries/), not the /galleries-thumbs/ path
+    for result in results:
+        assert "/galleries-thumbs/" not in result["image"], \
+            f"Babepedia: full image must not be a gallery thumbnail: {result['image']}"
+
     print("  PASSED")
 
 
