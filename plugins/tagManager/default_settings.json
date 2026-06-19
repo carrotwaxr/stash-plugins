@@ -1,0 +1,11 @@
+{
+  "enableFuzzySearch": true,
+  "enableSynonymSearch": true,
+  "fuzzyThreshold": 80,
+  "pageSize": 25,
+  "preferStashBoxName": false,
+  "preferStashBoxDescription": false,
+  "syncDryRun": true,
+  "categoryMappings": "{}",
+  "tagBlacklist": ""
+}
