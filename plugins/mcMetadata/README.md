@@ -1,6 +1,6 @@
 # mcMetadata Plugin for [Stash](https://github.com/stashapp/stash)
 
-**Version**: 1.4.0
+**Version**: 1.5.0
 
 This plugin is for users who manage their collection with Stash but serve content via Jellyfin, Emby, or Plex. Instead of relying on those media servers' scrapers, mcMetadata leverages your Stash database to generate `.nfo` metadata files and performer images that your media server can use.
 
@@ -36,8 +36,48 @@ All settings are configured through Stash's UI at **Settings → Plugins → mcM
 |---------|------|---------|-------------|
 | **Dry Run Mode** | Boolean | On | Preview changes without making them. Check logs to see what would happen. |
 | **Enable Scene Update Hook** | Boolean | Off | Automatically process scenes when you update them. |
-| **Require StashDB Link (Hook Only)** | Boolean | Off | Only process scenes linked to StashDB when using the hook. Enable this if you only want NFOs generated for curated StashDB content. |
-| **Hook Trigger Mode** | String | `always` | When to process scenes via hook: `always` (every save) or `on_organized` (only when scene is marked Organized). Useful if you make incremental edits and want to trigger metadata generation only when you're done. |
+
+### Processing Conditions
+
+Conditions control **which scenes get processed**. They apply identically to both the
+hook and the **Bulk Update Scenes** task. Each condition is independently optional — an
+unset condition never blocks — and all configured conditions must pass (AND).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| **Organized Condition** | String | `ignore` | `require` = only Organized scenes · `skip` = only NOT-yet-organized scenes · `ignore` = process either. Supersedes the old Hook Trigger Mode. |
+| **Require StashDB Link** | Boolean | Off | Only process scenes linked to StashDB. (Applies to bulk too — when off, scenes without a StashID are processed.) |
+| **Required Tags** | String | - | Comma-separated tag names; a scene is processed only if it has **at least one**. Example: `Curated, For Jellyfin` |
+| **Include Paths** | String | - | Comma-separated path globs; a scene is processed only if a file matches one. Example: `/media/curated/*` |
+| **Exclude Paths** | String | - | Comma-separated path globs; a scene is skipped if a file matches one. **Exclude wins over Include.** Example: `*/trash/*` |
+
+Path globs are case-insensitive and `*` spans directory separators, so `/media/curated/*`
+also matches files in its subfolders.
+
+**Worked example** — only generate NFOs for your Organized, StashDB-linked scenes under
+`/media/curated`:
+
+- Organized Condition = `require`
+- Require StashDB Link = `On`
+- Include Paths = `/media/curated/*`
+
+When you run **Bulk Update Scenes** in Dry Run, the log ends with a histogram of how many
+scenes were skipped and why, plus a sample — so you can confirm your conditions before a
+live run:
+
+```
+[DRY RUN] Bulk scan complete: 1240 scanned
+  -> processed: 312
+  -> skipped: 928
+      not_organized........... 700
+      missing_required_tag.... 180
+      outside_include_paths... 48
+  sample skipped: [41] not_organized | [88] missing_required_tag
+```
+
+> **Migrating from Hook Trigger Mode?** It's deprecated but still honored when Organized
+> Condition is left unset: `on_organized` → `require`, `always` → `ignore`. Set Organized
+> Condition to take over.
 
 ### File Renamer Settings
 
@@ -106,7 +146,7 @@ If a block contains multiple variables, ALL must have values for the block to ap
 
 1. Go to **Settings → Tasks → Plugin Tasks**
 2. Select:
-   - **Bulk Update Scenes**: Process all scenes with StashIDs
+   - **Bulk Update Scenes**: Process all scenes (subject to your Processing Conditions)
    - **Bulk Update Performers**: Copy all performer images to media server
 
 ### Using the Hook
@@ -158,6 +198,12 @@ Common issues:
 - `stashapp-tools>=0.2.59` (installed automatically)
 
 ## Changelog
+
+### v1.5.0
+- **Unified Processing Conditions** applied to both the hook and the bulk task: Organized Condition (`require`/`skip`/`ignore`), Required Tags, and Include/Exclude path globs, alongside the existing Require StashDB Link
+- **Fixed #127**: the bulk task no longer silently skips scenes without a StashID — it now processes all scenes (subject to your conditions)
+- Bulk Dry Run now prints a skip-reason histogram + sample, so you can preview what would be processed before a live run
+- `hookTriggerMode` is deprecated in favor of Organized Condition (auto-migrated when Organized Condition is unset: `on_organized` → require, `always` → ignore)
 
 ### v1.4.0
 - Added `hookTriggerMode` setting: choose to process scenes on every save (`always`) or only when marked Organized (`on_organized`) (#111)
