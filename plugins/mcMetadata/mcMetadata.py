@@ -128,9 +128,6 @@ def main():
         if SETTINGS["dry_run"]:
             log.info("[DRY RUN] Mode enabled - no changes will be made")
 
-        # Echo the active processing conditions so users can confirm their config
-        log.info(describe_active_conditions(SETTINGS))
-
         # Get API key for modes that need it
         try:
             stash_config = stash.get_configuration()["general"]
@@ -142,6 +139,7 @@ def main():
         # Handle processing modes
         if mode == "bulk":
             log.info("Starting bulk scene update")
+            log.info(describe_active_conditions(SETTINGS))
             process_all_scenes(stash, SETTINGS, api_key)
             log.info("Bulk scene update completed")
 
