@@ -606,7 +606,8 @@
     if (!result) return;
 
     previewImage = result.image;
-    currentPreviewIndex = originalIndex;
+    // Track position within the filtered grid so arrow/click nav matches what's visible
+    currentPreviewIndex = filteredResults.indexOf(result);
 
     const overlay = document.getElementById("pis-preview-overlay");
     const img = document.getElementById("pis-preview-image");
@@ -660,7 +661,8 @@
    */
   window.pisPrevPreview = function () {
     if (currentPreviewIndex > 0) {
-      window.pisShowPreview(currentPreviewIndex - 1);
+      const target = filteredResults[currentPreviewIndex - 1];
+      window.pisShowPreview(allResults.indexOf(target));
     }
   };
 
@@ -668,8 +670,9 @@
    * Navigate to next image in preview
    */
   window.pisNextPreview = function () {
-    if (currentPreviewIndex < allResults.length - 1) {
-      window.pisShowPreview(currentPreviewIndex + 1);
+    if (currentPreviewIndex >= 0 && currentPreviewIndex < filteredResults.length - 1) {
+      const target = filteredResults[currentPreviewIndex + 1];
+      window.pisShowPreview(allResults.indexOf(target));
     }
   };
 
