@@ -48,6 +48,7 @@
   let loadedCount = 0; // Number of images that have loaded
   let isLoading = false;
   let previewImage = null;
+  let currentPreviewIndex = -1;
   let seenImageUrls = new Set(); // For deduplication across sources
   let completedSources = []; // Track which sources have completed
   let pendingSources = []; // Track which sources are still loading
@@ -308,6 +309,7 @@
     imageDimensions = {};
     loadedCount = 0;
     previewImage = null;
+    currentPreviewIndex = -1;
     seenImageUrls = new Set();
     completedSources = [];
     pendingSources = [];
@@ -371,7 +373,7 @@
       <!-- Preview overlay -->
       <div id="pis-preview-overlay" class="pis-preview-overlay" style="display: none;" onclick="window.pisClosePreview()">
         <div class="pis-preview-content" onclick="event.stopPropagation()">
-          <img id="pis-preview-image" src="" alt="Preview" />
+          <img id="pis-preview-image" src="" alt="Preview" onclick="window.pisClickPreview(event)" />
           <div id="pis-preview-dims" class="pis-preview-dims"></div>
           <div class="pis-preview-actions">
             <button id="pis-confirm-btn" class="pis-btn pis-btn-primary" onclick="window.pisConfirmImage()">Set as Performer Image</button>
@@ -401,6 +403,22 @@
         updateFilterStatus();
       }
     });
+  }
+
+  /**
+   * Handle keyboard navigation in preview
+   */
+  function handlePreviewKeydown(e) {
+    const overlay = document.getElementById("pis-preview-overlay");
+    if (!overlay || overlay.style.display === "none") return;
+
+    if (e.key === "ArrowLeft") {
+      window.pisPrevPreview();
+    } else if (e.key === "ArrowRight") {
+      window.pisNextPreview();
+    } else if (e.key === "Escape") {
+      window.pisClosePreview();
+    }
   }
 
   /**
@@ -588,6 +606,8 @@
     if (!result) return;
 
     previewImage = result.image;
+    // Track position within the filtered grid so arrow/click nav matches what's visible
+    currentPreviewIndex = filteredResults.indexOf(result);
 
     const overlay = document.getElementById("pis-preview-overlay");
     const img = document.getElementById("pis-preview-image");
@@ -597,22 +617,62 @@
       // Clear previous dimensions
       if (dimInfo) dimInfo.textContent = "Loading...";
 
+      // Clear previous handlers by replacing img src
+      img.onload = null;
+      img.onerror = null;
+
       // Show dimensions once image loads
       img.onload = function () {
-        if (dimInfo) {
+        if (dimInfo && overlay.style.display !== "none") {
           dimInfo.textContent = `${img.naturalWidth} x ${img.naturalHeight} - ${result.source}`;
         }
       };
 
       // Try full-size first, fall back to thumbnail if it fails
       img.onerror = function () {
-        if (img.src !== result.thumbnail) {
+        if (img.src !== result.thumbnail && overlay.style.display !== "none") {
           img.src = result.thumbnail;
-          previewImage = result.thumbnail; // Update so we save the working URL
+          previewImage = result.thumbnail;
         }
       };
       img.src = result.image;
       overlay.style.display = "flex";
+
+      // Add keyboard listener when opening preview
+      document.addEventListener("keydown", handlePreviewKeydown);
+    }
+  };
+
+  /**
+   * Handle click on preview image - navigate based on click position
+   */
+  window.pisClickPreview = function (e) {
+    const rect = e.target.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    if (x < rect.width / 2) {
+      window.pisPrevPreview();
+    } else {
+      window.pisNextPreview();
+    }
+  };
+
+  /**
+   * Navigate to previous image in preview
+   */
+  window.pisPrevPreview = function () {
+    if (currentPreviewIndex > 0) {
+      const target = filteredResults[currentPreviewIndex - 1];
+      window.pisShowPreview(allResults.indexOf(target));
+    }
+  };
+
+  /**
+   * Navigate to next image in preview
+   */
+  window.pisNextPreview = function () {
+    if (currentPreviewIndex >= 0 && currentPreviewIndex < filteredResults.length - 1) {
+      const target = filteredResults[currentPreviewIndex + 1];
+      window.pisShowPreview(allResults.indexOf(target));
     }
   };
 
@@ -625,6 +685,7 @@
       overlay.style.display = "none";
     }
     previewImage = null;
+    document.removeEventListener("keydown", handlePreviewKeydown);
   };
 
   /**
