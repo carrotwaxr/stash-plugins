@@ -4,7 +4,7 @@ mcMetadata - Stash Plugin for Media Center Metadata Generation
 Generates NFO files for Jellyfin/Emby, organizes video files according to
 configurable templates, and exports performer images to media server folders.
 
-Version: 1.4.0
+Version: 1.5.0
 """
 
 import json
@@ -14,6 +14,8 @@ from utils.logger import init_file_logger, close_file_logger
 import utils.logger as log
 from performer import process_all_performers
 from scene import process_all_scenes, process_scene
+from conditions import should_process, describe_active_conditions
+from plugin_settings import map_settings
 
 # Minimum stashapp-tools version required for schema 72+ compatibility
 MIN_STASHAPP_TOOLS_VERSION = "0.2.59"
@@ -68,7 +70,9 @@ def get_settings(stash_instance):
     """Load settings from Stash's plugin configuration.
 
     Stash stores plugin settings in its database and provides them
-    via the configuration endpoint. This replaces the old ini file approach.
+    via the configuration endpoint. The camelCase -> snake_case mapping
+    (with defaults, list-parsing, and the hookTriggerMode migration) lives
+    in plugin_settings.map_settings so it can be unit-tested independently.
 
     Returns:
         dict: Settings dictionary with snake_case keys for internal use
@@ -80,34 +84,7 @@ def get_settings(stash_instance):
         log.error(f"Failed to get plugin configuration: {err}")
         plugin_config = {}
 
-    # Map from Stash camelCase settings to internal snake_case
-    # with sensible defaults
-    return {
-        "dry_run": plugin_config.get("dryRun", True),  # Default to safe mode
-        "log_file_path": plugin_config.get("logFilePath", ""),  # Optional file logging
-        "enable_hook": plugin_config.get("enableHook", False),  # Default off for safety
-        "require_stash_id": plugin_config.get("requireStashId", False),  # Default off - process all scenes
-        "hook_trigger_mode": plugin_config.get("hookTriggerMode", "always"),
-        "enable_renamer": plugin_config.get("enableRenamer", False),
-        "renamer_path": plugin_config.get("renamerPath", ""),
-        "renamer_path_template": plugin_config.get(
-            "renamerPathTemplate",
-            "$Studio/$Title - $Performers $ReleaseDate [$Resolution]"
-        ),
-        "renamer_filepath_budget": plugin_config.get("renamerFilepathBudget", 250),
-        "renamer_ignore_files_in_path": plugin_config.get("renamerIgnoreFilesInPath", False),
-        "renamer_enable_mark_organized": plugin_config.get("renamerMarkOrganized", True),
-        "renamer_multi_file_mode": plugin_config.get("renamerMultiFileMode", "all"),
-        "nfo_skip_existing": plugin_config.get("nfoSkipExisting", False),
-        "nfo_exclude_fields": [
-            f.strip().lower()
-            for f in plugin_config.get("nfoExcludeFields", "").split(",")
-            if f.strip()
-        ],
-        "enable_actor_images": plugin_config.get("enableActorImages", False),
-        "media_server": plugin_config.get("mediaServer", "jellyfin"),
-        "actor_metadata_path": plugin_config.get("actorMetadataPath", ""),
-    }
+    return map_settings(plugin_config)
 
 
 # Load settings from Stash
@@ -162,6 +139,7 @@ def main():
         # Handle processing modes
         if mode == "bulk":
             log.info("Starting bulk scene update")
+            log.info(describe_active_conditions(SETTINGS))
             process_all_scenes(stash, SETTINGS, api_key)
             log.info("Bulk scene update completed")
 
@@ -182,27 +160,14 @@ def main():
                 log.warning(f"Scene {scene_id} not found")
                 return
 
-            # Check if we require StashDB link (configurable, default OFF)
-            require_stash_id = SETTINGS.get("require_stash_id", False)
-            stash_ids = scene.get("stash_ids", [])
-
-            if require_stash_id and not stash_ids:
-                log.debug(f"Scene {scene_id} has no StashID, skipping (requireStashId is enabled)")
+            # Unified processing-conditions gate (organized / required tags /
+            # directory scope / StashID). This subsumes the old hookTriggerMode
+            # and the cascade guard: organizedCondition=require gives organized-only
+            # processing; organizedCondition=skip avoids reprocessing organized scenes.
+            ok, reason = should_process(scene, SETTINGS)
+            if not ok:
+                log.debug(f"Scene {scene_id} skipped by processing conditions: {reason}")
                 return
-
-            # Check hook trigger mode (#111)
-            hook_trigger_mode = SETTINGS.get("hook_trigger_mode", "always")
-            if hook_trigger_mode == "on_organized" and not scene.get("organized", False):
-                log.debug(f"Scene {scene_id} not organized, skipping (hookTriggerMode=on_organized)")
-                return
-
-            # Cascade protection: skip already-organized scenes to prevent re-firing
-            # after the plugin marks a scene as organized during rename.
-            # Skip this check in on_organized mode — user explicitly wants organized triggers.
-            if hook_trigger_mode != "on_organized":
-                if SETTINGS.get("renamer_enable_mark_organized", False) and scene.get("organized", False):
-                    log.debug(f"Scene {scene_id} already organized, skipping to prevent hook cascade")
-                    return
 
             log.info(f"Processing scene {scene_id}")
             process_scene(scene, stash, SETTINGS, api_key)

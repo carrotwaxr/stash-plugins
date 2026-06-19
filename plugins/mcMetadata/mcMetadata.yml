@@ -1,7 +1,7 @@
 name: mcMetadata
 description: Generates NFO metadata files for Jellyfin/Emby/Plex, organizes/renames video files using customizable templates, and exports performer images to media server folders.
 url: https://github.com/carrotwaxr/stash-plugins/tree/main/plugins/mcMetadata
-version: 1.4.0
+version: 1.5.0
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
@@ -22,12 +22,28 @@ settings:
     description: Process scenes automatically when you update them. Disable to only use bulk tasks. Default is OFF.
     type: BOOLEAN
   requireStashId:
-    displayName: Require StashDB Link (Hook Only)
-    description: Only process scenes that are linked to StashDB when using the hook. Enable this to only generate NFOs for curated StashDB content. Default is OFF.
+    displayName: Require StashDB Link
+    description: "Processing condition: only process scenes linked to StashDB. Applies to both the hook and the bulk task. Use to generate NFOs only for curated StashDB content. Default is OFF (process all scenes)."
     type: BOOLEAN
+  organizedCondition:
+    displayName: Organized Condition
+    description: "Processing condition: 'require' (only Organized scenes), 'skip' (only NOT-yet-organized scenes), or 'ignore' (process either). Applies to the hook and bulk task. Default is 'ignore'. Supersedes Hook Trigger Mode."
+    type: STRING
+  requiredTags:
+    displayName: Required Tags
+    description: "Processing condition: comma-separated tag names; a scene is processed only if it has at least one. Example: Curated, For Jellyfin. Leave empty to process scenes with any tags."
+    type: STRING
+  includePaths:
+    displayName: Include Paths
+    description: "Processing condition: comma-separated path globs; a scene is processed only if a file matches one. Example: /media/curated/*. Leave empty to include all locations."
+    type: STRING
+  excludePaths:
+    displayName: Exclude Paths
+    description: "Processing condition: comma-separated path globs; a scene is skipped if a file matches one. Exclude wins over Include. Example: */trash/*, /media/staging/*. Leave empty to exclude nothing."
+    type: STRING
   hookTriggerMode:
-    displayName: Hook Trigger Mode
-    description: "When to process scenes via hook: 'always' (every save) or 'on_organized' (only when scene is marked Organized). Default is 'always'."
+    displayName: Hook Trigger Mode (deprecated)
+    description: "DEPRECATED — use Organized Condition instead. Still honored for back-compat when Organized Condition is unset: 'on_organized' maps to require, 'always' maps to ignore."
     type: STRING
   enableRenamer:
     displayName: Enable File Renamer

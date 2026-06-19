@@ -1,59 +1,78 @@
 import os
+from collections import Counter
 import utils.logger as log
 from performer import process_performer
 from utils.files import download_image, rename_file, replace_file_ext
 from utils.nfo import build_nfo_xml
 from utils.replacer import get_new_path
+from conditions import should_process, build_scene_filter, format_bulk_summary
+
+SKIP_SAMPLE_LIMIT = 10
 
 BATCH_SIZE = 100
 IMPOSSIBLE_PATH = "$%^&@"
-QUERY_WHERE_STASH_ID_NOT_NULL = {
-    "stash_id_endpoint": {
-        "endpoint": "",
-        "modifier": "NOT_NULL",
-        "stash_id": "",
-    }
-}
 
 
 def process_all_scenes(stash, settings, api_key):
-    """Process all scenes that have a StashID.
+    """Process scenes in bulk, gated by the unified processing conditions.
+
+    build_scene_filter narrows the server-side fetch where Stash can express a gate
+    exactly (organized, StashID); should_process is the authoritative gate applied to
+    every fetched scene. Scenes the gate rejects are tallied by reason for the dry-run
+    histogram instead of being silently dropped (fixes #127 for null-StashID scenes).
 
     Args:
         stash: StashInterface instance
         settings: Plugin settings dict
         api_key: Stash API key for image URLs
+
+    Returns:
+        dict: {"scanned", "processed", "errors", "skipped": {reason: count}}
     """
+    scene_filter = build_scene_filter(settings)
     count = stash.find_scenes(
-        f=QUERY_WHERE_STASH_ID_NOT_NULL,
+        f=scene_filter,
         filter={"per_page": 1},
         get_count=True,
     )[0]
 
-    log.info(f"Found {count} scenes with StashIDs to process")
+    log.info(f"Found {count} candidate scenes to evaluate")
+
+    summary = {"scanned": 0, "processed": 0, "errors": 0, "skipped": {}}
+    skipped = Counter()
+    samples = []
 
     if count == 0:
         log.info("No scenes to process")
-        return
+        return summary
 
     # Calculate total pages (ceiling division)
     total_pages = (count + BATCH_SIZE - 1) // BATCH_SIZE
     processed = 0
     errors = 0
+    scanned = 0
 
     # Pages are 1-indexed in Stash API
     for page in range(1, total_pages + 1):
         start = (page - 1) * BATCH_SIZE + 1
         end = min(page * BATCH_SIZE, count)
 
-        log.info(f"Processing scenes {start}-{end} of {count} (page {page}/{total_pages})")
+        log.info(f"Evaluating scenes {start}-{end} of {count} (page {page}/{total_pages})")
 
         scenes = stash.find_scenes(
-            f=QUERY_WHERE_STASH_ID_NOT_NULL,
+            f=scene_filter,
             filter={"page": page, "per_page": BATCH_SIZE},
         )
 
         for scene in scenes:
+            scanned += 1
+            ok, reason = should_process(scene, settings)
+            if not ok:
+                skipped[reason] += 1
+                if len(samples) < SKIP_SAMPLE_LIMIT:
+                    samples.append((scene.get("id", "?"), reason))
+                log.debug(f"Scene {scene.get('id', '?')} skipped by processing conditions: {reason}")
+                continue
             try:
                 process_scene(scene, stash, settings, api_key)
                 processed += 1
@@ -61,7 +80,15 @@ def process_all_scenes(stash, settings, api_key):
                 errors += 1
                 log.error(f"Error processing scene {scene.get('id', 'unknown')}: {err}")
 
-    log.info(f"Bulk scene update complete. Processed: {processed}, Errors: {errors}")
+    summary["scanned"] = scanned
+    summary["processed"] = processed
+    summary["errors"] = errors
+    summary["skipped"] = dict(skipped)
+    summary["samples"] = samples
+
+    for line in format_bulk_summary(summary, dry_run=settings.get("dry_run", False)):
+        log.info(line)
+    return summary
 
 
 def process_scene(scene, stash, settings, api_key):
