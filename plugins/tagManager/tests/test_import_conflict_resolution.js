@@ -35,6 +35,17 @@ function detectImportConflicts(stashdbTag, localTags) {
   return conflicts;
 }
 
+function sanitizeAliasesForImport(stashdbTag, conflicts) {
+  const dropped = new Set(conflicts.map(c => c.conflictingValue.toLowerCase()));
+  const kept = [];
+  const removed = [];
+  for (const alias of (stashdbTag.aliases || [])) {
+    if (dropped.has(alias.toLowerCase())) removed.push(alias);
+    else kept.push(alias);
+  }
+  return { aliases: kept, removed };
+}
+
 // ---- Tests ----
 
 test('no conflict when name and aliases are unique', () => {
@@ -69,6 +80,28 @@ test('detects multiple collisions against different tags', () => {
   const r = detectImportConflicts(incoming, local);
   eq(r.length, 2, 'two conflicts');
   eq(r.map(c => c.conflictingTag.id).sort(), ['1', '2'], 'both tags');
+});
+
+test('strip-alias removes only colliding aliases', () => {
+  const incoming = { name: 'Foo', aliases: ['Bar', 'Keep'] };
+  const conflicts = [{ conflictingValue: 'Bar', conflictingTag: { id: '1' } }];
+  eq(sanitizeAliasesForImport(incoming, conflicts), { aliases: ['Keep'], removed: ['Bar'] }, 'keep non-colliding');
+});
+
+test('strip-alias removes all of several colliding aliases', () => {
+  const incoming = { name: 'Foo', aliases: ['Bar', 'Baz', 'Keep'] };
+  const conflicts = [
+    { conflictingValue: 'Bar', conflictingTag: { id: '1' } },
+    { conflictingValue: 'Baz', conflictingTag: { id: '2' } },
+  ];
+  eq(sanitizeAliasesForImport(incoming, conflicts), { aliases: ['Keep'], removed: ['Bar', 'Baz'] }, 'drop both');
+});
+
+test('strip-alias note: name-only collision strips no alias', () => {
+  const incoming = { name: 'Foo', aliases: ['Keep'] };
+  const conflicts = [{ conflictingValue: 'Foo', conflictingTag: { id: '1' } }];
+  // name collides, not an alias — nothing to strip; caller handles name case
+  eq(sanitizeAliasesForImport(incoming, conflicts), { aliases: ['Keep'], removed: [] }, 'no alias dropped');
 });
 
 // ---- Runner (keep at bottom) ----

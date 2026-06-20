@@ -848,6 +848,24 @@
   }
 
   /**
+   * #125: Return the incoming tag's aliases with all colliding values removed,
+   * plus the dropped values (for the "strip alias & import" action / UI note).
+   * @param {object} stashdbTag - incoming tag { aliases }
+   * @param {Array<{conflictingValue: string}>} conflicts
+   * @returns {{aliases: string[], removed: string[]}}
+   */
+  function sanitizeAliasesForImport(stashdbTag, conflicts) {
+    const dropped = new Set(conflicts.map(c => c.conflictingValue.toLowerCase()));
+    const kept = [];
+    const removed = [];
+    for (const alias of (stashdbTag.aliases || [])) {
+      if (dropped.has(alias.toLowerCase())) removed.push(alias);
+      else kept.push(alias);
+    }
+    return { aliases: kept, removed };
+  }
+
+  /**
    * Handle merging a source tag into a destination tag, then apply StashDB link.
    * Used by both pre-validation and API error merge handlers.
    *
