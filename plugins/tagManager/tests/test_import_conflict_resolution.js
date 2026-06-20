@@ -46,6 +46,33 @@ function sanitizeAliasesForImport(stashdbTag, conflicts) {
   return { aliases: kept, removed };
 }
 
+function buildMergeIntoExistingInput(existingTag, stashdbTag, conflicts, endpoint, stashdbId, parentId) {
+  const conflictVals = new Set(conflicts.map(c => c.conflictingValue.toLowerCase()));
+  const existingLower = new Set([
+    existingTag.name.toLowerCase(),
+    ...(existingTag.aliases || []).map(a => a.toLowerCase()),
+  ]);
+  // candidate aliases to add: incoming name + incoming aliases, minus conflicts and dupes
+  const candidates = [stashdbTag.name, ...(stashdbTag.aliases || [])];
+  const addAliases = [];
+  for (const v of candidates) {
+    const low = v.toLowerCase();
+    if (conflictVals.has(low) || existingLower.has(low) || addAliases.some(a => a.toLowerCase() === low)) continue;
+    addAliases.push(v);
+  }
+  const filteredStashIds = (existingTag.stash_ids || []).filter(s => s.endpoint !== endpoint);
+  const input = {
+    id: existingTag.id,
+    aliases: [...(existingTag.aliases || []), ...addAliases],
+    stash_ids: [...filteredStashIds, { endpoint, stash_id: stashdbId }],
+  };
+  const existingParents = (existingTag.parents || []).map(p => p.id);
+  if (parentId && !existingParents.includes(parentId)) {
+    input.parent_ids = [...existingParents, parentId];
+  }
+  return input;
+}
+
 // ---- Tests ----
 
 test('no conflict when name and aliases are unique', () => {
@@ -102,6 +129,26 @@ test('strip-alias note: name-only collision strips no alias', () => {
   const conflicts = [{ conflictingValue: 'Foo', conflictingTag: { id: '1' } }];
   // name collides, not an alias — nothing to strip; caller handles name case
   eq(sanitizeAliasesForImport(incoming, conflicts), { aliases: ['Keep'], removed: [] }, 'no alias dropped');
+});
+
+test('merge-into-existing links stash_id and adds non-conflicting aliases', () => {
+  const existing = { id: '1', name: 'Barbara', aliases: ['Bar'], stash_ids: [], parents: [] };
+  const incoming = { name: 'Foo', aliases: ['Bar', 'Fooey'] };
+  const conflicts = [{ conflictingValue: 'Bar', conflictingTag: existing }];
+  const input = buildMergeIntoExistingInput(existing, incoming, conflicts, 'https://sb', 'sbid1', null);
+  eq(input.aliases, ['Bar', 'Foo', 'Fooey'], 'adds name + non-conflicting alias, drops Bar');
+  eq(input.stash_ids, [{ endpoint: 'https://sb', stash_id: 'sbid1' }], 'links stash id');
+  assert(!('parent_ids' in input), 'no parent when none given');
+});
+
+test('merge-into-existing replaces stash_id for same endpoint and sets missing parent', () => {
+  const existing = { id: '1', name: 'Barbara', aliases: [], stash_ids: [{ endpoint: 'https://sb', stash_id: 'OLD' }], parents: [] };
+  const incoming = { name: 'Barbara', aliases: [] }; // name collision
+  const conflicts = [{ conflictingValue: 'Barbara', conflictingTag: existing }];
+  const input = buildMergeIntoExistingInput(existing, incoming, conflicts, 'https://sb', 'NEW', 'p9');
+  eq(input.stash_ids, [{ endpoint: 'https://sb', stash_id: 'NEW' }], 'replaced, not duplicated');
+  eq(input.parent_ids, ['p9'], 'adds missing parent');
+  eq(input.aliases, [], 'name collision adds no alias');
 });
 
 // ---- Runner (keep at bottom) ----

@@ -866,6 +866,40 @@
   }
 
   /**
+   * #125: Build the tagUpdate input that links an incoming stash-box entity to
+   * the existing conflicting tag (the "merge into existing" action): replace the
+   * stash_id for this endpoint, add the incoming name + non-conflicting aliases,
+   * and add the resolved parent if missing. No deletion.
+   * @returns {object} tagUpdate input
+   */
+  function buildMergeIntoExistingInput(existingTag, stashdbTag, conflicts, endpoint, stashdbId, parentId) {
+    const conflictVals = new Set(conflicts.map(c => c.conflictingValue.toLowerCase()));
+    const existingLower = new Set([
+      existingTag.name.toLowerCase(),
+      ...(existingTag.aliases || []).map(a => a.toLowerCase()),
+    ]);
+    // candidate aliases to add: incoming name + incoming aliases, minus conflicts and dupes
+    const candidates = [stashdbTag.name, ...(stashdbTag.aliases || [])];
+    const addAliases = [];
+    for (const v of candidates) {
+      const low = v.toLowerCase();
+      if (conflictVals.has(low) || existingLower.has(low) || addAliases.some(a => a.toLowerCase() === low)) continue;
+      addAliases.push(v);
+    }
+    const filteredStashIds = (existingTag.stash_ids || []).filter(s => s.endpoint !== endpoint);
+    const input = {
+      id: existingTag.id,
+      aliases: [...(existingTag.aliases || []), ...addAliases],
+      stash_ids: [...filteredStashIds, { endpoint, stash_id: stashdbId }],
+    };
+    const existingParents = (existingTag.parents || []).map(p => p.id);
+    if (parentId && !existingParents.includes(parentId)) {
+      input.parent_ids = [...existingParents, parentId];
+    }
+    return input;
+  }
+
+  /**
    * Handle merging a source tag into a destination tag, then apply StashDB link.
    * Used by both pre-validation and API error merge handlers.
    *
