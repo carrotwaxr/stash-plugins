@@ -830,6 +830,24 @@
   }
 
   /**
+   * #125: Detect name/alias collisions for an incoming stash-box tag against
+   * local tags. Returns one record per colliding value (name or alias).
+   * @param {object} stashdbTag - incoming tag { name, aliases }
+   * @returns {Array<{conflictingValue: string, conflictingTag: object}>}
+   */
+  function detectImportConflicts(stashdbTag) {
+    const conflicts = [];
+    const values = [stashdbTag.name, ...(stashdbTag.aliases || [])];
+    for (const value of values) {
+      const conflictingTag = findConflictingTag(value, null);
+      if (conflictingTag) {
+        conflicts.push({ conflictingValue: value, conflictingTag });
+      }
+    }
+    return conflicts;
+  }
+
+  /**
    * Handle merging a source tag into a destination tag, then apply StashDB link.
    * Used by both pre-validation and API error merge handlers.
    *
