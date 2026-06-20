@@ -86,6 +86,7 @@ Go to **Settings → Plugins → Tag Manager**:
 | Fuzzy Match Threshold | Minimum score (0-100) for fuzzy matches | 80 |
 | Tags Per Page | Number of tags shown per page | 25 |
 | Scene Tag Sync - Dry Run | Preview sync without making changes | Enabled |
+| Leave Parent Tags Alone | Import/match tags flat — don't create or assign category parent tags, keeping your own hierarchy untouched | Off |
 | Tag Blacklist | Patterns to exclude from matching | Empty |
 
 ## Troubleshooting
@@ -172,6 +173,15 @@ tagManager/
 ├── cache/                 # Tag cache files (auto-created)
 └── tests/                 # Test suite
 ```
+
+## Changelog
+
+### v0.5.0
+
+- **Category mappings now persist reliably** (#122): config writes are serialized and verified after saving, so a selected parent tag no longer reverts to "create new." A failed save now surfaces a toast instead of silently dropping.
+- **Tag list refreshes without a full page reload** (#124): returning to the tab (e.g. after fixing a conflicting tag elsewhere) and finishing a merge/import now re-fetch from Stash automatically.
+- **New "Leave Parent Tags Alone" setting** (#126): import/match tags flat without creating or assigning category parent tags, for users who maintain their own nested hierarchy.
+- Hardened plugin config reads (empty/cleared numeric settings and malformed config no longer error).
 
 ## License
 

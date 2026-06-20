@@ -1,6 +1,6 @@
 name: Tag Manager
 description: Match and sync local tags with stash-box endpoints. Features multi-endpoint support, tag caching, layered search (exact, fuzzy, synonym), and field-by-field merge dialog.
-version: 0.4.1
+version: 0.5.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 ui:
@@ -39,6 +39,10 @@ settings:
   preferStashBoxDescription:
     displayName: Default to Stash-Box Description
     description: In the merge dialog, default the Description selection to the stash-box value instead of keeping the local description.
+    type: BOOLEAN
+  leaveParentTagsAlone:
+    displayName: Leave Parent Tags Alone
+    description: Don't create or assign category parent tags when importing/matching. Keeps your own tag hierarchy untouched (imports tags flat). Default is off.
     type: BOOLEAN
   categoryMappings:
     displayName: Category Mappings (Internal)

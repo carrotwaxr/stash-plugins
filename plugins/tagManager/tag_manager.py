@@ -218,6 +218,31 @@ def clear_cache(endpoint_url):
     return True  # Already cleared
 
 
+def safe_int(value, default):
+    """Coerce a stored config value to int, falling back to default.
+
+    Stash stores an empty string for a cleared numeric field, and backfill only
+    fills *missing* keys (not ""), so a bare int() can throw on real config.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return default
+
+
+def resolve_sync_dry_run(stash_config):
+    """Read syncDryRun from a (possibly malformed) Stash config, safe-defaulting.
+
+    Never raise: a missing/None config or plugin entry falls back to the safe
+    dry-run default so a bad config can't trigger unintended writes.
+    """
+    try:
+        plugin_config = (stash_config.get("plugins") or {}).get(PLUGIN_ID) or {}
+        return plugin_config.get("syncDryRun", DEFAULT_PLUGIN_SETTINGS["syncDryRun"])
+    except (AttributeError, TypeError):
+        return DEFAULT_PLUGIN_SETTINGS["syncDryRun"]
+
+
 def get_settings_from_config(stash_config):
     """
     Extract plugin settings from Stash configuration.
@@ -237,8 +262,8 @@ def get_settings_from_config(stash_config):
         "stashdb_api_key": config.get("stashdbApiKey", ""),
         "enable_fuzzy": config.get("enableFuzzySearch", DEFAULT_PLUGIN_SETTINGS["enableFuzzySearch"]),
         "enable_synonyms": config.get("enableSynonymSearch", DEFAULT_PLUGIN_SETTINGS["enableSynonymSearch"]),
-        "fuzzy_threshold": int(config.get("fuzzyThreshold", DEFAULT_PLUGIN_SETTINGS["fuzzyThreshold"])),
-        "page_size": int(config.get("pageSize", DEFAULT_PLUGIN_SETTINGS["pageSize"])),
+        "fuzzy_threshold": safe_int(config.get("fuzzyThreshold", DEFAULT_PLUGIN_SETTINGS["fuzzyThreshold"]), DEFAULT_PLUGIN_SETTINGS["fuzzyThreshold"]),
+        "page_size": safe_int(config.get("pageSize", DEFAULT_PLUGIN_SETTINGS["pageSize"]), DEFAULT_PLUGIN_SETTINGS["pageSize"]),
         "tag_blacklist": config.get("tagBlacklist", DEFAULT_PLUGIN_SETTINGS["tagBlacklist"]),
     }
 
@@ -259,27 +284,33 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
     """
     log.LogDebug(f"Searching for tag: {tag_name}")
 
+    # Read settings defensively — callers may pass a partial dict (defaults apply).
+    tag_blacklist = settings.get("tag_blacklist", DEFAULT_PLUGIN_SETTINGS["tagBlacklist"])
+    enable_fuzzy = settings.get("enable_fuzzy", DEFAULT_PLUGIN_SETTINGS["enableFuzzySearch"])
+    enable_synonyms = settings.get("enable_synonyms", DEFAULT_PLUGIN_SETTINGS["enableSynonymSearch"])
+    fuzzy_threshold = safe_int(settings.get("fuzzy_threshold", DEFAULT_PLUGIN_SETTINGS["fuzzyThreshold"]), DEFAULT_PLUGIN_SETTINGS["fuzzyThreshold"])
+
     # Load blacklist from settings
-    blacklist = Blacklist(settings["tag_blacklist"])
+    blacklist = Blacklist(tag_blacklist)
 
     # First try StashDB's name search (searches name + aliases)
     api_matches = search_tags_by_name(stashdb_url, stashdb_api_key, tag_name, limit=20)
 
     # If we have cached tags, also do local fuzzy matching
     local_matches = []
-    if stashdb_tags and settings["enable_fuzzy"]:
+    if stashdb_tags and enable_fuzzy:
         synonyms_path = os.path.join(get_plugin_dir(), "synonyms.json")
         synonyms = load_synonyms(synonyms_path)
 
         matcher = TagMatcher(
             stashdb_tags,
             synonyms=synonyms,
-            fuzzy_threshold=settings["fuzzy_threshold"]
+            fuzzy_threshold=fuzzy_threshold
         )
         local_matches = matcher.find_matches(
             tag_name,
-            enable_fuzzy=settings["enable_fuzzy"],
-            enable_synonyms=settings["enable_synonyms"],
+            enable_fuzzy=enable_fuzzy,
+            enable_synonyms=enable_synonyms,
             limit=20
         )
 
@@ -456,9 +487,8 @@ def handle_sync_scene_tags(server_connection, stash_config, api_key):
 
     log.LogInfo(f"Using stash-box endpoint: {stashdb_url}")
 
-    # Get dry_run setting from plugin config
-    plugin_config = stash_config.get("plugins", {}).get(PLUGIN_ID, {})
-    dry_run = plugin_config.get("syncDryRun", DEFAULT_PLUGIN_SETTINGS["syncDryRun"])
+    # Get dry_run setting from plugin config (safe-defaults on malformed config)
+    dry_run = resolve_sync_dry_run(stash_config)
 
     sync_settings = {
         "dry_run": dry_run

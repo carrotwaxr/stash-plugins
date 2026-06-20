@@ -5,6 +5,7 @@
   "pageSize": 25,
   "preferStashBoxName": false,
   "preferStashBoxDescription": false,
+  "leaveParentTagsAlone": false,
   "syncDryRun": true,
   "categoryMappings": "{}",
   "tagBlacklist": ""
