@@ -1793,11 +1793,14 @@
         if (!entry) return;
         const existing = localTags.find(t => t.id === tagId);
         if (!existing) return;
+        // Guard the row across the async scene-count fetch + confirm so a second
+        // click can't start a concurrent handler; restore it if the user cancels.
+        setRowBusy(i);
         const sceneCount = await getTagSceneCount(tagId);
         if (!confirm(`Merge "${existing.name}" into "${entry.stashdbTag.name}"?\n\nThis deletes "${existing.name}" and reassigns its ${sceneCount} scene${sceneCount === 1 ? '' : 's'} to the imported tag. This cannot be undone.`)) {
+          clearRowBusy(i);
           return;
         }
-        setRowBusy(i);
         const { stashdbTag, parentId, conflicts } = entry;
         // Create the incoming tag clean (strip the conflicting aliases so the create
         // succeeds while the existing tag still owns them), then absorb the existing
