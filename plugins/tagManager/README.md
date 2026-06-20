@@ -176,6 +176,10 @@ tagManager/
 
 ## Changelog
 
+### v0.6.0
+
+- **Resolve import conflicts in the UI** (#125): when an imported tag's name or alias is already used by a local tag, the import no longer fails silently to the console. A "Resolve Tag Conflicts" dialog now lets you merge into the existing tag, strip the clashing alias and import anyway, open the conflicting tag to fix it by hand, do a confirm-gated reverse merge, or skip. The import summary reports conflicts resolved and skipped.
+
 ### v0.5.0
 
 - **Category mappings now persist reliably** (#122): config writes are serialized and verified after saving, so a selected parent tag no longer reverts to "create new." A failed save now surfaces a toast instead of silently dropping.
