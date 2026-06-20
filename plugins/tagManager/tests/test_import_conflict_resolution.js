@@ -73,6 +73,17 @@ function buildMergeIntoExistingInput(existingTag, stashdbTag, conflicts, endpoin
   return input;
 }
 
+function summarizeImportResult(c) {
+  const parts = [];
+  if (c.created > 0) parts.push(`Created ${c.created} tag${c.created !== 1 ? 's' : ''}`);
+  if (c.linked > 0) parts.push(`linked ${c.linked} existing`);
+  if (c.parented > 0) parts.push(`set parents for ${c.parented} (${c.categories} ${c.categories === 1 ? 'category' : 'categories'})`);
+  if (c.conflicts > 0) parts.push(`${c.conflicts} conflict${c.conflicts !== 1 ? 's' : ''} resolved`);
+  if (c.skipped > 0) parts.push(`${c.skipped} skipped`);
+  if (c.errors > 0) parts.push(`${c.errors} error${c.errors !== 1 ? 's' : ''}`);
+  return parts.length ? parts.join(', ') : 'No changes';
+}
+
 // ---- Tests ----
 
 test('no conflict when name and aliases are unique', () => {
@@ -149,6 +160,23 @@ test('merge-into-existing replaces stash_id for same endpoint and sets missing p
   eq(input.stash_ids, [{ endpoint: 'https://sb', stash_id: 'NEW' }], 'replaced, not duplicated');
   eq(input.parent_ids, ['p9'], 'adds missing parent');
   eq(input.aliases, [], 'name collision adds no alias');
+});
+
+test('summary includes conflicts and skipped distinctly from errors', () => {
+  const s = summarizeImportResult({ created: 12, linked: 4, parented: 0, categories: 0, conflicts: 3, skipped: 1, errors: 0 });
+  eq(s, 'Created 12 tags, linked 4 existing, 3 conflicts resolved, 1 skipped', 'phrasing');
+});
+
+test('summary singular/plural and empty', () => {
+  eq(summarizeImportResult({ created: 1, linked: 0, parented: 0, categories: 0, conflicts: 1, skipped: 0, errors: 1 }),
+     'Created 1 tag, 1 conflict resolved, 1 error', 'singulars');
+  eq(summarizeImportResult({ created: 0, linked: 0, parented: 0, categories: 0, conflicts: 0, skipped: 0, errors: 0 }),
+     'No changes', 'empty');
+});
+
+test('summary preserves existing parented phrasing', () => {
+  eq(summarizeImportResult({ created: 0, linked: 0, parented: 2, categories: 1, conflicts: 0, skipped: 0, errors: 0 }),
+     'set parents for 2 (1 category)', 'parented singular category');
 });
 
 // ---- Runner (keep at bottom) ----

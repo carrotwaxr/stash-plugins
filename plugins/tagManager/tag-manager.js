@@ -900,6 +900,23 @@
   }
 
   /**
+   * #125: Build the import summary line, including distinct conflict/skipped
+   * counts alongside the existing created/linked/parented/errors tallies.
+   * @param {object} c - { created, linked, parented, categories, conflicts, skipped, errors }
+   * @returns {string}
+   */
+  function summarizeImportResult(c) {
+    const parts = [];
+    if (c.created > 0) parts.push(`Created ${c.created} tag${c.created !== 1 ? 's' : ''}`);
+    if (c.linked > 0) parts.push(`linked ${c.linked} existing`);
+    if (c.parented > 0) parts.push(`set parents for ${c.parented} (${c.categories} ${c.categories === 1 ? 'category' : 'categories'})`);
+    if (c.conflicts > 0) parts.push(`${c.conflicts} conflict${c.conflicts !== 1 ? 's' : ''} resolved`);
+    if (c.skipped > 0) parts.push(`${c.skipped} skipped`);
+    if (c.errors > 0) parts.push(`${c.errors} error${c.errors !== 1 ? 's' : ''}`);
+    return parts.length ? parts.join(', ') : 'No changes';
+  }
+
+  /**
    * Handle merging a source tag into a destination tag, then apply StashDB link.
    * Used by both pre-validation and API error merge handlers.
    *
@@ -1560,15 +1577,15 @@
 
     selectedForImport.clear();
 
-    const parts = [];
-    if (created > 0) parts.push(`Created ${created} tag${created !== 1 ? 's' : ''}`);
-    if (linked > 0) parts.push(`linked ${linked} existing`);
-    if (parented > 0) {
-      const catCount = parentMap ? Object.keys(parentMap).length : 0;
-      parts.push(`set parents for ${parented} (${catCount} ${catCount === 1 ? 'category' : 'categories'})`);
-    }
-    if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
-    const message = parts.join(', ') || 'No changes';
+    const message = summarizeImportResult({
+      created,
+      linked,
+      parented,
+      categories: parentMap ? Object.keys(parentMap).length : 0,
+      conflicts: 0, // #125: wired in the conflict-resolution flow
+      skipped: 0,
+      errors,
+    });
 
     if (statusEl) statusEl.textContent = message;
 
