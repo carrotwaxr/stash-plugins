@@ -376,6 +376,18 @@
   }
 
   /**
+   * #125: The browse import selection holds StashDB tag ids (uuids) — a different
+   * id space than local Stash tags (integers). Reconcile it against the loaded
+   * StashDB set only: reconciling against localTags drops every selection (a uuid
+   * never equals a local integer id), silently emptying an in-progress import.
+   * A null cache (not loaded yet) leaves the selection untouched. Pure.
+   */
+  function reconcileImportSelection(selectedForImport, stashdbTags) {
+    if (!stashdbTags) return new Set(selectedForImport);
+    return reconcileSelections(selectedForImport, stashdbTags);
+  }
+
+  /**
    * Re-fetch local tags and re-render so the UI reflects changes made here or in
    * another tab (#124). Modals live on document.body, so re-rendering the page
    * container is safe under an open modal; only an active import loop defers it
@@ -385,7 +397,7 @@
     if (!_activeContainer || isImporting) return;
     try {
       localTags = await fetchLocalTags();
-      selectedForImport = reconcileSelections(selectedForImport, localTags);
+      selectedForImport = reconcileImportSelection(selectedForImport, stashdbTags);
       if (_activeContainer) renderPage(_activeContainer);
     } catch (e) {
       console.error("[tagManager] Failed to refresh local tags:", e);

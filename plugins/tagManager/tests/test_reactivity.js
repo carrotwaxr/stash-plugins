@@ -27,6 +27,17 @@ function reconcileSelections(prevSelectedIds, freshTags) {
   return next;
 }
 
+// ---- MIRROR of tag-manager.js: reconcileImportSelection (#125) ----
+// The browse import selection holds StashDB tag ids (uuids) — a different id space
+// than local Stash tags (integers). refreshLocalTags() must reconcile it against
+// the loaded StashDB set, NOT localTags: reconciling against localTags drops every
+// selection (a uuid never equals a local integer id) and silently empties an
+// in-progress import. A null cache (not loaded yet) leaves the selection untouched.
+function reconcileImportSelection(selectedForImport, stashdbTags) {
+  if (!stashdbTags) return new Set(selectedForImport);
+  return reconcileSelections(selectedForImport, stashdbTags);
+}
+
 console.log('\n=== reconcileSelections tests ===\n');
 
 test('drops ids that no longer exist (merged away)', () => {
@@ -47,6 +58,26 @@ test('empty selection stays empty', () => {
 test('all dropped when none survive', () => {
   const result = reconcileSelections(new Set(['7', '8']), [{ id: '1' }]);
   assertEqual([...result], []);
+});
+
+console.log('\n=== reconcileImportSelection (#125 regression) tests ===\n');
+
+test('preserves a StashDB import selection across a local-tag refresh', () => {
+  // selection = StashDB uuids; only the StashDB cache knows them (localTags never will)
+  const selection = new Set(['6cd8-uuid', 'f391-uuid', '49d1-uuid']);
+  const stashdbTags = [{ id: '6cd8-uuid' }, { id: 'f391-uuid' }, { id: '49d1-uuid' }, { id: 'x-uuid' }];
+  const result = reconcileImportSelection(selection, stashdbTags);
+  assertEqual([...result].sort(), ['49d1-uuid', '6cd8-uuid', 'f391-uuid']);
+});
+
+test('leaves the selection untouched when the StashDB cache is not loaded (null)', () => {
+  const result = reconcileImportSelection(new Set(['6cd8-uuid']), null);
+  assertEqual([...result], ['6cd8-uuid']);
+});
+
+test('drops only a selection whose StashDB tag vanished from the cache', () => {
+  const result = reconcileImportSelection(new Set(['6cd8-uuid', 'gone-uuid']), [{ id: '6cd8-uuid' }]);
+  assertEqual([...result], ['6cd8-uuid']);
 });
 
 console.log('\n=== Summary ===\n');
