@@ -134,6 +134,28 @@ The Browse tab lets you explore StashDB tags by category and import ones you don
 2. **No parent relationships are set** - You'll need to organize hierarchy separately
 3. **No scenes are modified** - Tags are just created, not applied to anything
 
+### Resolving Conflicts (#125)
+
+Sometimes an imported tag's name or one of its aliases is already used by a local
+tag, so it can't be created as-is. The import still completes for everything else,
+then a **"Resolve Tag Conflicts"** dialog lists each conflict with these choices:
+
+- **Merge into "&lt;tag&gt;"** - Link the StashDB entity to the existing tag (adds the
+  `stash_id`, plus the imported name and any non-conflicting aliases). Nothing is
+  deleted. One button appears per conflicting tag.
+- **Strip alias & import** - Create the new tag anyway, dropping only the
+  conflicting alias(es). _(Hidden when the conflict is on the name itself, since the
+  name can't be reused.)_
+- **Open "&lt;tag&gt;"** - Open the conflicting tag in a new browser tab so you can edit
+  or delete it by hand, then re-run the import later.
+- **Merge "&lt;tag&gt;" into this** - The destructive reverse: create the new tag and
+  absorb the existing one into it (reassigns its scenes, then deletes it). Asks for
+  confirmation and shows how many scenes will move. _(Hidden on name conflicts.)_
+- **Skip** / **Skip all remaining** - Leave the conflict unresolved. Anything left
+  unresolved when you close the dialog is counted as skipped.
+
+The import summary reports how many conflicts were resolved and how many were skipped.
+
 ---
 
 ## Tag Hierarchy View

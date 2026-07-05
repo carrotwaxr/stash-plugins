@@ -1584,3 +1584,52 @@
   cursor: pointer;
   color: var(--bs-secondary-color, #888);
 }
+
+/* #125: Import conflict resolution modal */
+.tm-conflict-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.tm-conflict-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bs-tertiary-bg, #3d3d5c);
+  border-radius: 4px;
+}
+
+.tm-conflict-row.tm-conflict-busy {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.tm-conflict-desc {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tm-conflict-desc strong {
+  font-size: 1.05em;
+}
+
+.tm-conflict-detail {
+  color: var(--bs-secondary-color, #aaa);
+  font-size: 0.9em;
+}
+
+.tm-conflict-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tm-conflict-actions .btn {
+  font-size: 0.85em;
+}

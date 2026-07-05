@@ -376,6 +376,18 @@
   }
 
   /**
+   * #125: The browse import selection holds StashDB tag ids (uuids) — a different
+   * id space than local Stash tags (integers). Reconcile it against the loaded
+   * StashDB set only: reconciling against localTags drops every selection (a uuid
+   * never equals a local integer id), silently emptying an in-progress import.
+   * A null cache (not loaded yet) leaves the selection untouched. Pure.
+   */
+  function reconcileImportSelection(selectedForImport, stashdbTags) {
+    if (!stashdbTags) return new Set(selectedForImport);
+    return reconcileSelections(selectedForImport, stashdbTags);
+  }
+
+  /**
    * Re-fetch local tags and re-render so the UI reflects changes made here or in
    * another tab (#124). Modals live on document.body, so re-rendering the page
    * container is safe under an open modal; only an active import loop defers it
@@ -385,7 +397,7 @@
     if (!_activeContainer || isImporting) return;
     try {
       localTags = await fetchLocalTags();
-      selectedForImport = reconcileSelections(selectedForImport, localTags);
+      selectedForImport = reconcileImportSelection(selectedForImport, stashdbTags);
       if (_activeContainer) renderPage(_activeContainer);
     } catch (e) {
       console.error("[tagManager] Failed to refresh local tags:", e);
@@ -827,6 +839,93 @@
         t.aliases?.some(a => a.toLowerCase() === lowerName)
       )
     ) || null;
+  }
+
+  /**
+   * #125: Detect name/alias collisions for an incoming stash-box tag against
+   * local tags. Returns one record per colliding value (name or alias).
+   * @param {object} stashdbTag - incoming tag { name, aliases }
+   * @returns {Array<{conflictingValue: string, conflictingTag: object}>}
+   */
+  function detectImportConflicts(stashdbTag) {
+    const conflicts = [];
+    const values = [stashdbTag.name, ...(stashdbTag.aliases || [])];
+    for (const value of values) {
+      const conflictingTag = findConflictingTag(value, null);
+      if (conflictingTag) {
+        conflicts.push({ conflictingValue: value, conflictingTag });
+      }
+    }
+    return conflicts;
+  }
+
+  /**
+   * #125: Return the incoming tag's aliases with all colliding values removed,
+   * plus the dropped values (for the "strip alias & import" action / UI note).
+   * @param {object} stashdbTag - incoming tag { aliases }
+   * @param {Array<{conflictingValue: string}>} conflicts
+   * @returns {{aliases: string[], removed: string[]}}
+   */
+  function sanitizeAliasesForImport(stashdbTag, conflicts) {
+    const dropped = new Set(conflicts.map(c => c.conflictingValue.toLowerCase()));
+    const kept = [];
+    const removed = [];
+    for (const alias of (stashdbTag.aliases || [])) {
+      if (dropped.has(alias.toLowerCase())) removed.push(alias);
+      else kept.push(alias);
+    }
+    return { aliases: kept, removed };
+  }
+
+  /**
+   * #125: Build the tagUpdate input that links an incoming stash-box entity to
+   * the existing conflicting tag (the "merge into existing" action): replace the
+   * stash_id for this endpoint, add the incoming name + non-conflicting aliases,
+   * and add the resolved parent if missing. No deletion.
+   * @returns {object} tagUpdate input
+   */
+  function buildMergeIntoExistingInput(existingTag, stashdbTag, conflicts, endpoint, stashdbId, parentId) {
+    const conflictVals = new Set(conflicts.map(c => c.conflictingValue.toLowerCase()));
+    const existingLower = new Set([
+      existingTag.name.toLowerCase(),
+      ...(existingTag.aliases || []).map(a => a.toLowerCase()),
+    ]);
+    // candidate aliases to add: incoming name + incoming aliases, minus conflicts and dupes
+    const candidates = [stashdbTag.name, ...(stashdbTag.aliases || [])];
+    const addAliases = [];
+    for (const v of candidates) {
+      const low = v.toLowerCase();
+      if (conflictVals.has(low) || existingLower.has(low) || addAliases.some(a => a.toLowerCase() === low)) continue;
+      addAliases.push(v);
+    }
+    const filteredStashIds = (existingTag.stash_ids || []).filter(s => s.endpoint !== endpoint);
+    const input = {
+      id: existingTag.id,
+      aliases: [...(existingTag.aliases || []), ...addAliases],
+      stash_ids: [...filteredStashIds, { endpoint, stash_id: stashdbId }],
+    };
+    const existingParents = (existingTag.parents || []).map(p => p.id);
+    if (parentId && !existingParents.includes(parentId)) {
+      input.parent_ids = [...existingParents, parentId];
+    }
+    return input;
+  }
+
+  /**
+   * #125: Build the import summary line, including distinct conflict/skipped
+   * counts alongside the existing created/linked/parented/errors tallies.
+   * @param {object} c - { created, linked, parented, categories, conflicts, skipped, errors }
+   * @returns {string}
+   */
+  function summarizeImportResult(c) {
+    const parts = [];
+    if (c.created > 0) parts.push(`Created ${c.created} tag${c.created !== 1 ? 's' : ''}`);
+    if (c.linked > 0) parts.push(`linked ${c.linked} existing`);
+    if (c.parented > 0) parts.push(`set parents for ${c.parented} (${c.categories} ${c.categories === 1 ? 'category' : 'categories'})`);
+    if (c.conflicts > 0) parts.push(`${c.conflicts} conflict${c.conflicts !== 1 ? 's' : ''} resolved`);
+    if (c.skipped > 0) parts.push(`${c.skipped} skipped`);
+    if (c.errors > 0) parts.push(`${c.errors} error${c.errors !== 1 ? 's' : ''}`);
+    return parts.length ? parts.join(', ') : 'No changes';
   }
 
   /**
@@ -1345,6 +1444,8 @@
     let linked = 0;
     let parented = 0;
     let errors = 0;
+    // #125: { stashdbTag, parentId, conflicts } collected for end-of-batch resolution
+    const importConflicts = [];
 
     // Pre-create parent tags that need creating
     const createdParents = {};
@@ -1435,6 +1536,15 @@
             }
           }
         } else {
+          // #125: pre-flight — if the incoming name/aliases collide with a local
+          // tag, defer to the end-of-batch resolution modal instead of a failing
+          // tagCreate that would only surface in the console.
+          const conflicts = detectImportConflicts(stashdbTag);
+          if (conflicts.length > 0) {
+            importConflicts.push({ stashdbTag, parentId, conflicts });
+            continue;
+          }
+
           const input = {
             name: stashdbTag.name,
             description: stashdbTag.description || '',
@@ -1472,8 +1582,16 @@
           }
         }
       } catch (e) {
-        console.error(`[tagManager] Failed to import/link "${stashdbTag.name}":`, e);
-        errors++;
+        // #125: a create/link rejection may be an alias/name conflict our in-memory
+        // pre-flight missed (out-of-band tag, server-side normalization). Route it to
+        // the same resolution queue instead of a logs-only error.
+        const conflicts = detectImportConflicts(stashdbTag);
+        if (conflicts.length > 0) {
+          importConflicts.push({ stashdbTag, parentId, conflicts });
+        } else {
+          console.error(`[tagManager] Failed to import/link "${stashdbTag.name}":`, e);
+          errors++;
+        }
       }
     }
 
@@ -1490,15 +1608,28 @@
 
     selectedForImport.clear();
 
-    const parts = [];
-    if (created > 0) parts.push(`Created ${created} tag${created !== 1 ? 's' : ''}`);
-    if (linked > 0) parts.push(`linked ${linked} existing`);
-    if (parented > 0) {
-      const catCount = parentMap ? Object.keys(parentMap).length : 0;
-      parts.push(`set parents for ${parented} (${catCount} ${catCount === 1 ? 'category' : 'categories'})`);
+    // #125: resolve any collected alias/name conflicts via the modal. Counts from
+    // resolution actions fold into the created/linked totals; resolved/skipped are
+    // reported separately in the summary.
+    let conflictsResolved = 0;
+    let skipped = 0;
+    if (importConflicts.length > 0) {
+      const outcome = await renderConflictResolutionModal(importConflicts);
+      created += outcome.created;
+      linked += outcome.linked;
+      conflictsResolved = outcome.resolved;
+      skipped = outcome.skipped;
     }
-    if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
-    const message = parts.join(', ') || 'No changes';
+
+    const message = summarizeImportResult({
+      created,
+      linked,
+      parented,
+      categories: parentMap ? Object.keys(parentMap).length : 0,
+      conflicts: conflictsResolved,
+      skipped,
+      errors,
+    });
 
     if (statusEl) statusEl.textContent = message;
 
@@ -1507,6 +1638,260 @@
       renderPage(container);
       refreshLocalTags(); // #124: reconcile with server truth after import
     }, 1500);
+  }
+
+  /**
+   * #125: End-of-import resolution modal for alias/name conflicts. Renders one
+   * row per deferred import with per-row actions. Resolves to aggregate counts
+   * { created, linked, skipped, resolved } that fold into the import summary.
+   * Unresolved rows at close count as skipped.
+   * @param {Array<{stashdbTag: object, parentId: ?string, conflicts: Array}>} importConflicts
+   * @returns {Promise<{created: number, linked: number, skipped: number, resolved: number}>}
+   */
+  function renderConflictResolutionModal(importConflicts) {
+    return new Promise((resolve) => {
+      const outcome = { created: 0, linked: 0, skipped: 0, resolved: 0 };
+      const remaining = new Map();
+      importConflicts.forEach((entry, i) => remaining.set(i, entry));
+      const endpoint = selectedStashBox.endpoint;
+
+      const backdrop = document.createElement('div');
+      backdrop.className = 'tm-modal-backdrop';
+      backdrop.innerHTML = `
+        <div class="tm-modal tm-modal-wide">
+          <div class="tm-modal-header">
+            <h3>Resolve Tag Conflicts</h3>
+            <button class="tm-close-btn">&times;</button>
+          </div>
+          <div class="tm-modal-body">
+            <p class="tm-preview-intro">${importConflicts.length} imported tag${importConflicts.length === 1 ? ' has a' : 's have'} name or alias already used by a local tag. Choose how to resolve each. Anything left unresolved is skipped.</p>
+            <div class="tm-conflict-list"></div>
+          </div>
+          <div class="tm-modal-footer">
+            <button class="btn btn-secondary" id="tm-conflict-skip-all">Skip all remaining</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(backdrop);
+      const listEl = backdrop.querySelector('.tm-conflict-list');
+
+      let settled = false;
+      function finish() {
+        if (settled) return;
+        settled = true;
+        for (const _i of remaining.keys()) outcome.skipped++; // unresolved → skipped
+        remaining.clear();
+        backdrop.remove();
+        resolve(outcome);
+      }
+
+      function distinctConflictTags(conflicts) {
+        const seen = new Map();
+        for (const c of conflicts) {
+          if (!seen.has(c.conflictingTag.id)) seen.set(c.conflictingTag.id, c.conflictingTag);
+        }
+        return [...seen.values()];
+      }
+
+      function rowHtml(i, entry) {
+        const { stashdbTag, conflicts } = entry;
+        const nameLower = stashdbTag.name.toLowerCase();
+        const hasNameConflict = conflicts.some(c => c.conflictingValue.toLowerCase() === nameLower);
+        const values = [...new Set(conflicts.map(c => c.conflictingValue))];
+        const tags = distinctConflictTags(conflicts);
+        const mergeBtns = tags.map(t =>
+          `<button class="btn btn-primary btn-sm tm-conflict-merge-into" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge into "${escapeHtml(t.name)}"</button>`
+        ).join('');
+        // A name collision means the incoming name is taken, so we can't create a
+        // new tag with it — strip-alias and reverse-merge are unavailable.
+        const stripBtn = hasNameConflict ? '' :
+          `<button class="btn btn-secondary btn-sm tm-conflict-strip" data-i="${i}">Strip alias &amp; import</button>`;
+        const reverseBtns = hasNameConflict ? '' : tags.map(t =>
+          `<button class="btn btn-danger btn-sm tm-conflict-reverse" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge "${escapeHtml(t.name)}" into this</button>`
+        ).join('');
+        const openBtns = tags.map(t =>
+          `<a href="/tags/${escapeHtml(t.id)}" target="_blank" class="btn btn-secondary btn-sm">Open "${escapeHtml(t.name)}"</a>`
+        ).join('');
+        return `
+          <div class="tm-conflict-row" data-i="${i}">
+            <div class="tm-conflict-desc">
+              <strong>${escapeHtml(stashdbTag.name)}</strong>
+              <span class="tm-conflict-detail">${hasNameConflict ? 'name' : 'alias'} ${values.map(v => `&ldquo;${escapeHtml(v)}&rdquo;`).join(', ')} already used by ${tags.map(t => `&ldquo;${escapeHtml(t.name)}&rdquo;`).join(', ')}</span>
+            </div>
+            <div class="tm-conflict-actions">
+              ${mergeBtns}
+              ${stripBtn}
+              ${reverseBtns}
+              ${openBtns}
+              <button class="btn btn-secondary btn-sm tm-conflict-skip" data-i="${i}">Skip</button>
+            </div>
+          </div>
+        `;
+      }
+
+      function render() {
+        if (remaining.size === 0) { finish(); return; }
+        listEl.innerHTML = [...remaining].map(([i, e]) => rowHtml(i, e)).join('');
+        attachHandlers();
+      }
+
+      function removeRow(i) {
+        remaining.delete(i);
+        render();
+      }
+
+      function setRowBusy(i) {
+        const row = listEl.querySelector(`.tm-conflict-row[data-i="${i}"]`);
+        if (row) row.classList.add('tm-conflict-busy');
+      }
+      function clearRowBusy(i) {
+        const row = listEl.querySelector(`.tm-conflict-row[data-i="${i}"]`);
+        if (row) row.classList.remove('tm-conflict-busy');
+      }
+
+      async function doMergeInto(i, tagId) {
+        const entry = remaining.get(i);
+        if (!entry) return;
+        const existing = localTags.find(t => t.id === tagId);
+        if (!existing) return;
+        setRowBusy(i);
+        try {
+          const input = buildMergeIntoExistingInput(existing, entry.stashdbTag, entry.conflicts, endpoint, entry.stashdbTag.id, entry.parentId);
+          const updated = await updateTag(input);
+          const idx = localTags.findIndex(t => t.id === tagId);
+          if (idx >= 0) {
+            localTags[idx].aliases = input.aliases;
+            localTags[idx].stash_ids = (updated && updated.stash_ids) || input.stash_ids;
+            if (input.parent_ids) localTags[idx].parents = input.parent_ids.map(id => ({ id }));
+          }
+          outcome.linked++; outcome.resolved++;
+          removeRow(i);
+        } catch (e) {
+          console.error('[tagManager] merge-into-existing failed:', e);
+          alert('Merge failed: ' + (e.message || e));
+          clearRowBusy(i);
+        }
+      }
+
+      async function doStrip(i) {
+        const entry = remaining.get(i);
+        if (!entry) return;
+        setRowBusy(i);
+        const { stashdbTag, parentId, conflicts } = entry;
+        const { aliases } = sanitizeAliasesForImport(stashdbTag, conflicts);
+        try {
+          const input = {
+            name: stashdbTag.name,
+            description: stashdbTag.description || '',
+            aliases,
+            stash_ids: [{ endpoint, stash_id: stashdbTag.id }],
+          };
+          if (parentId) input.parent_ids = [parentId];
+          const newTag = await createTag(input);
+          if (newTag) {
+            localTags.push({ id: newTag.id, name: newTag.name, aliases, stash_ids: input.stash_ids, parents: parentId ? [{ id: parentId }] : [] });
+            outcome.created++; outcome.resolved++;
+          }
+          removeRow(i);
+        } catch (e) {
+          console.error('[tagManager] strip-alias import failed:', e);
+          alert('Import failed: ' + (e.message || e));
+          clearRowBusy(i);
+        }
+      }
+
+      async function doReverse(i, tagId) {
+        const entry = remaining.get(i);
+        if (!entry) return;
+        const existing = localTags.find(t => t.id === tagId);
+        if (!existing) return;
+        // Guard the row across the async scene-count fetch + confirm so a second
+        // click can't start a concurrent handler; restore it if the user cancels.
+        setRowBusy(i);
+        const sceneCount = await getTagSceneCount(tagId);
+        if (!confirm(`Merge "${existing.name}" into "${entry.stashdbTag.name}"?\n\nThis deletes "${existing.name}" and reassigns its ${sceneCount} scene${sceneCount === 1 ? '' : 's'} to the imported tag. This cannot be undone.`)) {
+          clearRowBusy(i);
+          return;
+        }
+        const { stashdbTag, parentId, conflicts } = entry;
+        // Create the incoming tag clean (strip the conflicting aliases so the create
+        // succeeds while the existing tag still owns them), then absorb the existing
+        // tag — tagsMerge carries its aliases/scenes onto the new tag.
+        const { aliases } = sanitizeAliasesForImport(stashdbTag, conflicts);
+        try {
+          const input = {
+            name: stashdbTag.name,
+            description: stashdbTag.description || '',
+            aliases,
+            stash_ids: [{ endpoint, stash_id: stashdbTag.id }],
+          };
+          if (parentId) input.parent_ids = [parentId];
+          const newTag = await createTag(input);
+          if (!newTag) throw new Error('tagCreate returned no tag');
+          const merged = await mergeTags([tagId], newTag.id);
+          const removedIdx = localTags.findIndex(t => t.id === tagId);
+          if (removedIdx >= 0) localTags.splice(removedIdx, 1);
+          localTags.push({
+            id: newTag.id,
+            name: (merged && merged.name) || newTag.name,
+            aliases: (merged && merged.aliases) || aliases,
+            stash_ids: (merged && merged.stash_ids) || input.stash_ids,
+            parents: parentId ? [{ id: parentId }] : [],
+          });
+          outcome.created++; outcome.resolved++;
+          removeRow(i);
+        } catch (e) {
+          console.error('[tagManager] reverse-merge failed:', e);
+          alert('Reverse merge failed: ' + (e.message || e));
+          clearRowBusy(i);
+        }
+      }
+
+      function doSkip(i) {
+        if (!remaining.has(i)) return;
+        outcome.skipped++;
+        remaining.delete(i);
+        render();
+      }
+
+      function attachHandlers() {
+        listEl.querySelectorAll('.tm-conflict-merge-into').forEach(b =>
+          b.addEventListener('click', () => doMergeInto(Number(b.dataset.i), b.dataset.tag)));
+        listEl.querySelectorAll('.tm-conflict-strip').forEach(b =>
+          b.addEventListener('click', () => doStrip(Number(b.dataset.i))));
+        listEl.querySelectorAll('.tm-conflict-reverse').forEach(b =>
+          b.addEventListener('click', () => doReverse(Number(b.dataset.i), b.dataset.tag)));
+        listEl.querySelectorAll('.tm-conflict-skip').forEach(b =>
+          b.addEventListener('click', () => doSkip(Number(b.dataset.i))));
+        // "Open" links intentionally do not resolve the row — the user may return
+        // to it; if they close the modal with it unresolved it counts as skipped.
+      }
+
+      backdrop.querySelector('.tm-close-btn').addEventListener('click', finish);
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) finish(); });
+      backdrop.querySelector('#tm-conflict-skip-all').addEventListener('click', finish);
+
+      render();
+    });
+  }
+
+  /**
+   * #125: Fetch a tag's scene count for the reverse-merge confirmation prompt.
+   * @param {string} tagId
+   * @returns {Promise<number>}
+   */
+  async function getTagSceneCount(tagId) {
+    try {
+      const data = await graphqlRequest(`
+        query FindTag($id: ID!) {
+          findTag(id: $id) { scene_count }
+        }
+      `, { id: tagId });
+      return data?.findTag?.scene_count ?? 0;
+    } catch (e) {
+      console.warn('[tagManager] could not fetch scene count:', e);
+      return 0;
+    }
   }
 
   /**
