@@ -50,7 +50,9 @@ ThePornDB endpoints work like a stash-box. Differences:
 
 - ThePornDB has no way to filter by several IDs in one request. Browsing several favorites sends one request per favorite (up to 10 per page) and merges the results by scene. When there are more favorites than that, the page tells you the list was limited.
 - **Excluded Tags** are not applied to ThePornDB.
-- Odd or missing fields in ThePornDB responses are tolerated; one bad scene is skipped with a warning in the Stash log rather than failing the page.
+- Odd or missing fields in ThePornDB responses are tolerated; one bad scene is skipped with a warning in the Stash log rather than failing the page. A reply with no scene list at all is an error.
+- ThePornDB can't list scenes by tag, so a Tag page with ThePornDB selected shows that as an error.
+- A studio whose ThePornDB link names no ThePornDB site shows "this studio isn't on ThePornDB". When browsing favorite studios, those are skipped; if none are on ThePornDB, that is an error.
 
 ### Errors and partial results
 

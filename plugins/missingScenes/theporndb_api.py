@@ -12,6 +12,7 @@ Features:
 - Performer, studio, and browse scene queries
 """
 
+import http.client
 import json
 import ssl
 import time
@@ -33,6 +34,9 @@ MAX_BROWSE_QUERIES = 10
 
 # Cache: TPDB site UUID → numeric site_id (avoids repeated lookups)
 _site_id_cache: dict[str, int] = {}
+
+TAG_VIEWS_UNSUPPORTED = ("ThePornDB can't list scenes by tag: its tags aren't a stash-box's. "
+                         "Use StashDB for this tag, or a performer or studio page for ThePornDB.")
 
 
 def is_theporndb(endpoint_url: str) -> bool:
@@ -66,11 +70,13 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
         operation_name: Human-readable name for logging
 
     Returns:
-        Parsed JSON response, or None on failure
+        The parsed JSON response.
 
     Raises:
-        StashBoxAPIError: on 401/403 (auth) and on 429 after the retries, so the
-            caller can say which it was.
+        StashBoxAPIError: on every failure, with status_code for an HTTP error
+            (401/403 are auth errors, 429 after the retries is rate limiting, a 404
+            lets the caller say what wasn't found), and for connection errors and
+            a reply that isn't JSON.
     """
     max_retries = stashbox_api.get_config(plugin_settings, "max_retries")
     initial_delay = stashbox_api.get_config(plugin_settings, "initial_retry_delay")
@@ -95,11 +101,12 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
 
     last_error = None
     delay = initial_delay
+    name = operation_name or "request"
 
     for attempt in range(max_retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
-                return json.loads(response.read().decode("utf-8"))
+                body = response.read()
 
         except urllib.error.HTTPError as e:
             status_code = e.code
@@ -128,12 +135,14 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
                 delay = min(delay * backoff_multiplier, max_delay)
                 continue
 
-            log.LogError(f"TPDB HTTP error {status_code}: {e.reason}")
+            log.LogError(f"TPDB HTTP error {status_code} on {name}: {e.reason}")
             if status_code in stashbox_api.AUTH_STATUS_CODES:
                 raise stashbox_api.StashBoxAPIError(
                     f"HTTP {status_code}: {e.reason} (check the ThePornDB API key)",
                     status_code=status_code, auth=True)
-            return None
+            raise stashbox_api.StashBoxAPIError(
+                f"HTTP {status_code}: {e.reason}", status_code=status_code,
+                retryable=status_code in stashbox_api.RETRYABLE_STATUS_CODES)
 
         except urllib.error.URLError as e:
             last_error = e
@@ -141,7 +150,8 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
             # A bad certificate won't fix itself on retry
             if isinstance(e.reason, ssl.SSLCertVerificationError):
                 log.LogError(f"TPDB TLS certificate verification failed: {e.reason}")
-                return None
+                raise stashbox_api.StashBoxAPIError(
+                    f"TLS certificate verification failed for {TPDB_API_BASE}: {e.reason}")
 
             if attempt < max_retries:
                 log.LogWarning(
@@ -153,14 +163,34 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
                 continue
 
             log.LogError(f"TPDB URL error after {max_retries} retries: {e.reason}")
-            return None
+            raise stashbox_api.StashBoxAPIError(f"Connection failed: {e.reason}", retryable=True)
+
+        except (OSError, http.client.HTTPException) as e:
+            # Timeouts, resets and truncated replies while reading
+            last_error = e
+            if attempt < max_retries:
+                log.LogWarning(f"TPDB network error on {name}: {e}. "
+                               f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+                delay = min(delay * backoff_multiplier, max_delay)
+                continue
+            log.LogError(f"TPDB network error on {name}: {e}")
+            raise stashbox_api.StashBoxAPIError(f"Network error: {e}", retryable=True)
 
         except Exception as e:
-            log.LogError(f"TPDB unexpected error: {e}")
-            return None
+            log.LogError(f"TPDB unexpected error on {name}: {e}")
+            raise stashbox_api.StashBoxAPIError(f"Unexpected error: {e}")
+
+        try:
+            return json.loads(body.decode("utf-8"))
+        except ValueError:
+            log.LogError(f"TPDB {name}: the reply is not JSON: {body[:200]!r}")
+            raise stashbox_api.StashBoxAPIError(
+                "ThePornDB's reply is not JSON (an outage page or a proxy in the way?)")
 
     log.LogError(f"TPDB failed after {max_retries} retries: {last_error}")
-    return None
+    raise stashbox_api.StashBoxAPIError(f"Failed after {max_retries} retries: {last_error}",
+                                        retryable=True)
 
 
 # ============================================================================
@@ -306,6 +336,10 @@ def transform_scene(rest_scene: dict) -> dict:
 # Site UUID → numeric ID resolution (for studio queries)
 # ============================================================================
 
+class SiteNotFound(stashbox_api.StashBoxAPIError):
+    """ThePornDB has no site (studio) with this UUID (HTTP 404)."""
+
+
 def resolve_site_id(api_key, site_uuid, plugin_settings=None):
     """
     Resolve a TPDB site UUID to its numeric site_id.
@@ -314,30 +348,38 @@ def resolve_site_id(api_key, site_uuid, plugin_settings=None):
     but Stash stores the UUID. This does a one-time lookup and caches.
 
     Returns:
-        Numeric site_id, or None if resolution fails
+        The numeric site_id.
+
+    Raises:
+        SiteNotFound: ThePornDB has no such site (the studio's link is stale or wrong).
+        StashBoxAPIError: the lookup failed, or the reply has no numeric id.
     """
     if site_uuid in _site_id_cache:
         return _site_id_cache[site_uuid]
 
-    data = rest_request(
-        api_key, f"/sites/{site_uuid}",
-        plugin_settings=plugin_settings,
-        operation_name=f"resolve site {site_uuid}"
-    )
+    try:
+        data = rest_request(
+            api_key, f"/sites/{site_uuid}",
+            plugin_settings=plugin_settings,
+            operation_name=f"resolve site {site_uuid}"
+        )
+    except stashbox_api.StashBoxAPIError as e:
+        if e.status_code == 404:
+            raise SiteNotFound(
+                f"this studio isn't on ThePornDB (no site with ID {site_uuid}). "
+                "Check the studio's ThePornDB link in Stash.", status_code=404) from None
+        raise
 
-    if not isinstance(data, dict) or not isinstance(data.get("data"), dict):
-        log.LogWarning(f"TPDB: Could not resolve site UUID {site_uuid}")
-        return None
+    site_data = data.get("data") if isinstance(data, dict) else None
+    site_id = site_data.get("id") if isinstance(site_data, dict) else None
+    if site_id is None or isinstance(site_id, bool):
+        log.LogWarning(f"TPDB: Could not resolve site UUID {site_uuid}: unexpected reply")
+        raise stashbox_api.StashBoxAPIError(
+            f"ThePornDB returned an unexpected reply for site {site_uuid} (no numeric ID)")
 
-    site_data = data["data"]
-    site_id = site_data.get("id")
-    if site_id is not None:
-        _site_id_cache[site_uuid] = site_id
-        log.LogDebug(f"TPDB: Resolved site {site_uuid} → numeric ID {site_id}")
-        return site_id
-
-    log.LogWarning(f"TPDB: Site {site_uuid} has no numeric ID")
-    return None
+    _site_id_cache[site_uuid] = site_id
+    log.LogDebug(f"TPDB: Resolved site {site_uuid} → numeric ID {site_id}")
+    return site_id
 
 
 # ============================================================================
@@ -351,11 +393,13 @@ def query_scenes_page(api_key, entity_type, entity_stash_id, page=1,
     Fetch a single page of scenes from TPDB for pagination.
 
     Dispatches to performer/studio-specific queries based on entity_type.
-    Tags return empty results (TPDB tag taxonomy differs from stash-box).
 
     Returns:
         dict with scenes, count, page, has_more — same as stashbox_api.query_scenes_page
-        Returns None on error.
+
+    Raises:
+        StashBoxAPIError: a failed request or an unexpected reply; for a tag (ThePornDB
+            can't list scenes by tag) or a studio that isn't on ThePornDB.
     """
     if entity_type == "performer":
         return _query_scenes_by_performer(
@@ -368,11 +412,10 @@ def query_scenes_page(api_key, entity_type, entity_stash_id, page=1,
             plugin_settings
         )
     elif entity_type == "tag":
-        log.LogInfo("TPDB: Tag-based scene queries are not supported (different taxonomy)")
-        return {"scenes": [], "count": 0, "page": page, "has_more": False}
+        # An empty, complete answer would read as "you have every scene"
+        raise stashbox_api.StashBoxAPIError(TAG_VIEWS_UNSUPPORTED)
     else:
-        log.LogError(f"TPDB: Unknown entity type: {entity_type}")
-        return None
+        raise stashbox_api.StashBoxAPIError(f"Unknown entity type: {entity_type}")
 
 
 def query_scenes_browse(api_key, page=1, per_page=100, sort="DATE",
@@ -396,8 +439,11 @@ def query_scenes_browse(api_key, page=1, per_page=100, sort="DATE",
 
     Returns:
         dict with scenes, count, page, has_more, favorites_limited (more favorites
-        than MAX_BROWSE_QUERIES, so the extra ones were left out); None on failure.
-        Raises StashBoxAPIError on an auth or rate-limit failure.
+        than MAX_BROWSE_QUERIES, so the extra ones were left out).
+
+    Raises:
+        StashBoxAPIError: a failed request or unexpected reply, a favorite studio whose
+            lookup failed, or favorite studios none of which are on ThePornDB.
     """
     # The scenes endpoint takes one performer and one site_id per request. Its
     # performers[]/tags[] parameters are keyed by numeric TPDB ids, which Stash's
@@ -407,12 +453,15 @@ def query_scenes_browse(api_key, page=1, per_page=100, sort="DATE",
     performers = sorted(performer_ids) if performer_ids else [None]
     site_ids = []
     for studio_uuid in sorted(studio_ids) if studio_ids else []:
-        site_id = resolve_site_id(api_key, studio_uuid, plugin_settings)
-        if site_id:
-            site_ids.append(site_id)
+        try:
+            site_ids.append(resolve_site_id(api_key, studio_uuid, plugin_settings))
+        except SiteNotFound:
+            # Not on ThePornDB, so it has no scenes there; any other failure is a failed page
+            log.LogWarning(f"TPDB: favorite studio {studio_uuid} isn't on ThePornDB; skipped")
     if studio_ids and not site_ids:
-        return {"scenes": [], "count": 0, "page": page, "has_more": False,
-                "favorites_limited": False}
+        raise stashbox_api.StashBoxAPIError(
+            "none of your favorite studios linked to ThePornDB are on ThePornDB "
+            "(their links may be stale). Check the studios' ThePornDB links in Stash.", status_code=404)
     sites = site_ids or [None]
 
     combos = [(p, s) for p in performers for s in sites]
@@ -433,8 +482,6 @@ def query_scenes_browse(api_key, page=1, per_page=100, sort="DATE",
             params["site_id"] = site_id
         result = _fetch_scenes(api_key, "/scenes", params, page, per_page,
                                plugin_settings, "browse scenes")
-        if result is None:
-            return None
         count += result["count"]
         has_more = has_more or result["has_more"]
         for scene in result["scenes"]:
@@ -504,12 +551,10 @@ def _query_scenes_by_performer(api_key, performer_stash_id, page, per_page,
 
 def _query_scenes_by_studio(api_key, studio_stash_id, page, per_page,
                               sort, direction, plugin_settings):
-    """Query TPDB for scenes from a studio."""
-    # Resolve site UUID → numeric ID
+    """Query TPDB for scenes from a studio. Raises StashBoxAPIError (SiteNotFound when
+    ThePornDB has no such studio)."""
+    # Resolve site UUID → numeric ID; a failed lookup is a failed page, not an empty one
     site_id = resolve_site_id(api_key, studio_stash_id, plugin_settings)
-    if site_id is None:
-        log.LogWarning(f"TPDB: Cannot query scenes — failed to resolve studio {studio_stash_id}")
-        return {"scenes": [], "count": 0, "page": page, "has_more": False}
 
     params = {
         "page": page,
@@ -534,7 +579,11 @@ def _fetch_scenes(api_key, path, params, page, per_page, plugin_settings,
     Fetch scenes from a TPDB endpoint, transform, and return in standard format.
 
     Returns:
-        dict with scenes, count, page, has_more — or None on error
+        dict with scenes, count, page, has_more
+
+    Raises:
+        StashBoxAPIError: the request failed, or the reply has no list of scenes (that
+            says nothing about the scenes, so it is not an empty page).
     """
     data = rest_request(
         api_key, path, params=params,
@@ -542,15 +591,13 @@ def _fetch_scenes(api_key, path, params, page, per_page, plugin_settings,
         operation_name=operation_name
     )
 
-    if not isinstance(data, dict):
-        if data is not None:
-            log.LogWarning(f"TPDB {operation_name}: unexpected response of type {type(data).__name__}")
-        return None
-
     # TPDB wraps results in a "data" key with pagination in "meta"
-    scenes_data = data.get("data")
+    scenes_data = data.get("data") if isinstance(data, dict) else None
     if not isinstance(scenes_data, list):
-        scenes_data = []
+        shape = type(data).__name__ if not isinstance(data, dict) else f"data is {type(scenes_data).__name__}"
+        log.LogWarning(f"TPDB {operation_name}: unexpected response ({shape})")
+        raise stashbox_api.StashBoxAPIError(
+            f"ThePornDB returned an unexpected reply for {operation_name} (no list of scenes)")
     meta = data.get("meta")
     if not isinstance(meta, dict):
         meta = {}

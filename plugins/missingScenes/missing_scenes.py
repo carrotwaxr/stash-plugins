@@ -1813,6 +1813,10 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
                      f"Please use the Tagger to link this {entity_type} first."
         }
 
+    if entity_type == "tag" and theporndb_api.is_theporndb(stashdb_url):
+        # Its REST API has no scenes-by-tag listing; an empty page would read as "all found"
+        return {"error": theporndb_api.TAG_VIEWS_UNSUPPORTED}
+
     # A cursor must come from this search: same entity, same endpoint, a sane position
     cursor_state = None
     if cursor:
