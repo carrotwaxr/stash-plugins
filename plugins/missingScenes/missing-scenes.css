@@ -767,3 +767,27 @@
   color: #ffc107;
   align-self: center;
 }
+
+/* Fingerprint index note: the count owned by fingerprint, or the Build button */
+.ms-fingerprint-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 20px;
+  background: #1c1c1c;
+  border-bottom: 1px solid #333;
+  font-size: 13px;
+  color: #bbb;
+}
+
+.ms-browse-page .ms-fingerprint-note {
+  margin-bottom: 15px;
+  padding: 8px 15px;
+  border: 1px solid #333;
+  border-radius: 6px;
+}
+
+.ms-fingerprint-note .ms-build-fp-btn {
+  flex-shrink: 0;
+}

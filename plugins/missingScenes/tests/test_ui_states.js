@@ -47,15 +47,18 @@ function deferred() {
 function modalSetup(fetchResponses) {
   const ms = loadMissingScenes({ fetchResponses });
   const els = {};
-  for (const id of ["ms-results", "ms-stats", "ms-status", "ms-load-more-btn", "ms-add-all-btn"]) {
+  for (const id of ["ms-results", "ms-stats", "ms-status", "ms-load-more-btn", "ms-add-all-btn",
+    "ms-fingerprint"]) {
     els[id] = createElement("div");
   }
   // like a real element, assigning innerHTML drops the children
-  let html = "";
-  Object.defineProperty(els["ms-results"], "innerHTML", {
-    get: () => html,
-    set: (v) => { html = v; els["ms-results"].children = []; },
-  });
+  for (const id of ["ms-results", "ms-fingerprint"]) {
+    let html = "";
+    Object.defineProperty(els[id], "innerHTML", {
+      get: () => html,
+      set: (v) => { html = v; els[id].children = []; },
+    });
+  }
   ms.document.getElementById = (id) => els[id] || null;
   return { ms, els, m: ms.exports.modal };
 }
@@ -302,6 +305,137 @@ test("browse: stats say missing only for the estimate; final Load More hidden", 
   const ce = browseContainer();
   await e.exports.browse.performSearch(ce, true);
   assert.ok(/of ~120 missing/.test(ce.innerHTML), ce.innerHTML);
+});
+
+// ---------------- fingerprint index (#160) ----------------
+
+/** RunPluginOperation that answers per operation; records every call's args. */
+function byOperation(handlers) {
+  const calls = [];
+  const handler = (body) => {
+    const args = body.variables.args;
+    calls.push(args);
+    const h = handlers[args.operation];
+    return wrap(typeof h === "function" ? h(args, calls) : h);
+  };
+  return { calls, handler };
+}
+const ops = (calls, name) => calls.filter((a) => a.operation === name);
+
+test("modal: renders the count owned by fingerprint, summed over Load More", async () => {
+  let n = 0;
+  const { els, m } = modalSetup({
+    RunPluginOperation: () => wrap(++n === 1
+      ? okPage({ fingerprint_index: true, fingerprint_matching: true, fingerprint_index_complete: true,
+          owned_by_fingerprint: 2, has_more: true, is_complete: false, cursor: "c1" })
+      : okPage({ fingerprint_index: true, fingerprint_matching: true, fingerprint_index_complete: true,
+          owned_by_fingerprint: 3, missing_scenes: [scene("b")] })),
+  });
+  await m.performSearch(true);
+  assert.ok(text(els["ms-fingerprint"]).includes("2 counted as owned by fingerprint"), text(els["ms-fingerprint"]));
+  assert.ok(!findButton(els["ms-fingerprint"], "Build fingerprint index"), "no build button with an index");
+  await m.performSearch(false);
+  assert.ok(text(els["ms-fingerprint"]).includes("5 counted as owned by fingerprint"), text(els["ms-fingerprint"]));
+  await m.performSearch(true);
+  assert.ok(!text(els["ms-fingerprint"]).includes("5 counted"), "a new search starts the count again");
+});
+
+test("modal: no index shows the Build button; it runs the operation, then searches again", async () => {
+  let built = false;
+  const r = byOperation({
+    find_missing: () => okPage(built
+      ? { fingerprint_index: true, fingerprint_matching: true, fingerprint_index_complete: true, owned_by_fingerprint: 1 }
+      : { fingerprint_index: false, fingerprint_matching: true, owned_by_fingerprint: 0 }),
+    build_fingerprint_index: () => { built = true; return { success: true, scanned: 10, queried: 10, matched: 4, partial: false, complete: true }; },
+  });
+  const { ms, els, m } = modalSetup({ RunPluginOperation: r.handler });
+  await m.performSearch(true);
+  const t = text(els["ms-fingerprint"]);
+  assert.ok(t.includes("Settings > Tasks"), t);
+  const btn = findButton(els["ms-fingerprint"], "Build fingerprint index");
+  assert.ok(btn, "build button");
+  click(btn);
+  await flush(ms);
+  assert.strictEqual(ops(r.calls, "build_fingerprint_index").length, 1);
+  const finds = ops(r.calls, "find_missing");
+  assert.strictEqual(finds.length, 2, "searched again after the build");
+  assert.ok(!finds[1].cursor, "a fresh search");
+  assert.ok(r.calls.indexOf(finds[1]) > r.calls.indexOf(ops(r.calls, "build_fingerprint_index")[0]));
+  const t2 = text(els["ms-fingerprint"]);
+  assert.ok(t2.includes("1 counted as owned by fingerprint"), t2);
+  assert.ok(t2.includes("4"), "reports what the build matched: " + t2);
+  assert.ok(!findButton(els["ms-fingerprint"], "Build fingerprint index"));
+});
+
+test("modal: a failed build shows its error and doesn't search again", async () => {
+  const r = byOperation({
+    find_missing: () => okPage({ fingerprint_index: false, fingerprint_matching: true }),
+    build_fingerprint_index: { success: false, error: "StashDB refused the request (HTTP 401)",
+      auth_error: true, scanned: 5, queried: 0, matched: 0, partial: false },
+  });
+  const { ms, els, m } = modalSetup({ RunPluginOperation: r.handler });
+  await m.performSearch(true);
+  click(findButton(els["ms-fingerprint"], "Build fingerprint index"));
+  await flush(ms);
+  assert.ok(text(els["ms-fingerprint"]).includes("HTTP 401"), text(els["ms-fingerprint"]));
+  assert.strictEqual(ops(r.calls, "find_missing").length, 1);
+  assert.ok(findButton(els["ms-fingerprint"], "Build fingerprint index"), "can try again");
+});
+
+test("modal: an incomplete index offers the build; matching turned off offers nothing", async () => {
+  const a = modalSetup({ RunPluginOperation: () => wrap(okPage({ fingerprint_index: true,
+    fingerprint_matching: true, fingerprint_index_complete: false, owned_by_fingerprint: 0 })) });
+  await a.m.performSearch(true);
+  assert.ok(/incomplete/i.test(text(a.els["ms-fingerprint"])), text(a.els["ms-fingerprint"]));
+  assert.ok(findButton(a.els["ms-fingerprint"], "Build fingerprint index"));
+
+  const b = modalSetup({ RunPluginOperation: () => wrap(okPage({ fingerprint_index: false,
+    fingerprint_matching: false, owned_by_fingerprint: 0 })) });
+  await b.m.performSearch(true);
+  assert.ok(!findButton(b.els["ms-fingerprint"], "Build fingerprint index"));
+  assert.ok(!/fingerprint/i.test(text(b.els["ms-fingerprint"])), text(b.els["ms-fingerprint"]));
+});
+
+test("browse: renders the count owned by fingerprint", async () => {
+  const ms = loadMissingScenes({
+    fetchResponses: { RunPluginOperation: () => wrap(okPage({ fingerprint_index: true,
+      fingerprint_matching: true, fingerprint_index_complete: true, owned_by_fingerprint: 7 })) },
+  });
+  const c = browseContainer();
+  await ms.exports.browse.performSearch(c, true);
+  assert.ok(text(c).includes("7 counted as owned by fingerprint"), text(c));
+  assert.ok(!c.innerHTML.includes("ms-build-fp-btn"));
+});
+
+test("browse: no index shows the Build button; it runs the operation, then browses again", async () => {
+  let built = false;
+  const r = byOperation({
+    browse_stashdb: () => okPage(built
+      ? { fingerprint_index: true, fingerprint_matching: true, fingerprint_index_complete: true, owned_by_fingerprint: 2 }
+      : { fingerprint_index: false, fingerprint_matching: true, owned_by_fingerprint: 0 }),
+    build_fingerprint_index: () => { built = true; return { success: true, scanned: 3, queried: 3, matched: 2, partial: false, complete: true }; },
+  });
+  const ms = loadMissingScenes({ fetchResponses: { RunPluginOperation: r.handler } });
+  const c = browseContainer();
+  await ms.exports.browse.performSearch(c, true);
+  assert.ok(/Settings (>|&gt;) Tasks/.test(text(c)), text(c));
+  const btn = c.querySelector("#ms-build-fp-btn");
+  assert.ok(btn && btn.listeners.click, "build button");
+  btn.listeners.click[0]({});
+  await flush(ms);
+  assert.strictEqual(ops(r.calls, "build_fingerprint_index").length, 1);
+  assert.strictEqual(ops(r.calls, "browse_stashdb").length, 2, "browsed again after the build");
+  assert.ok(text(c).includes("2 counted as owned by fingerprint"), text(c));
+  assert.ok(!c.innerHTML.includes("ms-build-fp-btn"));
+});
+
+test("core: a build result with an error still reaches the caller", async () => {
+  const partial = { success: false, error: "StashDB failed", scanned: 85, queried: 40, matched: 1, partial: true };
+  const ms = loadMissingScenes({ fetchResponses: { RunPluginOperation: () => wrap(partial) } });
+  const res = await ms.exports.core.buildFingerprintIndex("https://stashdb.org/graphql");
+  assert.strictEqual(res.queried, 40);
+  assert.strictEqual(ms.fetchCalls[0].body.variables.args.operation, "build_fingerprint_index");
+  assert.strictEqual(ms.fetchCalls[0].body.variables.args.endpoint, "https://stashdb.org/graphql");
 });
 
 (async () => {

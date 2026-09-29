@@ -11,6 +11,10 @@
     isStashdbEndpoint,
     describeWhisparrAdd,
     describeWhisparrStatusError,
+    buildFingerprintIndex,
+    describeFingerprintIndex,
+    describeFingerprintBuild,
+    fingerprintFields,
     createSceneCard: coreCreateSceneCard,
   } = Core;
 
@@ -26,6 +30,13 @@
   let whisparrConfigured = false;
   let whisparrError = null; // set when the Whisparr status map could not be fetched
   let stashdbUrl = "";
+  let stashdbName = "";
+
+  // Fingerprint index state (the note under the stats)
+  let fingerprintInfo = null; // fingerprint fields of the last response
+  let ownedByFingerprint = 0; // scenes left out as owned by fingerprint, over the pages loaded
+  let fingerprintBuild = { running: false, message: null }; // a build started from the modal
+  let modalSession = 0; // bumped when the modal closes, so a late build result is dropped
 
   // Endpoint selection state (for entities with multiple stash-box links)
   let availableEndpoints = []; // [{endpoint, name, stash_id}]
@@ -123,6 +134,12 @@
     stats.className = "ms-stats-bar";
     stats.id = "ms-stats";
 
+    // Fingerprint index note (count owned by fingerprint, or the Build button)
+    const fingerprintNote = document.createElement("div");
+    fingerprintNote.className = "ms-fingerprint-note";
+    fingerprintNote.id = "ms-fingerprint";
+    fingerprintNote.style.display = "none";
+
     // Sort controls
     const sortControls = document.createElement("div");
     sortControls.className = "ms-sort-controls";
@@ -161,6 +178,7 @@
     // Assemble modal
     modal.appendChild(header);
     modal.appendChild(stats);
+    modal.appendChild(fingerprintNote);
     modal.appendChild(sortControls);
     modal.appendChild(filterControls);
     modal.appendChild(body);
@@ -367,6 +385,68 @@
     // Invalidate any in-flight request so a late response cannot touch a closed modal
     requestToken++;
     isLoading = false;
+    modalSession++;
+    fingerprintInfo = null;
+    ownedByFingerprint = 0;
+    fingerprintBuild = { running: false, message: null };
+  }
+
+  /**
+   * Render the fingerprint note: how many scenes count as owned by fingerprint, or a
+   * "Build fingerprint index" button when the stash-box has no (complete) index
+   */
+  function renderFingerprintNote() {
+    const el = document.getElementById("ms-fingerprint");
+    if (!el) return;
+    const note = describeFingerprintIndex(fingerprintInfo, ownedByFingerprint, fingerprintBuild, stashdbName);
+    el.innerHTML = "";
+    el.style.display = note.text || note.button ? "" : "none";
+    if (note.text) {
+      const span = document.createElement("span");
+      span.className = "ms-fingerprint-text";
+      span.textContent = note.text;
+      el.appendChild(span);
+    }
+    if (note.button) {
+      const btn = document.createElement("button");
+      btn.className = "ms-btn ms-btn-secondary ms-build-fp-btn";
+      btn.textContent = note.running ? "Building fingerprint index..." : "Build fingerprint index";
+      btn.disabled = note.running;
+      btn.onclick = handleBuildFingerprintIndex;
+      el.appendChild(btn);
+    }
+  }
+
+  /**
+   * Build the fingerprint index for this stash-box, then search again so it counts
+   */
+  async function handleBuildFingerprintIndex() {
+    if (fingerprintBuild.running) return;
+    const session = modalSession;
+    fingerprintBuild = { running: true, message: null };
+    renderFingerprintNote();
+    setStatus("Building the fingerprint index...", "loading");
+
+    let result;
+    try {
+      result = await buildFingerprintIndex(selectedEndpoint);
+    } catch (error) {
+      if (session !== modalSession) return;
+      fingerprintBuild = { running: false, message: `Fingerprint index: ${error.message || "the build failed"}` };
+      renderFingerprintNote();
+      setStatus(fingerprintBuild.message, "error");
+      return;
+    }
+    if (session !== modalSession) return;
+
+    fingerprintBuild = { running: false, message: describeFingerprintBuild(result) };
+    renderFingerprintNote();
+    if (result.error && !result.partial) {
+      // Nothing new was stored, so a new search would look the same
+      setStatus(fingerprintBuild.message, "error");
+      return;
+    }
+    await performSearch(true);
   }
 
   /**
@@ -767,6 +847,10 @@
       isComplete = false;
       missingScenes = [];
       currentWarning = null;
+      // The note waits for this search's answer (the endpoint may have changed)
+      fingerprintInfo = null;
+      ownedByFingerprint = 0;
+      renderFingerprintNote();
       showLoading();
     }
 
@@ -810,7 +894,10 @@
       whisparrConfigured = result.whisparr_configured || false;
       whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
+      stashdbName = result.stashdb_name || stashdbName;
       activeFilterTagIds = result.active_filter_tag_ids || [];
+      fingerprintInfo = fingerprintFields(result);
+      ownedByFingerprint += Number(result.owned_by_fingerprint) || 0;
 
       // Update pagination state
       currentCursor = result.cursor;
@@ -822,6 +909,7 @@
         : null;
 
       updateStats(result);
+      renderFingerprintNote();
       renderResults();
 
       if (failureText) {
@@ -1001,6 +1089,8 @@
       showError,
       createModal,
       removeModal,
+      renderFingerprintNote,
+      handleBuildFingerprintIndex,
       SORT_OPTIONS,
       directionFor,
       setSortField: (value) => { sortField = value; },

@@ -18,11 +18,13 @@ import base64
 import os
 import time
 import hashlib
+import sqlite3
 import tempfile
 
 # Import Stash-compatible logging
 import log
 import plugin_data
+import fingerprint_index
 
 # Import resilient StashDB API utilities
 import stashbox_api
@@ -1190,6 +1192,168 @@ def count_local_scenes_for_entity(endpoint: str, entity_type: str, entity_id: st
 
 
 # ============================================================================
+# Fingerprint Index (scenes owned by fingerprint, #160)
+# ============================================================================
+
+FINGERPRINT_LIST_PAGE = 1000
+
+
+def fingerprint_ownership(endpoint, plugin_settings, local_ids):
+    """The stash-box scenes owned by fingerprint only, and the response fields about it.
+
+    The index counts when the ignoreFingerprintMatches setting is off (the default) and
+    an index for this endpoint has been built (a partial build counts).
+
+    Returns:
+        (ids, fields): the index's matched scene ids not already in local_ids, and
+        {fingerprint_matching, fingerprint_index, fingerprint_index_complete (with an index)}.
+    """
+    if plugin_settings.get("ignoreFingerprintMatches"):
+        return set(), {"fingerprint_matching": False, "fingerprint_index": False}
+    index = fingerprint_index.read_index(CACHE_DIR, endpoint)
+    if index is None:
+        return set(), {"fingerprint_matching": True, "fingerprint_index": False}
+    return {i for i in index["stash_ids"] if i not in local_ids}, {
+        "fingerprint_matching": True,
+        "fingerprint_index": True,
+        "fingerprint_index_complete": index["complete"],
+    }
+
+
+def list_scenes_without_stash_id(endpoint):
+    """Every local scene with no stash_id for the endpoint: id, updated_at, and its files'
+    duration and fingerprints.
+
+    Uses stash_id_endpoint {endpoint, modifier: IS_NULL}. Stash puts the endpoint in the
+    LEFT JOIN on scene_stash_ids and keeps rows whose stash_id is NULL
+    (pkg/sqlite/criterion_handlers.go, stashIDCriterionHandler), so this lists untagged
+    scenes and scenes tagged only on other boxes.
+
+    Raises:
+        RuntimeError: Stash didn't answer.
+    """
+    scenes = []
+    page = 1
+    while True:
+        result = stash_graphql("""
+            query FingerprintIndexScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {
+                findScenes(filter: $filter, scene_filter: $scene_filter) {
+                    count
+                    scenes {
+                        id
+                        updated_at
+                        files {
+                            duration
+                            fingerprints {
+                                type
+                                value
+                            }
+                        }
+                    }
+                }
+            }
+        """, {
+            "filter": {"page": page, "per_page": FINGERPRINT_LIST_PAGE, "sort": "id", "direction": "ASC"},
+            "scene_filter": {"stash_id_endpoint": {"endpoint": endpoint, "modifier": "IS_NULL"}},
+        })
+        if not result:
+            raise RuntimeError("Stash didn't answer the scene query (no response)")
+        find_scenes = result.get("findScenes") or {}
+        batch = find_scenes.get("scenes") or []
+        scenes.extend(scene for scene in batch if isinstance(scene, dict))
+        if not batch or page * FINGERPRINT_LIST_PAGE >= (find_scenes.get("count") or 0):
+            return scenes
+        page += 1
+
+
+def build_fingerprint_index(plugin_settings, endpoint=None, progress=None):
+    """Build or update the fingerprint index for one stash-box (the operation, and the task per box).
+
+    Args:
+        plugin_settings: Plugin configuration (request delay, retries)
+        endpoint: stash-box GraphQL URL; default the stashBoxEndpoint setting, else the first box
+        progress: optional progress(fraction), for the task
+
+    Returns:
+        fingerprint_index.build's counts (scanned, skipped, no_fingerprints, queried,
+        remaining, matched, owned, partial, complete, and error/auth_error/rate_limited
+        after a failed lookup) plus success, endpoint, stashdb_name and elapsed_ms.
+        Just {"error"} when the stash-box isn't configured or Stash can't list the scenes.
+    """
+    boxes = get_stashbox_config()
+    if not boxes:
+        return {"error": "No stash-box endpoints configured in Stash settings"}
+    target = (endpoint or plugin_settings.get("stashBoxEndpoint") or "").strip()
+    box = next((b for b in boxes if b.get("endpoint") == target), None) if target else boxes[0]
+    if box is None:
+        available = ", ".join(b.get("name") or b.get("endpoint", "") for b in boxes)
+        return {"error": f"Stash-box endpoint '{target}' not found. Available: {available}"}
+
+    url = box["endpoint"]
+    name = box.get("name") or url
+    started = time.time()
+    try:
+        scenes = list_scenes_without_stash_id(url)
+    except Exception as e:
+        msg = f"Could not list the local scenes without a {name} ID: {e}"
+        log.LogError(msg)
+        return {"error": msg}
+    log.LogInfo(f"Fingerprint index for {name}: {len(scenes)} local scenes have no {name} ID")
+
+    def lookup(batches):
+        return stashbox_api.find_scenes_by_fingerprints(url, box.get("api_key", ""), batches,
+                                                        plugin_settings=plugin_settings)
+
+    try:
+        result = fingerprint_index.build(
+            CACHE_DIR, url, scenes, lookup,
+            request_delay=stashbox_api.get_config(plugin_settings, "request_delay"),
+            box_name=name, progress=progress)
+    except (sqlite3.Error, OSError) as e:
+        msg = f"Could not write the fingerprint index for {name}: {e}"
+        log.LogError(msg)
+        return {"error": msg}
+
+    result.update({
+        "success": "error" not in result,
+        "endpoint": url,
+        "stashdb_name": name,
+        "elapsed_ms": int((time.time() - started) * 1000),
+    })
+    summary = (f"Fingerprint index for {name}: {result['scanned']} scenes without a {name} ID, "
+               f"{result['queried']} looked up, {result['skipped']} unchanged, "
+               f"{result['no_fingerprints']} without fingerprints; {result['matched']} match "
+               f"{result['owned']} {name} scenes")
+    if "error" in result:
+        log.LogWarning(f"{summary}. Stopped early: {result['error']}")
+    else:
+        log.LogInfo(summary)
+    return result
+
+
+def task_build_fingerprint_index(plugin_settings):
+    """Task: build the fingerprint index for every configured stash-box.
+
+    Returns {success, results: [build_fingerprint_index result per box]}; one box failing
+    doesn't stop the others.
+    """
+    boxes = get_stashbox_config()
+    if not boxes:
+        msg = "No stash-box endpoints configured in Stash settings"
+        log.LogWarning(msg)
+        return {"success": False, "error": msg, "results": []}
+    results = []
+    for i, box in enumerate(boxes):
+        def progress(fraction, i=i):
+            log.LogProgress((i + fraction) / len(boxes))
+        result = build_fingerprint_index(plugin_settings, endpoint=box["endpoint"], progress=progress)
+        result.setdefault("endpoint", box["endpoint"])
+        results.append(result)
+        log.LogProgress((i + 1) / len(boxes))
+    return {"success": all(r.get("success") for r in results), "results": results}
+
+
+# ============================================================================
 # Fetch Until Full Pagination
 # ============================================================================
 
@@ -1261,6 +1425,10 @@ def scene_has_excluded_tags(scene, excluded_tag_ids):
 # Keys a fill result carries after a stash-box failure; the responses pass them through.
 FETCH_FAILURE_KEYS = ("error", "partial", "auth_error", "rate_limited", "retry_after")
 
+# A response with one of these keys carries results the UI renders even with an error:
+# scenes (find_missing, browse_stashdb) or a fingerprint index build's counts.
+RESULT_KEYS = ("missing_scenes", "scanned")
+
 
 def _fetch_error_message(error, box_name, page):
     """A message for the UI naming the box and saying what to do."""
@@ -1274,7 +1442,7 @@ def _fetch_error_message(error, box_name, page):
 
 
 def _fill_page(fetch_page, qualifies, page_size, start_page, start_offset,
-               plugin_settings, cursor_state, box_name):
+               plugin_settings, cursor_state, box_name, passed_over=None):
     """Fetch stash-box pages from (start_page, start_offset) until page_size scenes qualify.
 
     Shared by the missing-scenes and browse views.
@@ -1289,6 +1457,8 @@ def _fill_page(fetch_page, qualifies, page_size, start_page, start_offset,
         plugin_settings: for `stashbox_request_delay`, slept between pages.
         cursor_state: the fields every cursor from this request carries (sort, endpoint...).
         box_name: the stash-box's name, for error messages.
+        passed_over: optional passed_over(scene), called once for each scene this request
+            skips for good (didn't qualify, and the next cursor starts after it).
 
     Stops at a full page, the last stash-box page, MAX_PAGES_PER_REQUEST pages
     (with a cursor to carry on), or a failed page.
@@ -1346,16 +1516,23 @@ def _fill_page(fetch_page, qualifies, page_size, start_page, start_offset,
                 if len(collected) >= page_size:
                     filled_at = i
                     break
+            elif passed_over:
+                passed_over(scenes[i])
 
         if filled_at is not None:
             # Resume after the last scene taken, unless nothing after it can qualify:
             # then a "Load more" would only come back empty.
-            if any(qualifies(scene) for scene in scenes[filled_at + 1:]):
+            rest = scenes[filled_at + 1:]
+            if any(qualifies(scene) for scene in rest):
                 resume = (page, filled_at + 1)
-            elif result.get("has_more"):
-                resume = (page + 1, 0)
             else:
-                is_complete = True
+                if passed_over:
+                    for scene in rest:
+                        passed_over(scene)
+                if result.get("has_more"):
+                    resume = (page + 1, 0)
+                else:
+                    is_complete = True
             break
 
         if not result.get("has_more"):
@@ -1390,7 +1567,7 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
                      sort="DATE", direction="DESC", plugin_settings=None,
                      favorite_performer_ids=None, favorite_studio_ids=None,
                      favorite_tag_ids=None, excluded_tag_ids=None,
-                     box_name="The stash-box"):
+                     box_name="The stash-box", fingerprint_ids=None):
     """
     Fetch scenes from StashDB until we have page_size missing scenes.
 
@@ -1415,11 +1592,14 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
         favorite_tag_ids: Set of favorite tag stash_ids to filter by, or None
         excluded_tag_ids: Set of tag stash_ids to exclude, or None
         box_name: stash-box name for error messages
+        fingerprint_ids: stash-box scene ids owned by fingerprint only (not in local_ids),
+            from the fingerprint index; treated as owned
 
     Returns:
         dict from _fill_page: scenes, total_on_stashdb, next_cursor, is_complete,
         stashdb_pages_fetched, plus error/partial/auth_error/rate_limited/retry_after
-        after a failure.
+        after a failure, and owned_by_fingerprint: how many scenes this request left out
+        only because the fingerprint index owns them.
     """
     page_size = min(page_size, PAGE_SIZE_MAX)
     is_tpdb = theporndb_api.is_theporndb(url)
@@ -1437,13 +1617,19 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
             plugin_settings=plugin_settings
         )
 
+    fingerprint_ids = fingerprint_ids or set()
+
+    def wanted(scene):
+        # Passes the favorite filters and has no excluded tags
+        return (scene_passes_favorite_filters(scene, favorite_performer_ids,
+                                              favorite_studio_ids, favorite_tag_ids)
+                and not scene_has_excluded_tags(scene, excluded_tag_ids))
+
     def qualifies(scene):
-        # Missing locally, passes the favorite filters, and has no excluded tags
+        # Missing locally (by stash_id and by fingerprint), and wanted
         scene_id = scene.get("id")
         return (bool(scene_id) and scene_id not in local_ids
-                and scene_passes_favorite_filters(scene, favorite_performer_ids,
-                                                  favorite_studio_ids, favorite_tag_ids)
-                and not scene_has_excluded_tags(scene, excluded_tag_ids))
+                and scene_id not in fingerprint_ids and wanted(scene))
 
     cursor_state = {
         "sort": sort,
@@ -1452,8 +1638,31 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
         "entity_stash_id": entity_stash_id,
         "endpoint": url,
     }
-    return _fill_page(fetch_page, qualifies, page_size, stashdb_page, offset,
-                      plugin_settings, cursor_state, box_name)
+    counter = _FingerprintCounter(fingerprint_ids, wanted)
+    result = _fill_page(fetch_page, qualifies, page_size, stashdb_page, offset,
+                        plugin_settings, cursor_state, box_name,
+                        passed_over=counter if fingerprint_ids else None)
+    result["owned_by_fingerprint"] = counter.count
+    return result
+
+
+class _FingerprintCounter:
+    """passed_over for _fill_page: counts the wanted scenes left out only because the
+    fingerprint index owns them."""
+
+    def __init__(self, fingerprint_ids, wanted):
+        self.fingerprint_ids = fingerprint_ids
+        self.wanted = wanted
+        self.seen = set()
+
+    def __call__(self, scene):
+        scene_id = scene.get("id")
+        if scene_id in self.fingerprint_ids and self.wanted(scene):
+            self.seen.add(scene_id)
+
+    @property
+    def count(self):
+        return len(self.seen)
 
 
 # ============================================================================
@@ -1498,6 +1707,11 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
             - is_complete: true if we've checked all StashDB scenes
             - missing_scenes: array of scene objects
             - whisparr_configured: boolean
+            - owned_by_fingerprint: stash-box scenes this response left out only because a
+              local scene without their stash_id matches them by fingerprint
+            - fingerprint_matching: false when the ignoreFingerprintMatches setting is on
+            - fingerprint_index: whether a fingerprint index was used (false when none has
+              been built, or matching is off); fingerprint_index_complete with an index
             After a stash-box failure, also:
             - error: what failed, naming the stash-box
             - partial: true when missing_scenes holds the scenes found before the failure
@@ -1571,8 +1785,9 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
             log.LogWarning(f"Rejected cursor: {e}")
             return {"error": str(e)}
 
-    # Get or build local stash_id cache (for filtering)
+    # Get or build local stash_id cache (for filtering), plus scenes owned by fingerprint
     local_ids = get_or_build_cache(stashdb_url)
+    fingerprint_ids, fingerprint_fields = fingerprint_ownership(stashdb_url, plugin_settings, local_ids)
 
     # Parse excluded tags from settings (for client-side filtering)
     excluded_tags_str = plugin_settings.get("excludedTags", "").strip()
@@ -1655,7 +1870,8 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         favorite_studio_ids=favorite_studio_ids,
         favorite_tag_ids=favorite_tag_ids,
         excluded_tag_ids=excluded_tag_ids,
-        box_name=stashdb_name
+        box_name=stashdb_name,
+        fingerprint_ids=fingerprint_ids,
     )
     first_page_failed = "error" in result and not result.get("partial")
 
@@ -1725,6 +1941,8 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "active_filter_tag_ids": list(favorite_tag_ids) if favorite_tag_ids else [],
         "excluded_tags_applied": len(excluded_tag_ids) > 0 and not theporndb_api.is_theporndb(stashdb_url),
         "cache_info": _get_cache_info(stashdb_url),
+        "owned_by_fingerprint": result.get("owned_by_fingerprint", 0),
+        **fingerprint_fields,
         **{key: result[key] for key in FETCH_FAILURE_KEYS if key in result},
     }
 
@@ -1818,10 +2036,11 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         filter_favorite_tags: Filter by favorite tags
 
     Returns:
-        Dict with missing scenes and metadata. After a stash-box failure it also has
-        error, partial, auth_error, rate_limited (and retry_after), as in
-        find_missing_scenes_paginated; total_on_stashdb is None when the first page failed.
-        A bad cursor gives just {"error"}.
+        Dict with missing scenes and metadata, including owned_by_fingerprint,
+        fingerprint_matching and fingerprint_index as in find_missing_scenes_paginated.
+        After a stash-box failure it also has error, partial, auth_error, rate_limited
+        (and retry_after), as in find_missing_scenes_paginated; total_on_stashdb is None
+        when the first page failed. A bad cursor gives just {"error"}.
     """
     page_size = min(max(1, page_size), PAGE_SIZE_MAX)
 
@@ -1868,8 +2087,9 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
     else:
         stashdb_page, offset = 1, 0
 
-    # Get local stash_id cache
+    # Get local stash_id cache, plus scenes owned by fingerprint
     local_ids = get_or_build_cache(stashdb_url)
+    fingerprint_ids, fingerprint_fields = fingerprint_ownership(stashdb_url, plugin_settings, local_ids)
 
     # Parse excluded tags from settings
     excluded_tags_str = plugin_settings.get("excludedTags", "").strip()
@@ -1923,15 +2143,20 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
             return result
         return stashbox_api.query_scenes_browse(stashdb_url, stashdb_api_key, page=page, **query_args)
 
+    def wanted(scene):
+        # Passes the favorite filters client-side (the query only handles excludes)
+        return scene_passes_favorite_filters(scene, performer_ids, studio_ids, tag_ids)
+
     def qualifies(scene):
-        # Not owned, and passes the favorite filters client-side (the query only handles excludes)
+        # Not owned (by stash_id or by fingerprint), and wanted
         scene_id = scene.get("id")
         return (bool(scene_id) and scene_id not in local_ids
-                and scene_passes_favorite_filters(scene, performer_ids, studio_ids, tag_ids))
+                and scene_id not in fingerprint_ids and wanted(scene))
 
+    counter = _FingerprintCounter(fingerprint_ids, wanted)
     result = _fill_page(fetch_page, qualifies, page_size, stashdb_page, offset, plugin_settings,
                         {"sort": sort, "direction": direction, "endpoint": stashdb_url},
-                        stashdb_name)
+                        stashdb_name, passed_over=counter if fingerprint_ids else None)
     collected = result["scenes"]
     first_page_failed = "error" in result and not result.get("partial")
 
@@ -1974,6 +2199,8 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         "excluded_tags_applied": len(excluded_tag_ids) > 0 and not is_tpdb,
         **({"favorites_limited": bool(favorites_limited)} if is_tpdb else {}),
         "cache_info": _get_cache_info(stashdb_url),
+        "owned_by_fingerprint": counter.count,
+        **fingerprint_fields,
         **{key: result[key] for key in FETCH_FAILURE_KEYS if key in result},
     }
 
@@ -2582,6 +2809,12 @@ def main():
         print(json.dumps({"output": output}))
         return
 
+    if mode == "build_fingerprint_index":
+        log.LogInfo("Running task: Build Fingerprint Index")
+        output = task_build_fingerprint_index(plugin_settings)
+        print(json.dumps({"output": output}))
+        return
+
     # Handle regular operations (from UI plugin)
     operation = args.get("operation", "")
     output = {"error": "Unknown operation"}
@@ -2696,6 +2929,10 @@ def main():
         elif operation == "test_whisparr":
             output = test_whisparr_connection(plugin_settings)
 
+        elif operation == "build_fingerprint_index":
+            # Long on a large library; the UI recommends the task
+            output = build_fingerprint_index(plugin_settings, endpoint=args.get("endpoint"))
+
         elif operation == "refresh_index":
             endpoint = args.get("endpoint")
             if not endpoint:
@@ -2745,8 +2982,9 @@ def main():
 
     # Wrap output in PluginOutput structure expected by Stash. Stash drops `output`
     # when `error` is set, so a failure that carries results or details the UI renders
-    # (partial scenes, a retry cursor, auth_error) goes out as output with its error field.
-    if "error" in output and "missing_scenes" not in output:
+    # (partial scenes, a retry cursor, auth_error, a build's counts) goes out as output
+    # with its error field.
+    if "error" in output and not any(key in output for key in RESULT_KEYS):
         plugin_output = {"error": output["error"]}
     else:
         plugin_output = {"output": output}

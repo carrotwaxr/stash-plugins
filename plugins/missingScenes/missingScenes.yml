@@ -81,6 +81,12 @@ settings:
     description: Maximum number of favorites to use per filter type (default 100). Favorites are sorted by engagement (performers by last activity, studios/tags by scene count).
     type: NUMBER
 
+  # Fingerprint index
+  ignoreFingerprintMatches:
+    displayName: Ignore Fingerprint Matches
+    description: Off by default, so a stash-box scene counts as owned when one of your scenes without its stash ID (untagged, or tagged on another stash-box) matches it by phash, oshash or md5. The matches come from the Build Fingerprint Index task. Turn on to count only scenes linked by stash ID.
+    type: BOOLEAN
+
 # Tasks that can be run manually or scheduled
 tasks:
   - name: Scan for New Scenes
@@ -95,6 +101,10 @@ tasks:
     description: Check the Whisparr URL, API key, version, root folder and quality profile, and log what is wrong.
     defaultArgs:
       mode: test_whisparr
+  - name: Build Fingerprint Index
+    description: For every configured stash-box, look up your scenes that have no stash ID for it (untagged, or tagged on another box) by phash, oshash and md5, so Missing Scenes counts the scenes they match as owned. Later runs only look up new or changed scenes. Can take a while on a large library.
+    defaultArgs:
+      mode: build_fingerprint_index
 
 # Hook to automatically cleanup Whisparr when a scene is tagged
 hooks:

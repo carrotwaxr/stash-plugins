@@ -11,6 +11,10 @@
     escapeHtml,
     describeWhisparrAdd,
     describeWhisparrStatusError,
+    buildFingerprintIndex,
+    describeFingerprintIndex,
+    describeFingerprintBuild,
+    fingerprintFields,
     createSceneCard,
   } = Core;
 
@@ -57,8 +61,16 @@
   let whisparrConfigured = false;
   let whisparrError = null; // set when the Whisparr status map could not be fetched
   let stashdbUrl = "";
+  let stashdbName = "";
   let availableEndpoints = [];
   let selectedEndpoint = null;
+
+  // Fingerprint index state (the note under the stats)
+  let fingerprintInfo = null; // fingerprint fields of the last response
+  let ownedByFingerprint = 0; // scenes left out as owned by fingerprint, over the pages loaded
+  let fingerprintBuild = { running: false, message: null }; // a build started from this page
+  let pageSession = 0; // bumped when the page is (re)entered or left
+  let lastRenderState = null; // for re-rendering while a build runs
 
   /**
    * Set page title with retry to overcome Stash's title management
@@ -75,6 +87,7 @@
    * Render the browse page content into the container
    */
   function renderPage(container, state) {
+    lastRenderState = state;
     const { loading, error, warning, scenes, stats } = state;
 
     // Build filter checkboxes
@@ -123,6 +136,17 @@
           statsText += ` | Index: ${ci.count.toLocaleString()} scenes (cached)`;
         }
       }
+    }
+
+    // Fingerprint note: the count owned by fingerprint, or the Build button
+    const fpNote = describeFingerprintIndex(fingerprintInfo, ownedByFingerprint, fingerprintBuild, stashdbName);
+    let fingerprintHtml = '';
+    if (fpNote.text || fpNote.button) {
+      const text = fpNote.text ? `<span class="ms-fingerprint-text">${escapeHtml(fpNote.text)}</span>` : '';
+      const button = fpNote.button
+        ? ` <button class="ms-btn ms-btn-secondary ms-build-fp-btn" id="ms-build-fp-btn" ${fpNote.running ? 'disabled' : ''}>${fpNote.running ? 'Building fingerprint index...' : 'Build fingerprint index'}</button>`
+        : '';
+      fingerprintHtml = `<div class="ms-fingerprint-note">${text}${button}</div>`;
     }
 
     // Build results content - placeholder for now, will be replaced with DOM elements
@@ -223,6 +247,7 @@
         </div>
 
         <div class="ms-browse-stats">${escapeHtml(statsText)}</div>
+        ${fingerprintHtml}
         ${whisparrConfigured && whisparrError ? `<div class="ms-warning ms-whisparr-banner"><span class="ms-warning-text">${escapeHtml(describeWhisparrStatusError(whisparrError))}</span></div>` : ''}
         <div class="ms-browse-whisparr-status" id="ms-browse-status"></div>
         ${warning ? `<div class="ms-warning"><span class="ms-warning-text">${escapeHtml(warning)}</span> <button class="ms-btn ms-btn-secondary ms-retry-btn" id="ms-retry-btn">Retry from here</button></div>` : ''}
@@ -286,6 +311,9 @@
       currentCursor = null;
       missingScenes = [];
       hasMore = true;
+      // The note waits for this browse's answer (the endpoint may have changed)
+      fingerprintInfo = null;
+      ownedByFingerprint = 0;
     }
 
     // A newer request (sort/filter/endpoint change) or leaving the page supersedes this one
@@ -327,7 +355,10 @@
       whisparrConfigured = result.whisparr_configured;
       whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
+      stashdbName = result.stashdb_name || stashdbName;
       activeFilterTagIds = result.active_filter_tag_ids || [];
+      fingerprintInfo = fingerprintFields(result);
+      ownedByFingerprint += Number(result.owned_by_fingerprint) || 0;
 
       isLoading = false;
       renderPage(container, {
@@ -358,6 +389,35 @@
         stats: null,
       });
     }
+  }
+
+  /**
+   * Build the fingerprint index for this stash-box, then browse again so it counts
+   */
+  async function handleBuildFingerprintIndex(container) {
+    if (fingerprintBuild.running) return;
+    const session = pageSession;
+    fingerprintBuild = { running: true, message: null };
+    if (lastRenderState) renderPage(container, lastRenderState);
+
+    let result;
+    try {
+      result = await buildFingerprintIndex(selectedEndpoint);
+    } catch (error) {
+      if (session !== pageSession) return;
+      fingerprintBuild = { running: false, message: `Fingerprint index: ${error.message || "the build failed"}` };
+      if (lastRenderState) renderPage(container, lastRenderState);
+      return;
+    }
+    if (session !== pageSession) return;
+
+    fingerprintBuild = { running: false, message: describeFingerprintBuild(result) };
+    if (result.error && !result.partial) {
+      // Nothing new was stored, so browsing again would look the same
+      if (lastRenderState) renderPage(container, lastRenderState);
+      return;
+    }
+    await performSearch(container, true);
   }
 
   /**
@@ -411,6 +471,10 @@
     container.querySelector('#ms-retry-btn')?.addEventListener('click', () => {
       performSearch(container, missingScenes.length === 0);
     });
+
+    container.querySelector('#ms-build-fp-btn')?.addEventListener('click', () => {
+      handleBuildFingerprintIndex(container);
+    });
   }
 
   /**
@@ -429,10 +493,14 @@
 
         // Reset state for fresh page load
         requestToken++;
+        pageSession++;
         missingScenes = [];
         currentCursor = null;
         hasMore = true;
         isLoading = false;
+        fingerprintInfo = null;
+        ownedByFingerprint = 0;
+        fingerprintBuild = { running: false, message: null };
 
         // Fetch available endpoints before first search
         try {
@@ -451,7 +519,7 @@
       init();
 
       // Leaving the page: ignore any response still in flight
-      return () => { requestToken++; };
+      return () => { requestToken++; pageSession++; };
     }, []);
 
     return React.createElement('div', {
@@ -559,6 +627,7 @@
       renderPage,
       performSearch,
       setupControlHandlers,
+      handleBuildFingerprintIndex,
       MissingScenesBrowsePage,
     };
   }

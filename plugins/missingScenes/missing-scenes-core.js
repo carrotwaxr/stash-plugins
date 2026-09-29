@@ -7,6 +7,10 @@
 
   const PLUGIN_ID = "missingScenes";
 
+  // A response with one of these keys carries results to render even when it has an
+  // error: scenes (find_missing, browse_stashdb) or a fingerprint index build's counts
+  const RESULT_KEYS = ["missing_scenes", "scanned"];
+
   /**
    * Get the GraphQL endpoint URL
    */
@@ -70,9 +74,9 @@
       throw new Error("Invalid response from plugin");
     }
 
-    // A response that carries scenes plus an error is a (partial) result the UI
-    // must render; only a plain error (no scenes key) is thrown.
-    if (output.error && !("missing_scenes" in output)) {
+    // A response that carries results plus an error is a (partial) result the UI
+    // must render; only a plain error (no results key) is thrown.
+    if (output.error && !RESULT_KEYS.some((key) => key in output)) {
       throw new Error(output.error);
     }
 
@@ -96,6 +100,75 @@
         : " The stash-box is rate-limited, try again shortly.";
     }
     return msg;
+  }
+
+  /**
+   * Build or update the fingerprint index for a stash-box (the backend's default box when
+   * endpoint is empty). Resolves with the counts, which carry `error` when the build
+   * stopped early; throws when nothing could be done (no such box, Stash unreachable).
+   */
+  async function buildFingerprintIndex(endpoint) {
+    const args = { operation: "build_fingerprint_index" };
+    if (endpoint) args.endpoint = endpoint;
+    return runPluginOperation(args);
+  }
+
+  const FINGERPRINT_TASK_HINT = "Build it from Settings > Tasks (Build Fingerprint Index), or here.";
+
+  /**
+   * The fingerprint note under a view's stats. Plain text (escape before HTML).
+   * info: the last response's fingerprint fields; owned: scenes left out as owned by
+   * fingerprint so far; build: {running, message} of a build started from the view.
+   * Returns {text, button, running}; button is true when "Build fingerprint index" shows.
+   */
+  function describeFingerprintIndex(info, owned, build, boxName) {
+    const parts = [];
+    let button = false;
+    const box = boxName || "this stash-box";
+    if (info && info.fingerprint_matching !== false && typeof info.fingerprint_index === "boolean") {
+      if (!info.fingerprint_index) {
+        parts.push(`No fingerprint index for ${box} yet, so scenes you have without a ${box} ID show as missing. ${FINGERPRINT_TASK_HINT}`);
+        button = true;
+      } else {
+        if (owned > 0) parts.push(`${owned} counted as owned by fingerprint.`);
+        if (info.fingerprint_index_complete === false) {
+          parts.push(`The fingerprint index is incomplete: its last build stopped early. ${FINGERPRINT_TASK_HINT}`);
+          button = true;
+        }
+      }
+    }
+    const running = !!(build && build.running);
+    if (running) {
+      parts.push("Building the fingerprint index. On a large library this takes minutes; the task in Settings > Tasks runs it in the background.");
+    }
+    if (build && build.message) parts.push(build.message);
+    return { text: parts.join(" "), button, running };
+  }
+
+  /**
+   * Text for a finished build_fingerprint_index result. Plain text.
+   */
+  function describeFingerprintBuild(result) {
+    if (!result) return "";
+    // The backend's message already names the box and says what to do
+    if (result.error) return `Fingerprint index: ${result.error}`;
+    const box = result.stashdb_name || "the stash-box";
+    let msg = `Fingerprint index built: ${result.matched} of ${result.scanned} scenes without a ${box} ID match a ${box} scene.`;
+    if (result.no_fingerprints > 0) {
+      msg += ` ${result.no_fingerprints} have no fingerprints to look up yet.`;
+    }
+    return msg;
+  }
+
+  /**
+   * The fingerprint fields of a find_missing / browse_stashdb response.
+   */
+  function fingerprintFields(output) {
+    return {
+      fingerprint_matching: output.fingerprint_matching,
+      fingerprint_index: output.fingerprint_index,
+      fingerprint_index_complete: output.fingerprint_index_complete,
+    };
   }
 
   /**
@@ -458,6 +531,10 @@
     graphqlRequest,
     runPluginOperation,
     describeFailure,
+    buildFingerprintIndex,
+    describeFingerprintIndex,
+    describeFingerprintBuild,
+    fingerprintFields,
     escapeHtml,
     formatDate,
     formatDuration,
@@ -480,6 +557,10 @@
       graphqlRequest,
       runPluginOperation,
       describeFailure,
+      buildFingerprintIndex,
+      describeFingerprintIndex,
+      describeFingerprintBuild,
+      fingerprintFields,
       escapeHtml,
       formatDate,
       formatDuration,

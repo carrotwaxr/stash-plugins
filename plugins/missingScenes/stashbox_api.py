@@ -582,3 +582,64 @@ def query_scenes_browse(url, api_key, page=1, per_page=100, sort="DATE", directi
         operation_name=f"browse scenes page {page}"
     )
     return _scenes_page(data, page, per_page)
+
+
+# ============================================================================
+# Fingerprint Lookup (the fingerprint index)
+# ============================================================================
+
+# stash-box refuses more scenes per findScenesBySceneFingerprints call ("too many scenes")
+FINGERPRINT_BATCH_SIZE = 40
+
+
+def find_scenes_by_fingerprints(url, api_key, fingerprint_batches, plugin_settings=None):
+    """Look up stash-box scenes by file fingerprints, for up to 40 local scenes per call.
+
+    Args:
+        url: stash-box GraphQL endpoint URL
+        api_key: API key for authentication
+        fingerprint_batches: one list per local scene of {"hash", "algorithm"}, where
+            algorithm is MD5, OSHASH or PHASH (phash as Stash's hex string)
+        plugin_settings: Plugin configuration (retries, Retry-After budget, timeout)
+
+    Returns:
+        One list per input scene, in input order, of the stash-box scenes its
+        fingerprints match: [{"id", "duration"}]. The stash-box applies its own
+        phash distance.
+
+    Raises:
+        ValueError: more than 40 scenes.
+        StashBoxAPIError: the request failed, or the result doesn't line up with the input.
+    """
+    if len(fingerprint_batches) > FINGERPRINT_BATCH_SIZE:
+        raise ValueError(f"At most {FINGERPRINT_BATCH_SIZE} scenes per fingerprint lookup, "
+                         f"got {len(fingerprint_batches)}")
+
+    query = """
+    query FindScenesBySceneFingerprints($fingerprints: [[FingerprintQueryInput!]!]!) {
+        findScenesBySceneFingerprints(fingerprints: $fingerprints) {
+            id
+            duration
+        }
+    }
+    """
+    variables = {"fingerprints": [
+        [{"hash": fp["hash"], "algorithm": fp["algorithm"]} for fp in batch]
+        for batch in fingerprint_batches
+    ]}
+
+    data = graphql_request_with_retry(
+        url, query, variables, api_key,
+        plugin_settings=plugin_settings,
+        operation_name=f"fingerprint lookup of {len(fingerprint_batches)} scenes"
+    )
+    groups = data.get("findScenesBySceneFingerprints") if isinstance(data, dict) else None
+    if not isinstance(groups, list):
+        raise StashBoxAPIError("The response has no findScenesBySceneFingerprints result")
+    if len(groups) != len(fingerprint_batches):
+        raise StashBoxAPIError(f"The fingerprint lookup returned {len(groups)} results "
+                               f"for {len(fingerprint_batches)} scenes")
+    return [
+        [s for s in (group or []) if isinstance(s, dict) and s.get("id")]
+        for group in groups
+    ]
