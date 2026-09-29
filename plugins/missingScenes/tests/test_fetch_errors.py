@@ -622,3 +622,45 @@ def test_main_sends_browse_failures_as_output(monkeypatch, tmp_path, capsys):
 def test_main_keeps_plain_errors_top_level(monkeypatch, tmp_path, capsys):
     out = run_main(monkeypatch, tmp_path, capsys, {"operation": "find_missing"})
     assert out == {"error": "entity_id is required"}
+
+
+# ---- the stash-box page limit (MAX_STASHDB_PAGE) --------------------------------------------
+
+def test_a_cursor_past_the_page_limit_is_a_clear_error(monkeypatch):
+    # It used to reach the estimate with total_on_stashdb None: a TypeError
+    setup_box(monkeypatch)
+    calls = serve(monkeypatch, lambda p: pg(ids("s", 5), 5, False))
+    res = find(page_size=5, cursor=cursor(stashdb_page=ms.MAX_STASHDB_PAGE + 1))
+    assert "page limit" in res["error"]
+    assert calls == []
+
+
+def test_browse_cursor_past_the_page_limit_is_a_clear_error(monkeypatch):
+    setup_browse(monkeypatch)
+    calls = serve(monkeypatch, lambda p: pg(ids("s", 5), 5, False), target="query_scenes_browse")
+    over = ms.encode_cursor({"stashdb_page": ms.MAX_STASHDB_PAGE + 1, "offset": 0, "sort": "DATE",
+                             "direction": "DESC", "endpoint": EP})
+    res = browse(page_size=5, cursor=over)
+    assert "page limit" in res["error"]
+    assert calls == []
+
+
+def test_reaching_the_page_limit_mid_request_hands_over_a_cursor_that_says_so(monkeypatch):
+    setup_box(monkeypatch, owned=Everything())
+    start = ms.MAX_STASHDB_PAGE - 4
+    calls = serve(monkeypatch, lambda p: pg([f"p{p}-{i}" for i in range(100)], 10 ** 6, True))
+    res = find(page_size=10, cursor=cursor(stashdb_page=start))
+    assert calls == list(range(start, ms.MAX_STASHDB_PAGE + 1))
+    assert res["has_more"] is True and res["is_complete"] is False
+    assert ms.decode_cursor(res["cursor"])["stashdb_page"] == ms.MAX_STASHDB_PAGE + 1
+    res = find(page_size=10, cursor=res["cursor"])
+    assert "page limit" in res["error"]
+
+
+def test_the_estimate_tolerates_an_unknown_stash_box_total(monkeypatch):
+    setup_box(monkeypatch, total_local=3)
+    monkeypatch.setattr(ms, "fetch_until_full", lambda **k: {
+        "scenes": [], "total_on_stashdb": None, "next_cursor": None, "is_complete": False,
+        "stashdb_pages_fetched": 0, "owned_by_fingerprint": 0})
+    res = find(page_size=5)
+    assert res["missing_count_estimate"] is None

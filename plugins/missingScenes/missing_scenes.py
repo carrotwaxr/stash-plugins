@@ -192,10 +192,12 @@ def parse_cursor(cursor, expected: dict) -> dict:
         expected: {field: value} the cursor must carry (entity, endpoint, ...)
 
     Returns:
-        The cursor state, with int `stashdb_page` >= 1 and int `offset` >= 0.
+        The cursor state, with int `stashdb_page` from 1 to MAX_STASHDB_PAGE and int
+        `offset` >= 0.
 
     Raises:
-        CursorError: unreadable, a bad page or offset, or made for another request.
+        CursorError: unreadable, a bad page or offset, past the page limit, or made for
+            another request.
     """
     state = decode_cursor(cursor)
     if not isinstance(state, dict):
@@ -204,6 +206,10 @@ def parse_cursor(cursor, expected: dict) -> dict:
     if not (_is_int(page) and page >= 1 and _is_int(offset) and offset >= 0):
         raise CursorError("Invalid pagination cursor (page and offset must be whole numbers). "
                           "Start a new search.")
+    if page > MAX_STASHDB_PAGE:
+        raise CursorError(f"This search reached the stash-box's page limit ({MAX_STASHDB_PAGE} pages "
+                          f"of 100 scenes), so later scenes can't be listed. Narrow it with a "
+                          f"favorites filter or another sort order.")
     for key in ("sort", "direction"):
         if key in state and not isinstance(state[key], str):
             raise CursorError(f"Invalid pagination cursor (bad {key}). Start a new search.")
@@ -1533,7 +1539,8 @@ def _fill_page(fetch_page, qualifies, page_size, start_page, start_offset,
             skips for good (didn't qualify, and the next cursor starts after it).
 
     Stops at a full page, the last stash-box page, MAX_PAGES_PER_REQUEST pages
-    (with a cursor to carry on), or a failed page.
+    (with a cursor to carry on), MAX_STASHDB_PAGE (with a cursor, which parse_cursor
+    turns into a "page limit" error), or a failed page.
 
     Returns:
         dict with scenes, total_on_stashdb (None when no page was fetched), next_cursor
@@ -1552,13 +1559,16 @@ def _fill_page(fetch_page, qualifies, page_size, start_page, start_offset,
     failure = None
 
     while True:
+        if page > MAX_STASHDB_PAGE:
+            # The cursor goes on, so the next request says the limit was reached
+            log.LogWarning(f"Reached the stash-box page limit ({MAX_STASHDB_PAGE}); stopping")
+            if pages_fetched:
+                resume = (page, offset)
+            break
         if pages_fetched >= MAX_PAGES_PER_REQUEST:
             log.LogInfo(f"Checked {pages_fetched} {box_name} pages without filling the page; "
                         f"the cursor continues from page {page}")
             resume = (page, offset)
-            break
-        if page > MAX_STASHDB_PAGE:
-            log.LogWarning(f"Reached the stash-box page limit ({MAX_STASHDB_PAGE}); stopping")
             break
         if pages_fetched and request_delay > 0:
             time.sleep(request_delay)
@@ -1994,7 +2004,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
     estimate = {}
     if not first_page_failed:
         estimate["missing_count_estimate"] = None
-        if not filters_active and not is_complete:
+        if not filters_active and not is_complete and total_on_stashdb is not None:
             estimate["missing_count_estimate"] = max(0, total_on_stashdb - total_local)
 
     return {
