@@ -445,12 +445,12 @@ function instrumentNavDom(tm, { toolbar = null, hasButton = () => false } = {}) 
     { id: "2", name: "Blond Hair", description: "", aliases: [], stash_ids: [], parents: [] },
   ];
   const SB_TAG = { id: "SB2", name: "Blonde", description: "box desc", aliases: [], category: CATEGORY };
-  async function diffSetup(mappings, endpoint = EP) {
+  async function diffSetup(mappings, endpoint = EP, { findTag = { data: { findTag: { parents: [] } } } } = {}) {
     const store = configStore({});
     const tm = loadTagManager({
       fetchResponses: {
         ...store.responses,
-        FindTag: { data: { findTag: { parents: [] } } },
+        FindTag: findTag,
         TagUpdate: (body) => ({ data: { tagUpdate: {
           id: body.variables.input.id, name: "Blonde", stash_ids: body.variables.input.stash_ids,
         } } }),
@@ -473,6 +473,8 @@ function instrumentNavDom(tm, { toolbar = null, hasButton = () => false } = {}) 
     return tm.document.body.children[tm.document.body.children.length - 1];
   };
 
+  // A saved mapping whose tag is not in localTags is dropped only when Stash
+  // (FindTag) confirms the tag is gone; a lookup error keeps it.
   await section("showDiffDialog: saved mapping and stale cleanup per endpoint", async () => {
     let { tm } = await diffSetup({ [TPDB]: { "Hair Color": "2" } }, EP);
     let modal = openDiff(tm);
@@ -482,14 +484,49 @@ function instrumentNavDom(tm, { toolbar = null, hasButton = () => false } = {}) 
     modal = openDiff(tm);
     check("this endpoint's mapping is offered", modal.innerHTML.includes("Blond Hair (saved mapping)"));
 
+    // A mapped tag missing from localTags (which can be stale): Stash decides.
+    const STALE = { [EP]: { "Hair Color": "999", Body: "1" }, [TPDB]: { "Hair Color": "999" } };
+    const findTag999 = (answer) => (body) => (body.variables.id === "999"
+      ? answer : { data: { findTag: { id: body.variables.id, parents: [] } } });
+    const asked999 = (tm, mark) => tm.fetchCalls.slice(mark).some((c) => c.op === "FindTag" && c.body.variables.id === "999");
+
     let store;
-    ({ tm, store } = await diffSetup({ [EP]: { "Hair Color": "999", Body: "1" }, [TPDB]: { "Hair Color": "999" } }, EP));
-    openDiff(tm);
+    ({ tm, store } = await diffSetup(STALE, EP, { findTag: findTag999({ data: { findTag: null } }) }));
+    let mark = tm.fetchCalls.length;
+    modal = openDiff(tm);
     await tm.settle();
     const m = tm.getState().categoryMappings;
+    check("gone from Stash: asked Stash about the tag", asked999(tm, mark));
+    check("gone from Stash: not pre-selected", !modal.innerHTML.includes("(saved mapping)"));
     check("stale mapping dropped for this endpoint only",
       j(m) === j({ [EP]: { Body: "1" }, [TPDB]: { "Hair Color": "999" } }), j(m));
-    check("cleanup saved", store.config.categoryMappings === j(m), store.config.categoryMappings);
+    check("cleanup saved in one write", writes(tm, mark).length === 1 && store.config.categoryMappings === j(m),
+      `${writes(tm, mark).length} ${store.config.categoryMappings}`);
+
+    ({ tm } = await diffSetup(STALE, EP, { findTag: findTag999({ data: { findTag: { id: "999", parents: [] } } }) }));
+    mark = tm.fetchCalls.length;
+    modal = openDiff(tm);
+    await tm.settle();
+    check("still in Stash: asked Stash about the tag", asked999(tm, mark));
+    check("still in Stash: mapping kept", j(tm.getState().categoryMappings) === j(STALE), j(tm.getState().categoryMappings));
+    check("still in Stash: no settings write", writes(tm, mark).length === 0, `${writes(tm, mark).length}`);
+    check("still in Stash: not pre-selected", !modal.innerHTML.includes("(saved mapping)"));
+
+    ({ tm } = await diffSetup(STALE, EP, { findTag: findTag999({ errors: [{ message: "boom" }] }) }));
+    mark = tm.fetchCalls.length;
+    openDiff(tm);
+    await tm.settle();
+    check("lookup failed: mapping kept", j(tm.getState().categoryMappings) === j(STALE), j(tm.getState().categoryMappings));
+    check("lookup failed: no settings write", writes(tm, mark).length === 0, `${writes(tm, mark).length}`);
+
+    ({ tm } = await diffSetup(STALE, EP, { findTag: findTag999({ data: { findTag: null } }) }));
+    mark = tm.fetchCalls.length;
+    openDiff(tm);
+    tm.exports.setCategoryMapping(EP, "Hair Color", "2"); // re-mapped while the check runs
+    await tm.settle();
+    check("a mapping changed during the check is kept", tm.getState().categoryMappings[EP]["Hair Color"] === "2",
+      j(tm.getState().categoryMappings));
+    check("and not written by the check", writes(tm, mark).length === 0, `${writes(tm, mark).length}`);
   });
 
   await section("applyDiff remembers the mapping under its endpoint", async () => {

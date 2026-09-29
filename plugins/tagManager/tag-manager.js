@@ -446,6 +446,23 @@
   }
 
   /**
+   * A saved mapping points at a tag missing from localTags, which can be stale:
+   * delete and save it only once Stash confirms the tag is gone. A failed
+   * lookup, or a mapping changed meanwhile, keeps it.
+   */
+  async function dropCategoryMappingIfTagGone(endpoint, category, tagId) {
+    try {
+      if (await tagExists(tagId)) return;
+    } catch (e) {
+      console.warn('[tagManager] Could not check the tag of a category mapping; keeping it:', e);
+      return;
+    }
+    if (getCategoryMapping(endpoint, category) !== tagId) return;
+    deleteCategoryMapping(endpoint, category);
+    await saveCategoryMappings();
+  }
+
+  /**
    * Load category mappings from plugin settings. F20: a legacy flat map is
    * migrated to the per-endpoint shape (under StashDB) and saved once. If that
    * save fails, the migrated map stays in memory: every later save writes the
@@ -686,6 +703,24 @@
 
     const result = await graphqlRequest(query, { id: tagId });
     return (result?.findTag?.parents || []).map(p => p.id);
+  }
+
+  /**
+   * Whether Stash has a tag with this id. Throws when the lookup fails or the
+   * answer is unclear, so callers can tell "gone" from "unknown".
+   */
+  async function tagExists(tagId) {
+    const query = `
+      query FindTag($id: ID!) {
+        findTag(id: $id) {
+          id
+        }
+      }
+    `;
+
+    const result = await graphqlRequest(query, { id: tagId });
+    if (!result || result.findTag === undefined) throw new Error('findTag missing from the response');
+    return result.findTag !== null;
   }
 
   /**
@@ -3969,11 +4004,11 @@
       const mappingEndpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
       savedMappingId = getCategoryMapping(mappingEndpoint, categoryName) || null;
       if (savedMappingId && !localTags.some(t => t.id === savedMappingId)) {
-        // Stale mapping (tag deleted): drop it so it is not offered or re-saved
-        deleteCategoryMapping(mappingEndpoint, categoryName);
-        savedMappingId = null;
-        Promise.resolve(saveCategoryMappings()).catch(e =>
+        // Not in localTags (maybe deleted, maybe localTags is stale): don't
+        // pre-select it; drop it only if Stash says the tag is gone.
+        dropCategoryMappingIfTagGone(mappingEndpoint, categoryName, savedMappingId).catch(e =>
           console.warn('[tagManager] Failed to drop stale category mapping:', e));
+        savedMappingId = null;
       }
       parentMatches = findLocalParentMatches(categoryName);
       parentOptions = buildParentOptions({
