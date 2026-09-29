@@ -46,6 +46,7 @@ Configure in **Settings → Plugins → Missing Scenes**:
 | **Stash-Box Endpoint** | Which stash-box to query. Leave empty to use the first configured endpoint (usually StashDB). Enter the full GraphQL URL (e.g., `https://stashdb.org/graphql`). |
 | **Whisparr URL** | Optional. URL to your Whisparr instance (e.g., `http://localhost:6969`). |
 | **Whisparr API Key** | Optional. API key from Whisparr Settings → General → Security. |
+| **Whisparr: Skip TLS Verification** | Only for an HTTPS Whisparr with a self-signed certificate. Other services (StashDB, ThePornDB) are always verified. |
 | **Quality Profile ID** | Whisparr quality profile ID (default: 1). |
 | **Root Folder** | Whisparr root folder path for downloaded scenes. |
 | **Search on Add** | Automatically search for scenes when adding to Whisparr. |

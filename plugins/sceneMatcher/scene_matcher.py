@@ -11,59 +11,20 @@ import re
 import sys
 import urllib.request
 import urllib.error
-import ssl
 
 import log
 
 # Import resilient StashDB API utilities
 import stashbox_api
 
-# Create SSL context that doesn't verify certificates (for self-signed certs)
-SSL_CONTEXT = ssl.create_default_context()
-SSL_CONTEXT.check_hostname = False
-SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+# Only for the plugin's own Stash server, which runs on this host. With HTTPS its cert
+# names a public host while we connect via localhost, so hostname checks would fail.
+# Stash-box requests go through stashbox_api, which verifies certificates.
+SSL_CONTEXT = stashbox_api.create_ssl_context(verify=False)
 
 # Threshold for falling back to individual performer/studio queries
 # If combined query returns fewer than this many results, also try separate queries
 MIN_COMBINED_RESULTS_THRESHOLD = 10
-
-
-# ============================================================================
-# GraphQL Helpers (for local Stash only - StashDB uses stashbox_api)
-# ============================================================================
-
-def graphql_request(url, query, variables=None, api_key=None, timeout=30):
-    """Make a GraphQL request to the specified endpoint (local Stash only)."""
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-
-    if api_key:
-        headers["ApiKey"] = api_key
-
-    data = json.dumps({
-        "query": query,
-        "variables": variables or {}
-    }).encode("utf-8")
-
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
-            result = json.loads(response.read().decode("utf-8"))
-            if "errors" in result:
-                log.LogWarning(f"GraphQL errors: {result['errors']}")
-            return result.get("data")
-    except urllib.error.HTTPError as e:
-        log.LogError(f"HTTP error {e.code}: {e.reason}")
-        raise
-    except urllib.error.URLError as e:
-        log.LogError(f"URL error: {e.reason}")
-        raise
-    except Exception as e:
-        log.LogError(f"Request error: {e}")
-        raise
 
 
 # ============================================================================

@@ -19,10 +19,29 @@ import urllib.error
 
 import log
 
-# Create SSL context that doesn't verify certificates (for self-signed certs)
-SSL_CONTEXT = ssl.create_default_context()
-SSL_CONTEXT.check_hostname = False
-SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+
+def create_ssl_context(verify=True):
+    """Build a TLS context for outbound HTTPS requests.
+
+    Verifies certificates by default, using the system store plus certifi's
+    bundle when it is installed (python.org builds on macOS ship no system CAs).
+    Pass verify=False only for self-hosted services with self-signed certs.
+    """
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except (ImportError, OSError):
+        pass
+    return ctx
+
+
+# Stash-box endpoints (StashDB, FansDB, ThePornDB...) are public hosts; always verify.
+SSL_CONTEXT = create_ssl_context()
 
 # Default configuration - can be overridden via plugin settings
 DEFAULT_CONFIG = {
@@ -195,6 +214,14 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
 
         except urllib.error.URLError as e:
             last_error = e
+
+            # A bad certificate won't fix itself on retry
+            if isinstance(e.reason, ssl.SSLCertVerificationError):
+                log.LogError(f"TLS certificate verification failed for {url}: {e.reason}")
+                raise StashBoxAPIError(
+                    f"TLS certificate verification failed for {url}: {e.reason}",
+                    retryable=False
+                )
 
             # Connection errors are often transient
             if attempt < max_retries:

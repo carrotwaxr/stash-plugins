@@ -1,6 +1,6 @@
 name: Missing Scenes
 description: Discover scenes from StashDB that you don't have locally. View missing scenes for performers and studios, with optional Whisparr integration for automated downloading and cleanup.
-version: 1.4.0
+version: 1.4.1
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer/studio pages
@@ -38,6 +38,10 @@ settings:
     displayName: Whisparr Root Folder
     description: Optional. Root folder path for downloaded scenes (e.g., /data/videos). Must match a root folder configured in Whisparr.
     type: STRING
+  whisparrSkipTlsVerify:
+    displayName: "Whisparr: Skip TLS Verification"
+    description: Only for an HTTPS Whisparr with a self-signed certificate. Turns off certificate checks for Whisparr requests. Other services are always verified.
+    type: BOOLEAN
   whisparrSearchOnAdd:
     displayName: Search on Add
     description: Automatically search for scenes when adding to Whisparr. Enabled by default.
