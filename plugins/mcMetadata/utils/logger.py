@@ -33,11 +33,12 @@ def init_file_logger(filepath):
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir)
 
-        # Open file in write mode (overwrites previous log)
-        _log_file = open(filepath, 'w', encoding='utf-8')
+        # Append so earlier runs (e.g. a dry run followed by hook runs) are kept
+        _log_file = open(filepath, 'a', encoding='utf-8')
         _log_file_path = filepath
 
         # Write header
+        _log_file.write(f"\n===== mcMetadata run {datetime.now().isoformat()} =====\n")
         _log_file.write(f"mcMetadata Log - {datetime.now().isoformat()}\n")
         _log_file.write("=" * 80 + "\n\n")
         _log_file.flush()

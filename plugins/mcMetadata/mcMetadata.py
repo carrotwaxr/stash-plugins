@@ -23,6 +23,7 @@ if _PROBLEM:
 
 from stashapi.stashapp import StashInterface
 from utils.logger import init_file_logger, close_file_logger
+from utils.run_flow import is_disabled_hook_run
 import utils.logger as log
 from performer import process_all_performers, process_performer_hook
 from scene import process_all_scenes, process_scene
@@ -94,6 +95,10 @@ def main():
         SETTINGS["data_dir"] = plugin_data_dir(json_input["server_connection"])
 
         mode = get_plugin_mode()
+
+        # A disabled hook is a silent no-op: decide before any logging or log-file I/O
+        if is_disabled_hook_run(mode, SETTINGS):
+            return
 
         # Initialize file logging if configured
         if SETTINGS.get("log_file_path"):

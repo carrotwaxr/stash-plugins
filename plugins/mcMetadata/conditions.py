@@ -18,10 +18,28 @@ missing_required_tag | excluded_path | outside_include_paths.
 from fnmatch import fnmatchcase
 
 
+def _norm(text):
+    return text.replace("\\", "/").lower()
+
+
+def _matches_one(path, pattern):
+    pat = _norm(pattern)
+    if "*" not in pat and "?" not in pat:
+        # No wildcards: a directory prefix (or the exact file)
+        pat = pat.rstrip("/")
+        return path == pat or path.startswith(pat + "/")
+    # fnmatch semantics, but brackets are literal
+    return fnmatchcase(path, pat.replace("[", "[[]"))
+
+
 def _matches_any(path, patterns):
-    """Case-insensitive fnmatch of a file path against any of the glob patterns."""
-    p = path.lower()
-    return any(fnmatchcase(p, pat.lower()) for pat in patterns)
+    """Case-insensitive, separator-agnostic match of a path against any pattern.
+
+    Patterns without * or ? are directory prefixes; others are globs where * spans
+    directories and [ is literal.
+    """
+    p = _norm(path)
+    return any(_matches_one(p, pat) for pat in patterns)
 
 
 def build_scene_filter(settings):
@@ -119,8 +137,8 @@ def should_process(scene, settings):
     # --- required tags (ANY-match) ---------------------------------------
     required_tags = settings.get("required_tags") or []
     if required_tags:
-        scene_tags = {t.get("name", "") for t in (scene.get("tags") or [])}
-        if not scene_tags.intersection(required_tags):
+        scene_tags = {t.get("name", "").casefold() for t in (scene.get("tags") or [])}
+        if not scene_tags.intersection(t.casefold() for t in required_tags):
             return (False, "missing_required_tag")
 
     # --- directory scope (exclude beats include) -------------------------
