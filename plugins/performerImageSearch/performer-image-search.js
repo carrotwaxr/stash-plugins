@@ -53,6 +53,10 @@
   let completedSources = []; // Track which sources have completed
   let pendingSources = []; // Track which sources are still loading
   let sourceErrors = []; // Track per-source failures: { source, message }
+  let sourceStatus = {}; // source -> { status, count, detail }; "pending" until it answers
+  let searchGeneration = 0; // bumped whenever results/modal are superseded
+  let activeControllers = []; // AbortControllers of in-flight plugin calls
+  const SOURCE_TIMEOUT_MS = 45000; // client-side cap per plugin call
 
   /**
    * Get the GraphQL endpoint URL
@@ -66,13 +70,14 @@
   /**
    * Make a GraphQL request using fetch
    */
-  async function graphqlRequest(query, variables = {}) {
+  async function graphqlRequest(query, variables = {}, signal = undefined) {
     const response = await fetch(getGraphQLUrl(), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ query, variables }),
+      signal,
     });
 
     if (!response.ok) {
@@ -140,8 +145,11 @@
    * @param {string} query - Search query
    * @param {string} performerName - Performer name
    * @param {string|null} source - Specific source to search (null for all)
+   * @param {AbortSignal} [signal] - Aborts the request
+   * @returns the plugin output: { results, status, error?, warnings? }. An
+   *   `error` does not throw: results that arrive with it are kept.
    */
-  async function searchImages(query, performerName, source = null) {
+  async function searchImages(query, performerName, source = null, signal = undefined) {
     try {
       const gqlQuery = `
         mutation RunPluginOperation($plugin_id: ID!, $args: Map) {
@@ -162,16 +170,12 @@
       const data = await graphqlRequest(gqlQuery, {
         plugin_id: PLUGIN_ID,
         args: args,
-      });
+      }, signal);
 
       const output = data?.runPluginOperation;
 
       if (!output) {
         throw new Error("No response from search plugin");
-      }
-
-      if (output.error) {
-        throw new Error(output.error);
       }
 
       return output;
@@ -221,17 +225,15 @@
     const total = allResults.length;
 
     // Build source status
-    let sourceStatus = "";
+    let sourceNote = "";
     if (pendingSources.length > 0) {
-      sourceStatus = ` | Searching: ${pendingSources.join(", ")}`;
+      sourceNote = ` | Searching: ${pendingSources.join(", ")}`;
     } else if (completedSources.length > 0) {
-      sourceStatus = ` | All sources complete`;
+      sourceNote = ` | All sources finished`;
     }
 
     if (pendingSources.length > 0) {
-      showStatus(`Found ${filteredResults.length} images (${loaded}/${total} loaded)${sourceStatus}`, "loading");
-    } else if (loaded < total) {
-      showStatus(`Found ${filteredResults.length} images (loading ${loaded}/${total}...)`, "loading");
+      showStatus(`Found ${filteredResults.length} images (${loaded}/${total} loaded)${sourceNote}`, "loading");
     } else if (total === 0 && sourceErrors.length >= SOURCES.length && sourceErrors.length > 0) {
       // Every source failed - almost always the server cannot reach the image
       // sites (no internet egress, DNS, or the sites blocking the server IP).
@@ -240,11 +242,38 @@
       showStatus(`No images found - ${sourceErrors.length} of ${SOURCES.length} sources failed (e.g. ${sourceErrors[0].message})`, "error");
     } else if (total === 0) {
       showStatus(`No images found for "${currentPerformerName}"`, "success");
-    } else if (sourceErrors.length > 0) {
-      showStatus(`${filteredResults.length} of ${total} images match filters (${sourceErrors.length} source${sourceErrors.length > 1 ? "s" : ""} failed)`, "success");
     } else {
-      showStatus(`${filteredResults.length} of ${total} images match filters`, "success");
+      const failed = sourceErrors.length > 0
+        ? ` (${sourceErrors.length} source${sourceErrors.length > 1 ? "s" : ""} failed)`
+        : "";
+      const loadNote = loaded < total ? `, loading ${loaded}/${total}` : "";
+      showStatus(`${filteredResults.length} of ${total} images match filters${failed}${loadNote} | All sources finished`, "success");
     }
+    renderSourceChips();
+  }
+
+  /**
+   * Render one status chip per enabled source into #pis-source-chips
+   */
+  function renderSourceChips() {
+    const el = document.getElementById("pis-source-chips");
+    if (!el) return;
+    el.innerHTML = SOURCES.map((source) => {
+      const st = sourceStatus[source] || { status: "pending" };
+      let label = st.status;
+      if (st.status === "ok" || st.status === "partial") label += ` (${st.count || 0})`;
+      const title = st.detail ? ` title="${escapeHtml(st.detail)}"` : "";
+      return `<span class="pis-chip pis-chip-${escapeHtml(st.status)}"${title}>${escapeHtml(source)}: ${escapeHtml(label)}</span>`;
+    }).join("");
+  }
+
+  /**
+   * Abort every in-flight plugin call and invalidate their responses
+   */
+  function supersedeSearches() {
+    searchGeneration++;
+    for (const c of activeControllers) c.abort();
+    activeControllers = [];
   }
 
   /**
@@ -279,6 +308,10 @@
    * Create and show the search modal
    */
   function showModal(performerId, performerName) {
+    supersedeSearches();
+    isLoading = false;
+    pendingSources = [];
+    sourceStatus = {};
     currentPerformerId = performerId;
     currentPerformerName = performerName;
     allResults = [];
@@ -292,6 +325,9 @@
       document.body.appendChild(modalRoot);
     }
 
+    document.removeEventListener("keydown", handleModalKeydown);
+    document.addEventListener("keydown", handleModalKeydown);
+
     renderModal();
   }
 
@@ -299,6 +335,8 @@
    * Hide and cleanup the modal
    */
   function hideModal() {
+    supersedeSearches();
+    document.removeEventListener("keydown", handleModalKeydown);
     if (modalRoot) {
       modalRoot.innerHTML = "";
     }
@@ -314,6 +352,8 @@
     completedSources = [];
     pendingSources = [];
     sourceErrors = [];
+    sourceStatus = {};
+    isLoading = false;
   }
 
   /**
@@ -322,7 +362,10 @@
   async function renderModal() {
     if (!modalRoot) return;
 
+    const generation = searchGeneration;
     const settings = await getPluginSettings();
+    // Closed, or another performer opened, while settings were loading
+    if (generation !== searchGeneration || !currentPerformerName) return;
     const defaultQuery = `${currentPerformerName} ${settings.searchSuffix}`.trim();
 
     modalRoot.innerHTML = `
@@ -365,6 +408,7 @@
           </div>
 
           <div class="pis-modal-footer">
+            <div id="pis-source-chips" class="pis-source-chips"></div>
             <div id="pis-status" class="pis-status"></div>
           </div>
         </div>
@@ -422,6 +466,18 @@
   }
 
   /**
+   * Escape closes the modal when no preview is open; otherwise the preview handler runs
+   */
+  function handleModalKeydown(e) {
+    const overlay = document.getElementById("pis-preview-overlay");
+    if (overlay && overlay.style.display !== "none") {
+      handlePreviewKeydown(e);
+    } else if (e.key === "Escape") {
+      hideModal();
+    }
+  }
+
+  /**
    * Add results from a source, deduplicating by URL
    */
   function addResultsFromSource(results, source) {
@@ -441,39 +497,52 @@
   /**
    * Search a single source and update results
    */
-  async function searchSource(query, performerName, source) {
+  async function searchSource(query, performerName, source, generation = searchGeneration) {
     console.debug(`[PerformerImageSearch] Starting search for source: ${source}`);
+    const controller = new AbortController();
+    activeControllers.push(controller);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, SOURCE_TIMEOUT_MS);
+    // Marks the source finished; every state change is guarded by the generation
+    const finish = (status, count, detail) => {
+      sourceStatus[source] = { status, count, detail };
+      pendingSources = pendingSources.filter(s => s !== source);
+      completedSources.push(source);
+    };
     try {
-      const data = await searchImages(query, performerName, source);
+      const data = await searchImages(query, performerName, source, controller.signal);
+      if (generation !== searchGeneration) return 0;
       const results = data.results || [];
       console.debug(`[PerformerImageSearch] ${source}: Received ${results.length} results`);
 
-      // Add results and update UI
       const added = addResultsFromSource(results, source);
+      let status = data.status || (data.error ? "error" : results.length ? "ok" : "empty");
+      const detail = [data.error, ...(data.warnings || [])].filter(Boolean).join("; ");
+      if (data.error && results.length && status === "error") status = "partial";
+      if (data.error && status !== "ok" && status !== "empty") {
+        sourceErrors.push({ source, message: data.error });
+      }
+      finish(status, results.length, detail);
 
-      // Move from pending to completed
-      pendingSources = pendingSources.filter(s => s !== source);
-      completedSources.push(source);
-
-      // Re-apply filters and render
       if (added > 0) {
         applyFilters();
         renderResults();
       }
       updateFilterStatus();
-
-      console.debug(`[PerformerImageSearch] ${source}: Complete. Total results now: ${allResults.length}`);
       return results.length;
     } catch (e) {
+      if (generation !== searchGeneration) return 0;
+      const message = timedOut || e?.name === "AbortError"
+        ? `Timed out after ${SOURCE_TIMEOUT_MS / 1000}s`
+        : e?.message || String(e);
       console.error(`[PerformerImageSearch] ${source}: Search failed:`, e);
-      // Record the failure so it can be surfaced to the user instead of being
-      // silently reported as "0 of 0 images match filters".
-      sourceErrors.push({ source, message: e?.message || String(e) });
-      // Move from pending to completed even on error
-      pendingSources = pendingSources.filter(s => s !== source);
-      completedSources.push(source);
+      sourceErrors.push({ source, message });
+      finish(timedOut || e?.name === "AbortError" ? "timeout" : "error", 0, message);
       updateFilterStatus();
       return 0;
+    } finally {
+      clearTimeout(timer);
+      activeControllers = activeControllers.filter(c => c !== controller);
     }
   }
 
@@ -488,7 +557,9 @@
       return;
     }
 
-    // Reset state
+    // Reset state; responses of any earlier search are now stale
+    supersedeSearches();
+    const generation = searchGeneration;
     allResults = [];
     filteredResults = [];
     imageDimensions = {};
@@ -497,6 +568,7 @@
     completedSources = [];
     pendingSources = [...SOURCES];
     sourceErrors = [];
+    sourceStatus = {};
     isLoading = true;
 
     console.debug(`[PerformerImageSearch] Starting search for: "${query}" (performer: ${currentPerformerName})`);
@@ -504,10 +576,11 @@
 
     showStatus(`Searching ${SOURCES.length} sources...`, "loading");
     renderResults(); // Show empty state initially
+    renderSourceChips();
 
     // Launch all source searches in parallel
     const searchPromises = SOURCES.map(source =>
-      searchSource(query, currentPerformerName, source)
+      searchSource(query, currentPerformerName, source, generation)
     );
 
     // Wait for all to complete
@@ -518,9 +591,11 @@
     } catch (e) {
       console.error("[PerformerImageSearch] Search error:", e);
     } finally {
-      isLoading = false;
-      renderResults();
-      updateFilterStatus();
+      if (generation === searchGeneration) {
+        isLoading = false;
+        renderResults();
+        updateFilterStatus();
+      }
     }
   };
 
@@ -639,7 +714,6 @@
       overlay.style.display = "flex";
 
       // Add keyboard listener when opening preview
-      document.addEventListener("keydown", handlePreviewKeydown);
     }
   };
 
@@ -685,7 +759,6 @@
       overlay.style.display = "none";
     }
     previewImage = null;
-    document.removeEventListener("keydown", handlePreviewKeydown);
   };
 
   /**
@@ -872,6 +945,8 @@
       showModal,
       hideModal,
       handlePreviewKeydown,
+      handleModalKeydown,
+      renderSourceChips,
       addResultsFromSource,
       searchSource,
       renderResults,
@@ -896,6 +971,8 @@
       completedSources,
       pendingSources,
       sourceErrors,
+      sourceStatus,
+      searchGeneration,
     });
     hook.setState = (patch) => {
       for (const [k, v] of Object.entries(patch || {})) {
@@ -915,6 +992,7 @@
           case "completedSources": completedSources = v; break;
           case "pendingSources": pendingSources = v; break;
           case "sourceErrors": sourceErrors = v; break;
+          case "sourceStatus": sourceStatus = v; break;
           default: throw new Error("setState: unknown key " + k);
         }
       }

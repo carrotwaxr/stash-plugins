@@ -272,6 +272,27 @@
   color: #dc3545;
 }
 
+/* Per-source status chips */
+.pis-source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pis-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #333;
+  color: #aaa;
+  cursor: default;
+}
+
+.pis-chip-ok { background: #14432a; color: #6fdc9b; }
+.pis-chip-partial { background: #4a3b10; color: #f0c352; }
+.pis-chip-pending { background: #10305c; color: #7fb2ff; }
+.pis-chip-error, .pis-chip-blocked, .pis-chip-timeout { background: #4d1a20; color: #f08a94; }
+
 /* Preview Overlay */
 .pis-preview-overlay {
   position: fixed;

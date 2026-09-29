@@ -82,12 +82,20 @@ const isCapture = (opts) => opts === true || !!(opts && typeof opts === "object"
 function loadPlugin({ fetchResponses = {}, pathname = "/", base = "/" } = {}) {
   // ---- fetch stub ----
   const fetchCalls = [];
-  function respond(json) {
+  // Resolves json (which may itself be a promise, e.g. one that never settles)
+  // but rejects with an AbortError when opts.signal aborts, like a real fetch.
+  function respond(json, signal) {
+    const guard = (value) => new Promise((resolve, reject) => {
+      const abort = () => { const e = new Error("The operation was aborted"); e.name = "AbortError"; reject(e); };
+      if (signal && signal.aborted) return abort();
+      if (signal) signal.addEventListener("abort", abort);
+      Promise.resolve(value).then(resolve, reject);
+    });
     return Promise.resolve({
       ok: true,
       status: 200,
-      json: async () => json,
-      text: async () => JSON.stringify(json),
+      json: () => guard(json),
+      text: () => guard(json).then((j) => JSON.stringify(j)),
     });
   }
   function fetch(url, opts = {}) {
@@ -103,8 +111,8 @@ function loadPlugin({ fetchResponses = {}, pathname = "/", base = "/" } = {}) {
     const source = variables && variables.args ? variables.args.source : undefined;
     fetchCalls.push({ url: String(url), op, variables, body, opts, source });
     const handler = op !== null ? fetchResponses[op] : undefined;
-    if (handler === undefined) return respond({ data: {} });
-    return respond(typeof handler === "function" ? handler(body) : handler);
+    if (handler === undefined) return respond({ data: {} }, opts.signal);
+    return respond(typeof handler === "function" ? handler(body) : handler, opts.signal);
   }
 
   // ---- controllable timers ----
@@ -168,6 +176,7 @@ function loadPlugin({ fetchResponses = {}, pathname = "/", base = "/" } = {}) {
     clearTimeout: clearTimeoutStub,
     console: consoleStub,
     URL,
+    AbortController,
     alert() {},
   });
 
