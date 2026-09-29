@@ -46,9 +46,10 @@ def _strip_graphql(url):
 
 
 def site_base(endpoint):
-    """Site base URL for links: the text up to and including the slash before /graphql."""
+    """Site base URL for links: the text before /graphql, with no trailing slash
+    (the UI appends "/scenes/<id>")."""
     m = re.match(r"(https?://.*?/)graphql", endpoint or "")
-    return m.group(1) if m else endpoint
+    return (m.group(1) if m else endpoint or "").rstrip("/")
 
 
 def resolve_endpoint(requested, boxes, setting):

@@ -82,7 +82,7 @@ class TestContext(unittest.TestCase):
         context, error = self.ctx(scene, endpoint="https://stashdb.org/graphql")
         self.assertIsNone(error)
         self.assertEqual(context["endpoint"], "https://stashdb.org/graphql")
-        self.assertEqual(context["stashdb_url"], "https://stashdb.org/")
+        self.assertEqual(context["stashdb_url"], "https://stashdb.org")
         self.assertEqual(context["performer_stash_ids"], {"perf-1"})
         self.assertEqual(context["studio_stash_id"], "studio-1")
 
@@ -98,7 +98,7 @@ class TestContext(unittest.TestCase):
         self.assertIn("StashDB", error["error"])
 
     def test_stashdb_url_rule(self):
-        self.assertEqual(scene_matcher.site_base("https://stashdb.org/graphql"), "https://stashdb.org/")
+        self.assertEqual(scene_matcher.site_base("https://stashdb.org/graphql"), "https://stashdb.org")
         self.assertEqual(scene_matcher.site_base("https://x.test/api"), "https://x.test/api")
 
 
