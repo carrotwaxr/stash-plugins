@@ -16,24 +16,46 @@ Sources (configurable in Settings > Plugins):
 Uses only Python standard library - no pip dependencies.
 """
 
-import json
-import sys
-import re
-import time
+import concurrent.futures
+import http.client
 import ipaddress
-import urllib.request
+import json
+import re
+import socket
+import sys
+import time
+import traceback
+import urllib.error
 import urllib.parse
+import urllib.request
 from html import unescape
 
 # Import Stash-compatible logging
 import log
 
-# Common headers for requests
+# A current desktop Chrome. Sites behind Cloudflare treat old or non-browser user
+# agents as bots, so bump the version now and then.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+)
+
+# Headers sent with every request (see _fetch)
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
 }
+
+# Each source gets this long in total (index page plus galleries)
+SOURCE_BUDGET_SECONDS = 25
+# No single socket operation waits longer than this
+REQUEST_TIMEOUT_SECONDS = 10
+# Gallery pages fetched at the same time, per source
+GALLERY_WORKERS = 4
+
+# Text that only appears on Cloudflare's "checking your browser" challenge pages
+CLOUDFLARE_CHALLENGE_MARKERS = ("cf-chl", "Just a moment...")
 
 # Size filter thresholds (in pixels)
 SIZE_THRESHOLDS = {
@@ -98,7 +120,10 @@ def is_allowed_image_url(url, source):
 
 
 def drop_disallowed_hosts(results, label):
-    """Remove results whose image or thumbnail URL fails is_allowed_image_url."""
+    """Remove results whose image or thumbnail URL fails is_allowed_image_url.
+
+    Returns (kept results, number dropped).
+    """
     allowed = []
     for result in results:
         source = result.get("source")
@@ -107,9 +132,10 @@ def drop_disallowed_hosts(results, label):
             urls.append(result["thumbnail"])
         if all(is_allowed_image_url(u, source) for u in urls):
             allowed.append(result)
-    if len(allowed) != len(results):
-        log.LogWarning(f"[{label}] Dropped {len(results) - len(allowed)} images from unexpected hosts")
-    return allowed
+    dropped = len(results) - len(allowed)
+    if dropped:
+        log.LogWarning(f"[{label}] Dropped {dropped} images from unexpected hosts")
+    return allowed, dropped
 
 
 def normalize_name_for_url(name):
@@ -118,99 +144,223 @@ def normalize_name_for_url(name):
     return name.strip()
 
 
-def get_image_dimensions(url):
+# --- Fetching -----------------------------------------------------------------
+#
+# Every request goes through _fetch, which enforces a deadline and turns each kind
+# of failure into one of the exceptions below. Scrapers return a SourceResult or
+# raise; search_single_source turns the outcome into a status for the UI.
+
+
+class SourceError(Exception):
+    """A source could not be searched. The message is shown to the user."""
+
+    result_status = "error"
+
+
+class SourceTimeout(SourceError):
+    """The deadline passed, or the site stopped answering."""
+
+    result_status = "timeout"
+
+
+class SourceBlocked(SourceError):
+    """The site refused us: HTTP 403 or 429, or a Cloudflare challenge page."""
+
+    result_status = "blocked"
+
+
+class SourceHTTPError(SourceError):
+    """The site answered with an HTTP status other than 200."""
+
+    def __init__(self, status, url=""):
+        self.status = status
+        self.url = url
+        super().__init__(f"{_host(url) or 'The site'} returned HTTP {status}")
+
+
+class SourceNotFound(SourceHTTPError):
+    """HTTP 404. On a performer page it means the site has no such performer."""
+
+    def __init__(self, url=""):
+        super().__init__(404, url)
+
+
+class SourceResult(list):
+    """A scraper's results (it is the list of results) plus what went wrong on the way.
+
+    warnings are user-facing notes about pages that were skipped; partial is True
+    when some pages failed, so the results are incomplete.
     """
-    Try to get image dimensions by reading just the header bytes.
-    Returns (width, height) or (0, 0) if unable to determine.
-    """
+
+    def __init__(self, results=(), warnings=(), partial=False):
+        super().__init__(results)
+        self.warnings = list(warnings)
+        self.partial = partial
+
+
+def _now():
+    """The clock deadlines are measured on (tests replace it)."""
+    return time.monotonic()
+
+
+def _default_deadline(deadline):
+    return deadline if deadline is not None else _now() + SOURCE_BUDGET_SECONDS
+
+
+def _host(url):
     try:
-        req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=5) as response:
-            # Read first 500 bytes which should contain JPEG header
-            data = response.read(500)
-
-            # Check for JPEG (most common)
-            if data[:2] == b'\xff\xd8':
-                i = 2
-                while i < len(data) - 8:
-                    if data[i] != 0xff:
-                        break
-                    marker = data[i + 1]
-                    # SOF markers contain dimensions
-                    if marker in (0xc0, 0xc2):
-                        height = (data[i + 5] << 8) | data[i + 6]
-                        width = (data[i + 7] << 8) | data[i + 8]
-                        return (width, height)
-                    # Skip to next marker
-                    if marker in (0xd8, 0xd9, 0x01) or 0xd0 <= marker <= 0xd7:
-                        i += 2
-                    else:
-                        length = (data[i + 2] << 8) | data[i + 3]
-                        i += 2 + length
-
-            # Check for PNG
-            elif data[:8] == b'\x89PNG\r\n\x1a\n':
-                if data[12:16] == b'IHDR':
-                    width = int.from_bytes(data[16:20], 'big')
-                    height = int.from_bytes(data[20:24], 'big')
-                    return (width, height)
-
-    except Exception:
-        pass
-
-    return (0, 0)
+        return urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return ""
 
 
-def filter_by_size_and_layout(results, size_filter="All", layout_filter="All"):
+def _is_cloudflare_challenge(text):
+    return any(marker in text for marker in CLOUDFLARE_CHALLENGE_MARKERS)
+
+
+def _fetch(url, deadline, headers=None):
+    """GET url and return the body as text. This is the only place requests are made.
+
+    Sends HEADERS plus any extra headers. deadline is a _now() value: no socket
+    operation waits longer than REQUEST_TIMEOUT_SECONDS or past it.
+
+    Raises SourceTimeout (the deadline passed or the site stopped answering),
+    SourceBlocked (HTTP 403 or 429, or a Cloudflare challenge page), SourceNotFound
+    (HTTP 404), SourceHTTPError (any other status but 200) or SourceError (the site
+    could not be reached).
     """
-    Filter results by size and layout (aspect ratio).
-    Size: Large (>= 500k px), Medium (100k-500k px), Small (< 100k px), All
-    Layout: Portrait (< 0.9 ratio), Square (0.9-1.1), Landscape (> 1.1), All
+    host = _host(url) or url
+    remaining = deadline - _now()
+    if remaining <= 0:
+        raise SourceTimeout(f"Ran out of time before fetching {host}")
+    request = urllib.request.Request(url, headers={**HEADERS, **(headers or {})})
+    try:
+        with urllib.request.urlopen(request, timeout=min(REQUEST_TIMEOUT_SECONDS, remaining)) as response:
+            status = response.status
+            chunks = []
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if _now() > deadline:
+                    raise SourceTimeout(f"{host} did not finish sending in time")
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read(65536).decode("utf-8", errors="ignore")
+        except Exception:
+            body = ""
+        if e.code == 404:
+            raise SourceNotFound(url) from None
+        if e.code in (403, 429):
+            raise SourceBlocked(f"{host} blocked the request (HTTP {e.code})") from None
+        if _is_cloudflare_challenge(body):
+            raise SourceBlocked(f"{host} answered with a Cloudflare challenge page (HTTP {e.code})") from None
+        raise SourceHTTPError(e.code, url) from None
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, (socket.timeout, TimeoutError)):
+            raise SourceTimeout(f"{host} did not answer in time") from None
+        raise SourceError(f"Could not reach {host}: {e.reason}") from None
+    except (socket.timeout, TimeoutError):  # the same class from Python 3.10
+        raise SourceTimeout(f"{host} did not answer in time") from None
+    except (OSError, http.client.HTTPException) as e:
+        raise SourceError(f"Could not read from {host}: {e}") from None
+
+    text = b"".join(chunks).decode("utf-8", errors="ignore")
+    if status != 200:
+        raise SourceHTTPError(status, url)
+    if _is_cloudflare_challenge(text):
+        raise SourceBlocked(f"{host} answered with a Cloudflare challenge page")
+    return text
+
+
+def _fetch_performer_page(label, name, url, deadline):
+    """Fetch a source's page for the performer; None when the site has no such page (404)."""
+    log.LogDebug(f"[{label}] Fetching: {url}")
+    try:
+        return _fetch(url, deadline)
+    except SourceNotFound:
+        log.LogDebug(f"[{label}] Performer not found: {name}")
+        return None
+
+
+def _fetch_all(urls, deadline):
+    """Fetch urls in parallel, GALLERY_WORKERS at a time, until the deadline.
+
+    Returns a list in the order of urls holding each page's text, or the SourceError
+    it failed with. Pages still loading at the deadline count as SourceTimeout; their
+    threads are left to finish on their own, which _fetch's deadline makes quick.
     """
-    if size_filter == "All" and layout_filter == "All":
-        return results
+    if not urls:
+        return []
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=GALLERY_WORKERS)
+    try:
+        futures = [executor.submit(_fetch, url, deadline) for url in urls]
+        concurrent.futures.wait(futures, timeout=max(0.0, deadline - _now()))
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
-    filtered = []
-    for result in results:
-        width = result.get("width", 0)
-        height = result.get("height", 0)
-
-        # If we don't have dimensions, try to fetch them
-        if (width == 0 or height == 0) and (size_filter != "All" or layout_filter != "All"):
-            width, height = get_image_dimensions(result.get("image", ""))
-            result["width"] = width
-            result["height"] = height
-
-        # If still no dimensions, include by default
-        if width == 0 or height == 0:
-            filtered.append(result)
+    pages = []
+    for url, future in zip(urls, futures):
+        if future.cancelled() or not future.done():
+            pages.append(SourceTimeout(f"{_host(url)} did not answer in time"))
             continue
-
-        pixels = width * height
-        ratio = width / height
-
-        # Size filter
-        if size_filter != "All":
-            if size_filter == "Large" and pixels < SIZE_THRESHOLDS["Large"]:
-                continue
-            elif size_filter == "Medium":
-                if pixels < SIZE_THRESHOLDS["Medium"] or pixels >= SIZE_THRESHOLDS["Large"]:
-                    continue
-            elif size_filter == "Small" and pixels >= SIZE_THRESHOLDS["Medium"]:
-                continue
-
-        # Layout filter
-        if layout_filter != "All":
-            min_ratio, max_ratio = ASPECT_THRESHOLDS.get(layout_filter, (0, float('inf')))
-            if not (min_ratio <= ratio < max_ratio):
-                continue
-
-        filtered.append(result)
-
-    return filtered
+        error = future.exception()
+        if error is None:
+            pages.append(future.result())
+        elif isinstance(error, SourceError):
+            pages.append(error)
+        else:
+            pages.append(SourceError(f"{type(error).__name__}: {error}"))
+    return pages
 
 
-def search_babepedia(name, max_results=50):
+def _page_failures(pages, noun):
+    """Summarize the failed entries of pages (from _fetch_all) for the user.
+
+    Returns (warnings, error): one warning per kind of failure, and the error to raise
+    when every page failed (None otherwise).
+    """
+    failures = [page for page in pages if isinstance(page, SourceError)]
+    if not failures:
+        return [], None
+    total = len(pages)
+    timeouts = [f for f in failures if isinstance(f, SourceTimeout)]
+    others = [f for f in failures if not isinstance(f, SourceTimeout)]
+    warnings = []
+    if timeouts:
+        warnings.append(f"{len(timeouts)} of {total} {noun} timed out")
+    if others:
+        warnings.append(f"{len(others)} of {total} {noun} failed to load ({others[0]})")
+    if len(failures) < total:
+        return warnings, None
+
+    blocked = [f for f in failures if isinstance(f, SourceBlocked)]
+    if blocked:
+        return warnings, SourceBlocked(f"None of the {total} {noun} loaded ({blocked[0]})")
+    if not others:
+        return warnings, SourceTimeout(f"None of the {total} {noun} loaded in time")
+    return warnings, SourceError(f"None of the {total} {noun} loaded ({others[0]})")
+
+
+def _gallery_pages(label, urls, deadline):
+    """Fetch gallery pages in parallel; returns (the loaded pages in url order, warnings, error).
+
+    error is set only when every page failed (see _page_failures).
+    """
+    log.LogDebug(f"[{label}] Fetching {len(urls)} galleries")
+    pages = _fetch_all(urls, deadline)
+    for url, page in zip(urls, pages):
+        if isinstance(page, SourceError):
+            log.LogDebug(f"[{label}] Skipped {url}: {page}")
+    warnings, error = _page_failures(pages, "galleries")
+    for warning in warnings:
+        log.LogWarning(f"[{label}] {warning}")
+    loaded = [page for page in pages if not isinstance(page, SourceError)]
+    return loaded, warnings, error
+
+
+def search_babepedia(name, max_results=50, deadline=None):
     """
     Search Babepedia for performer images.
 
@@ -220,784 +370,588 @@ def search_babepedia(name, max_results=50):
     preview thumbnails (/galleries-thumbs/<gallery>/NN.jpg) shown on the profile
     and map each to its full-size image under /galleries/.
 
-    Note: Babepedia sits behind Cloudflare and may return 403 from some servers;
-    such failures are logged (and surfaced to the UI) rather than swallowed.
+    Note: Babepedia sits behind Cloudflare and may refuse server, VPN or datacenter
+    addresses. That raises SourceBlocked, which search_single_source reports to the
+    UI as the source's "blocked" status.
     """
+    deadline = _default_deadline(deadline)
+    # Babepedia uses underscores in URLs
+    url_name = name.replace(" ", "_")
+    url = f"https://www.babepedia.com/babe/{urllib.parse.quote(url_name)}"
+    html = _fetch_performer_page("Babepedia", name, url, deadline)
+    if html is None:
+        return SourceResult()
+
     results = []
+    seen = set()
 
-    try:
-        # Babepedia uses underscores in URLs
-        url_name = name.replace(" ", "_")
-        url = f"https://www.babepedia.com/babe/{urllib.parse.quote(url_name)}"
-        log.LogDebug(f"[Babepedia] Fetching: {url}")
+    # 1. Profile photos: href="/pics/Name.jpg" (full-size; *_thumb3.jpg are thumbs)
+    for match in re.findall(r'href="(/pics/[^"]+\.jpg)"', html):
+        if "_thumb" in match or match in seen:
+            continue
+        seen.add(match)
+        image_url = f"https://www.babepedia.com{match}"
+        thumb_url = image_url.replace(".jpg", "_thumb3.jpg")
+        results.append({
+            "thumbnail": thumb_url,
+            "image": image_url,
+            "title": f"{name} - Babepedia",
+            "source": "Babepedia",
+            "width": 0,
+            "height": 0,
+        })
 
-        req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            html = response.read().decode("utf-8", errors="ignore")
+    # 2. Gallery previews: "/galleries-thumbs/<gallery>/NN.jpg". The full-size
+    #    image lives at the same path under "/galleries/".
+    for thumb in re.findall(r'["\'](/galleries-thumbs/[^"\']+\.jpg)["\']', html):
+        if thumb in seen:
+            continue
+        seen.add(thumb)
+        thumb_url = f"https://www.babepedia.com{thumb}"
+        image_url = thumb_url.replace("/galleries-thumbs/", "/galleries/")
+        results.append({
+            "thumbnail": thumb_url,
+            "image": image_url,
+            "title": f"{name} - Babepedia",
+            "source": "Babepedia",
+            "width": 0,
+            "height": 0,
+        })
 
-        seen = set()
-
-        # 1. Profile photos: href="/pics/Name.jpg" (full-size; *_thumb3.jpg are thumbs)
-        for match in re.findall(r'href="(/pics/[^"]+\.jpg)"', html):
-            if "_thumb" in match or match in seen:
-                continue
-            seen.add(match)
-            image_url = f"https://www.babepedia.com{match}"
-            thumb_url = image_url.replace(".jpg", "_thumb3.jpg")
-            results.append({
-                "thumbnail": thumb_url,
-                "image": image_url,
-                "title": f"{name} - Babepedia",
-                "source": "Babepedia",
-                "width": 0,
-                "height": 0,
-            })
-            if len(results) >= max_results:
-                return results
-
-        # 2. Gallery previews: "/galleries-thumbs/<gallery>/NN.jpg". The full-size
-        #    image lives at the same path under "/galleries/".
-        for thumb in re.findall(r'["\'](/galleries-thumbs/[^"\']+\.jpg)["\']', html):
-            if thumb in seen:
-                continue
-            seen.add(thumb)
-            thumb_url = f"https://www.babepedia.com{thumb}"
-            image_url = thumb_url.replace("/galleries-thumbs/", "/galleries/")
-            results.append({
-                "thumbnail": thumb_url,
-                "image": image_url,
-                "title": f"{name} - Babepedia",
-                "source": "Babepedia",
-                "width": 0,
-                "height": 0,
-            })
-            if len(results) >= max_results:
-                break
-
-        log.LogInfo(f"[Babepedia] Found {len(results)} images for: {name}")
-
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            log.LogDebug(f"[Babepedia] Performer not found: {name}")
-        else:
-            log.LogWarning(f"[Babepedia] HTTP error {e.code}: {name}")
-    except Exception as e:
-        log.LogWarning(f"[Babepedia] Error: {e}")
-
-    return results
+    log.LogInfo(f"[Babepedia] Found {len(results)} images for: {name}")
+    return SourceResult(results[:max_results])
 
 
-def search_freeones(name, max_results=200, max_galleries=20):
+def search_freeones(name, max_results=200, max_galleries=20, deadline=None):
     """
     Search FreeOnes for performer images.
     FreeOnes has extensive photo galleries for performers.
     Fetches gallery list, then drills into individual galleries.
     Note: FreeOnes uses complex CDN URLs - the thumbnails are often already large.
     """
+    deadline = _default_deadline(deadline)
+    # FreeOnes uses hyphens in URLs
+    url_name = name.lower().replace(" ", "-")
+    base_url = f"https://www.freeones.com/{urllib.parse.quote(url_name)}/photos"
+    html = _fetch_performer_page("FreeOnes", name, base_url, deadline)
+    if html is None:
+        return SourceResult()
+
+    # Gallery links, format /performer-name/photos/gallery-slug, deduplicated in page order
+    gallery_pattern = rf'href="(/{re.escape(url_name)}/photos/[^"]+)"'
+    gallery_paths = list(dict.fromkeys(re.findall(gallery_pattern, html)))
+    gallery_urls = [f"https://www.freeones.com{path}" for path in gallery_paths][:max_galleries]
+    log.LogInfo(f"[FreeOnes] Found {len(gallery_paths)} unique galleries for: {name}")
+
+    pages, warnings, error = _gallery_pages("FreeOnes", gallery_urls, deadline)
+
     results = []
-
-    try:
-        # FreeOnes uses hyphens in URLs
-        url_name = name.lower().replace(" ", "-")
-        base_url = f"https://www.freeones.com/{urllib.parse.quote(url_name)}/photos"
-        log.LogDebug(f"[FreeOnes] Base URL: {base_url}")
-
-        seen_images = set()
-        seen_galleries = set()
-        gallery_urls = []
-
-        # First, get list of gallery URLs from the main photos page
-        try:
-            log.LogDebug(f"[FreeOnes] Fetching gallery list from: {base_url}")
-            req = urllib.request.Request(base_url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                html = response.read().decode('utf-8', errors='ignore')
-
-            # Extract gallery links - format: /performer-name/photos/gallery-slug
-            gallery_pattern = rf'href="(/{re.escape(url_name)}/photos/[^"]+)"'
-            gallery_matches = re.findall(gallery_pattern, html)
-            log.LogDebug(f"[FreeOnes] Found {len(gallery_matches)} gallery link matches")
-
-            for gallery_path in gallery_matches:
-                if gallery_path not in seen_galleries and '/photos/' in gallery_path:
-                    seen_galleries.add(gallery_path)
-                    gallery_urls.append(f"https://www.freeones.com{gallery_path}")
-
-            log.LogInfo(f"[FreeOnes] Found {len(gallery_urls)} unique galleries for: {name}")
-
-        except Exception as e:
-            log.LogWarning(f"[FreeOnes] Failed to get gallery list: {e}")
-
-        # Fetch images from each gallery
-        log.LogDebug(f"[FreeOnes] Processing up to {min(len(gallery_urls), max_galleries)} galleries")
-        for i, gallery_url in enumerate(gallery_urls[:max_galleries]):
-            if len(results) >= max_results:
-                log.LogDebug(f"[FreeOnes] Reached max results ({max_results}), stopping")
-                break
-
-            try:
-                log.LogDebug(f"[FreeOnes] Fetching gallery {i+1}: {gallery_url}")
-                req = urllib.request.Request(gallery_url, headers=HEADERS)
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    html = response.read().decode('utf-8', errors='ignore')
-
-                # Extract image URLs from gallery page
-                pattern = r'(https://(?:thumbs|ch-thumbs|img)\.freeones\.com/[^"\']+\.(?:jpg|webp|png))'
-                matches = re.findall(pattern, html)
-                log.LogDebug(f"[FreeOnes] Gallery {i+1}: Found {len(matches)} image URLs")
-
-                added_from_gallery = 0
-                for thumb_url in matches:
-                    if thumb_url in seen_images or 'favicon' in thumb_url or 'logo' in thumb_url:
-                        continue
-                    seen_images.add(thumb_url)
-
-                    # FreeOnes CDN structure is complex - the thumbs are often already good quality
-                    # URLs like /350x350/ or /1440x0/ indicate resize params
-                    # Keep original URL as both thumb and full since transformations return 403
-                    image_url = thumb_url
-
-                    results.append({
-                        "thumbnail": thumb_url,
-                        "image": image_url,
-                        "title": f"{name} - FreeOnes",
-                        "source": "FreeOnes",
-                        "width": 0,
-                        "height": 0,
-                    })
-                    added_from_gallery += 1
-
-                    if len(results) >= max_results:
-                        break
-
-                log.LogDebug(f"[FreeOnes] Gallery {i+1}: Added {added_from_gallery} unique images")
-
-            except urllib.error.HTTPError as e:
-                log.LogDebug(f"[FreeOnes] Gallery {i+1}: HTTP {e.code}")
+    seen_images = set()
+    pattern = r'(https://(?:thumbs|ch-thumbs|img)\.freeones\.com/[^"\']+\.(?:jpg|webp|png))'
+    for page in pages:
+        for thumb_url in re.findall(pattern, page):
+            if thumb_url in seen_images or 'favicon' in thumb_url or 'logo' in thumb_url:
                 continue
-            except Exception as e:
-                log.LogDebug(f"[FreeOnes] Gallery {i+1}: Error - {e}")
-                continue
+            seen_images.add(thumb_url)
 
-        log.LogInfo(f"[FreeOnes] Found {len(results)} images for: {name}")
+            # FreeOnes CDN structure is complex - the thumbs are often already good quality
+            # URLs like /350x350/ or /1440x0/ indicate resize params
+            # Keep original URL as both thumb and full since transformations return 403
+            image_url = thumb_url
 
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            log.LogDebug(f"[FreeOnes] Performer not found: {name}")
-        else:
-            log.LogWarning(f"[FreeOnes] HTTP error {e.code}: {name}")
-    except Exception as e:
-        log.LogWarning(f"[FreeOnes] Error: {e}")
+            results.append({
+                "thumbnail": thumb_url,
+                "image": image_url,
+                "title": f"{name} - FreeOnes",
+                "source": "FreeOnes",
+                "width": 0,
+                "height": 0,
+            })
 
-    return results
+    if error and not results:
+        raise error
+    log.LogInfo(f"[FreeOnes] Found {len(results)} images for: {name}")
+    return SourceResult(results[:max_results], warnings, partial=bool(warnings))
 
 
-def search_pornpics(name, max_results=200, max_galleries=20):
+def search_pornpics(name, max_results=200, max_galleries=20, deadline=None):
     """
     Search PornPics for performer images.
     PornPics has extensive galleries organized by performer.
     Extracts gallery set IDs from performer page, then drills into each gallery.
     """
+    deadline = _default_deadline(deadline)
+    # PornPics uses hyphens and lowercase
+    url_name = name.lower().replace(" ", "-")
+    base_url = f"https://www.pornpics.com/pornstars/{urllib.parse.quote(url_name)}/"
+    html = _fetch_performer_page("PornPics", name, base_url, deadline)
+    if html is None:
+        return SourceResult()
+
     results = []
+    seen_images = set()
 
-    try:
-        # PornPics uses hyphens and lowercase
-        url_name = name.lower().replace(" ", "-")
-        base_url = f"https://www.pornpics.com/pornstars/{urllib.parse.quote(url_name)}/"
-        log.LogDebug(f"[PornPics] Base URL: {base_url}")
+    # Get profile image first
+    profile_pattern = r'(https://cdni\.pornpics\.com/models/[^"\']+\.jpg)'
+    for img_url in re.findall(profile_pattern, html)[:1]:
+        seen_images.add(img_url)
+        results.append({
+            "thumbnail": img_url,
+            "image": img_url.replace("/460/", "/1280/"),
+            "title": f"{name} - PornPics Profile",
+            "source": "PornPics",
+            "width": 0,
+            "height": 0,
+        })
 
-        seen_images = set()
-        gallery_ids = []
+    # Extract gallery set IDs from image URLs on the performer page
+    # Format: /460/7/91/67655164/67655164_004_98f9.jpg
+    # The 8-digit number (67655164) is the gallery/set ID. Sorted, so the cap
+    # always picks the same galleries.
+    gallery_ids = sorted(set(re.findall(r'/(\d{8})/\d{8}_', html)))
+    log.LogDebug(f"[PornPics] Found {len(gallery_ids)} unique gallery IDs for: {name}")
+    gallery_urls = [f"https://www.pornpics.com/galleries/{gid}/" for gid in gallery_ids[:max_galleries]]
 
-        # First, get the performer page
-        try:
-            log.LogDebug(f"[PornPics] Fetching performer page: {base_url}")
-            req = urllib.request.Request(base_url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                html = response.read().decode('utf-8', errors='ignore')
+    pages, warnings, error = _gallery_pages("PornPics", gallery_urls, deadline)
 
-            # Get profile image first
-            profile_pattern = r'(https://cdni\.pornpics\.com/models/[^"\']+\.jpg)'
-            profile_matches = re.findall(profile_pattern, html)
-            log.LogDebug(f"[PornPics] Found {len(profile_matches)} profile image matches")
-            for img_url in profile_matches[:1]:
-                if img_url not in seen_images:
-                    seen_images.add(img_url)
-                    results.append({
-                        "thumbnail": img_url,
-                        "image": img_url.replace("/460/", "/1280/"),
-                        "title": f"{name} - PornPics Profile",
-                        "source": "PornPics",
-                        "width": 0,
-                        "height": 0,
-                    })
-
-            # Extract gallery set IDs from image URLs on the performer page
-            # Format: /460/7/91/67655164/67655164_004_98f9.jpg
-            # The 8-digit number (67655164) is the gallery/set ID
-            set_id_pattern = r'/(\d{8})/\d{8}_'
-            set_id_matches = re.findall(set_id_pattern, html)
-            gallery_ids = list(set(set_id_matches))  # Deduplicate
-
-            log.LogDebug(f"[PornPics] Found {len(gallery_ids)} unique gallery IDs for: {name}")
-
-        except Exception as e:
-            log.LogDebug(f"[PornPics] Failed to get performer page: {e}")
-
-        # Drill into each gallery using /galleries/{set_id}/
-        log.LogDebug(f"[PornPics] Processing up to {min(len(gallery_ids), max_galleries)} galleries")
-        for i, gallery_id in enumerate(gallery_ids[:max_galleries]):
-            if len(results) >= max_results:
-                log.LogDebug(f"[PornPics] Reached max results ({max_results}), stopping")
-                break
-
-            gallery_url = f"https://www.pornpics.com/galleries/{gallery_id}/"
-
-            try:
-                log.LogDebug(f"[PornPics] Fetching gallery {i+1}: {gallery_url}")
-                req = urllib.request.Request(gallery_url, headers=HEADERS)
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    html = response.read().decode('utf-8', errors='ignore')
-
-                # Extract image URLs from gallery
-                pattern = r'(https://cdni\.pornpics\.com/(?:460|1280)/[^"\'>\s]+\.jpg)'
-                matches = re.findall(pattern, html)
-                log.LogDebug(f"[PornPics] Gallery {i+1}: Found {len(matches)} image URLs")
-
-                added_from_gallery = 0
-                for img_url in matches:
-                    if img_url in seen_images:
-                        continue
-                    seen_images.add(img_url)
-
-                    # Use 460 as thumbnail, 1280 as full
-                    thumb_url = img_url.replace("/1280/", "/460/")
-                    image_url = img_url.replace("/460/", "/1280/")
-
-                    results.append({
-                        "thumbnail": thumb_url,
-                        "image": image_url,
-                        "title": f"{name} - PornPics",
-                        "source": "PornPics",
-                        "width": 0,
-                        "height": 0,
-                    })
-                    added_from_gallery += 1
-
-                    if len(results) >= max_results:
-                        break
-
-                log.LogDebug(f"[PornPics] Gallery {i+1}: Added {added_from_gallery} unique images")
-
-            except urllib.error.HTTPError as e:
-                log.LogDebug(f"[PornPics] Gallery {i+1}: HTTP {e.code}")
+    # Each photo links the 1280px image and shows the 460px one
+    pattern = r'(https://cdni\.pornpics\.com/(?:460|1280)/[^"\'>\s]+\.jpg)'
+    for page in pages:
+        for img_url in re.findall(pattern, page):
+            # Use 460 as thumbnail, 1280 as full
+            thumb_url = img_url.replace("/1280/", "/460/")
+            image_url = img_url.replace("/460/", "/1280/")
+            if image_url in seen_images:
                 continue
-            except Exception as e:
-                log.LogDebug(f"[PornPics] Gallery {i+1}: Error - {e}")
-                continue
+            seen_images.add(image_url)
 
-        log.LogInfo(f"[PornPics] Found {len(results)} images for: {name}")
+            results.append({
+                "thumbnail": thumb_url,
+                "image": image_url,
+                "title": f"{name} - PornPics",
+                "source": "PornPics",
+                "width": 0,
+                "height": 0,
+            })
 
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            log.LogDebug(f"[PornPics] Performer not found: {name}")
-        else:
-            log.LogWarning(f"[PornPics] HTTP error {e.code}: {name}")
-    except Exception as e:
-        log.LogWarning(f"[PornPics] Error: {e}")
-
-    return results
+    if error and not results:
+        raise error
+    log.LogInfo(f"[PornPics] Found {len(results)} images for: {name}")
+    return SourceResult(results[:max_results], warnings, partial=bool(warnings))
 
 
-def search_elitebabes(name, max_results=100, max_galleries=10):
+def search_elitebabes(name, max_results=100, max_galleries=10, deadline=None):
     """
     Search EliteBabes for performer images.
     EliteBabes has high-quality photosets with multiple size options.
     URL format: https://cdn.elitebabes.com/content/XXXXXX/filename_w400.jpg
     Sizes: _w200, _w400, _w600, _w800, or no suffix for full size (~400KB).
     """
+    deadline = _default_deadline(deadline)
+    # EliteBabes uses hyphens and lowercase
+    url_name = name.lower().replace(" ", "-")
+    base_url = f"https://www.elitebabes.com/model/{urllib.parse.quote(url_name)}/"
+    html = _fetch_performer_page("EliteBabes", name, base_url, deadline)
+    if html is None:
+        return SourceResult()
+
+    # Extract gallery links - format: /gallery-name-12345/
+    gallery_pattern = r'href="(https://www\.elitebabes\.com/[^"]+/)"[^>]*class="[^"]*gallery[^"]*"'
+    gallery_matches = re.findall(gallery_pattern, html)
+
+    # Also try simpler pattern for gallery links
+    if not gallery_matches:
+        gallery_pattern2 = r'href="(https://www\.elitebabes\.com/[a-z0-9-]+-\d+/)"'
+        gallery_matches = re.findall(gallery_pattern2, html)
+
+    # Sorted, so the cap always picks the same galleries
+    gallery_urls = sorted(set(gallery_matches))[:max_galleries]
+    log.LogDebug(f"[EliteBabes] Found {len(set(gallery_matches))} gallery links")
+
+    pages, warnings, error = _gallery_pages("EliteBabes", gallery_urls, deadline)
+
     results = []
+    seen_images = set()
+    # Image URLs - format: cdn.elitebabes.com/content/XXXXXX/filename_wNNN.jpg
+    pattern = r'(https://cdn\.elitebabes\.com/content/[^"\'>\s]+_w(?:200|400|600|800)\.jpg)'
+    for page in pages:
+        for img_url in re.findall(pattern, page):
+            # Normalize to base (remove size suffix for full-size)
+            # _w400.jpg -> .jpg (full size)
+            base_img = re.sub(r'_w\d+\.jpg$', '.jpg', img_url)
 
-    try:
-        # EliteBabes uses hyphens and lowercase
-        url_name = name.lower().replace(" ", "-")
-        base_url = f"https://www.elitebabes.com/model/{urllib.parse.quote(url_name)}/"
-        log.LogDebug(f"[EliteBabes] Base URL: {base_url}")
-
-        seen_images = set()
-        gallery_urls = []
-
-        # First, get the model page
-        try:
-            log.LogDebug(f"[EliteBabes] Fetching model page: {base_url}")
-            req = urllib.request.Request(base_url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                html = response.read().decode('utf-8', errors='ignore')
-
-            # Extract gallery links - format: /gallery-name-12345/
-            gallery_pattern = r'href="(https://www\.elitebabes\.com/[^"]+/)"[^>]*class="[^"]*gallery[^"]*"'
-            gallery_matches = re.findall(gallery_pattern, html)
-
-            # Also try simpler pattern for gallery links
-            if not gallery_matches:
-                gallery_pattern2 = r'href="(https://www\.elitebabes\.com/[a-z0-9-]+-\d+/)"'
-                gallery_matches = re.findall(gallery_pattern2, html)
-
-            gallery_urls = list(set(gallery_matches))[:max_galleries]
-            log.LogDebug(f"[EliteBabes] Found {len(gallery_urls)} gallery links")
-
-        except Exception as e:
-            log.LogDebug(f"[EliteBabes] Failed to get model page: {e}")
-
-        # Fetch images from each gallery
-        log.LogDebug(f"[EliteBabes] Processing up to {min(len(gallery_urls), max_galleries)} galleries")
-        for i, gallery_url in enumerate(gallery_urls[:max_galleries]):
-            if len(results) >= max_results:
-                log.LogDebug(f"[EliteBabes] Reached max results ({max_results}), stopping")
-                break
-
-            try:
-                log.LogDebug(f"[EliteBabes] Fetching gallery {i+1}: {gallery_url}")
-                req = urllib.request.Request(gallery_url, headers=HEADERS)
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    html = response.read().decode('utf-8', errors='ignore')
-
-                # Extract image URLs - format: cdn.elitebabes.com/content/XXXXXX/filename_wNNN.jpg
-                pattern = r'(https://cdn\.elitebabes\.com/content/[^"\'>\s]+_w(?:200|400|600|800)\.jpg)'
-                matches = re.findall(pattern, html)
-                log.LogDebug(f"[EliteBabes] Gallery {i+1}: Found {len(matches)} image URLs")
-
-                added_from_gallery = 0
-                for img_url in matches:
-                    # Normalize to base (remove size suffix for full-size)
-                    # _w400.jpg -> .jpg (full size)
-                    base_img = re.sub(r'_w\d+\.jpg$', '.jpg', img_url)
-
-                    if base_img in seen_images:
-                        continue
-                    seen_images.add(base_img)
-
-                    # Use _w400 as thumbnail, no suffix for full size
-                    thumb_url = base_img.replace('.jpg', '_w400.jpg')
-                    image_url = base_img  # Full size has no suffix
-
-                    results.append({
-                        "thumbnail": thumb_url,
-                        "image": image_url,
-                        "title": f"{name} - EliteBabes",
-                        "source": "EliteBabes",
-                        "width": 0,
-                        "height": 0,
-                    })
-                    added_from_gallery += 1
-
-                    if len(results) >= max_results:
-                        break
-
-                log.LogDebug(f"[EliteBabes] Gallery {i+1}: Added {added_from_gallery} unique images")
-
-            except urllib.error.HTTPError as e:
-                log.LogDebug(f"[EliteBabes] Gallery {i+1}: HTTP {e.code}")
+            if base_img in seen_images:
                 continue
-            except Exception as e:
-                log.LogDebug(f"[EliteBabes] Gallery {i+1}: Error - {e}")
-                continue
+            seen_images.add(base_img)
 
-        log.LogInfo(f"[EliteBabes] Found {len(results)} images for: {name}")
+            # Use _w400 as thumbnail, no suffix for full size
+            thumb_url = base_img.replace('.jpg', '_w400.jpg')
+            image_url = base_img  # Full size has no suffix
 
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            log.LogDebug(f"[EliteBabes] Performer not found: {name}")
-        else:
-            log.LogWarning(f"[EliteBabes] HTTP error {e.code}: {name}")
-    except Exception as e:
-        log.LogWarning(f"[EliteBabes] Error: {e}")
+            results.append({
+                "thumbnail": thumb_url,
+                "image": image_url,
+                "title": f"{name} - EliteBabes",
+                "source": "EliteBabes",
+                "width": 0,
+                "height": 0,
+            })
 
-    return results
+    if error and not results:
+        raise error
+    log.LogInfo(f"[EliteBabes] Found {len(results)} images for: {name}")
+    return SourceResult(results[:max_results], warnings, partial=bool(warnings))
 
 
-def search_boobpedia(name, max_results=50):
+def search_boobpedia(name, max_results=50, deadline=None):
     """
     Search Boobpedia for performer images.
     Boobpedia is a MediaWiki-style site with performer photos.
     Thumbnails are relative paths: /wiki/images/thumb/X/XX/Filename.jpg/NNNpx-Filename.jpg
     Full size: /wiki/images/X/XX/Filename.jpg
     """
+    deadline = _default_deadline(deadline)
+    # Boobpedia uses underscores in URLs (wiki style)
+    url_name = name.replace(" ", "_")
+    base_url = f"https://www.boobpedia.com/boobs/{urllib.parse.quote(url_name)}"
+    html = _fetch_performer_page("Boobpedia", name, base_url, deadline)
+    if html is None:
+        return SourceResult()
+
     results = []
+    seen = set()
 
-    try:
-        # Boobpedia uses underscores in URLs (wiki style)
-        url_name = name.replace(" ", "_")
-        base_url = f"https://www.boobpedia.com/boobs/{urllib.parse.quote(url_name)}"
-        log.LogDebug(f"[Boobpedia] Base URL: {base_url}")
+    # Extract thumbnail image links (relative paths)
+    # Format: /wiki/images/thumb/X/XX/Filename.jpg/NNNpx-Filename.jpg
+    # We want content images, not icons (which have small sizes like 16px, 18px)
+    pattern = r'src="(/wiki/images/thumb/[^"]+)"'
+    matches = re.findall(pattern, html)
+    log.LogDebug(f"[Boobpedia] Found {len(matches)} thumbnail matches")
 
-        seen = set()
+    for thumb_path in matches:
+        # Skip small icons (16px, 18px, 70px are usually icons or tiny thumbs)
+        if re.search(r'/(?:16|18|20)px-', thumb_path):
+            continue
 
-        try:
-            log.LogDebug(f"[Boobpedia] Fetching: {base_url}")
-            req = urllib.request.Request(base_url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                html = response.read().decode('utf-8', errors='ignore')
+        if thumb_path in seen or len(results) >= max_results:
+            continue
+        seen.add(thumb_path)
 
-            # Extract thumbnail image links (relative paths)
-            # Format: /wiki/images/thumb/X/XX/Filename.jpg/NNNpx-Filename.jpg
-            # We want content images, not icons (which have small sizes like 16px, 18px)
-            pattern = r'src="(/wiki/images/thumb/[^"]+)"'
-            matches = re.findall(pattern, html)
-            log.LogDebug(f"[Boobpedia] Found {len(matches)} thumbnail matches")
+        # Transform thumbnail to full-size
+        # /wiki/images/thumb/X/XX/Filename.jpg/NNNpx-Filename.jpg -> /wiki/images/X/XX/Filename.jpg
+        match = re.match(r'(/wiki/images/)thumb/([a-z0-9]/[a-z0-9]+/[^/]+\.(?:jpg|jpeg|png|gif))/\d+px-', thumb_path, re.IGNORECASE)
+        if match:
+            full_path = match.group(1) + match.group(2)
+        else:
+            # Fallback: just use thumbnail path
+            full_path = thumb_path
 
-            for thumb_path in matches:
-                # Skip small icons (16px, 18px, 70px are usually icons or tiny thumbs)
-                if re.search(r'/(?:16|18|20)px-', thumb_path):
-                    continue
+        thumb_url = f"https://www.boobpedia.com{thumb_path}"
+        image_url = f"https://www.boobpedia.com{full_path}"
 
-                if thumb_path in seen or len(results) >= max_results:
-                    continue
-                seen.add(thumb_path)
+        results.append({
+            "thumbnail": thumb_url,
+            "image": image_url,
+            "title": f"{name} - Boobpedia",
+            "source": "Boobpedia",
+            "width": 0,
+            "height": 0,
+        })
 
-                # Transform thumbnail to full-size
-                # /wiki/images/thumb/X/XX/Filename.jpg/NNNpx-Filename.jpg -> /wiki/images/X/XX/Filename.jpg
-                match = re.match(r'(/wiki/images/)thumb/([a-z0-9]/[a-z0-9]+/[^/]+\.(?:jpg|jpeg|png|gif))/\d+px-', thumb_path, re.IGNORECASE)
-                if match:
-                    full_path = match.group(1) + match.group(2)
-                else:
-                    # Fallback: just use thumbnail path
-                    full_path = thumb_path
-
-                thumb_url = f"https://www.boobpedia.com{thumb_path}"
-                image_url = f"https://www.boobpedia.com{full_path}"
-
-                results.append({
-                    "thumbnail": thumb_url,
-                    "image": image_url,
-                    "title": f"{name} - Boobpedia",
-                    "source": "Boobpedia",
-                    "width": 0,
-                    "height": 0,
-                })
-
-            log.LogInfo(f"[Boobpedia] Found {len(results)} images for: {name}")
-
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                log.LogDebug(f"[Boobpedia] Performer not found: {name}")
-            else:
-                log.LogWarning(f"[Boobpedia] HTTP {e.code} for {base_url}")
-        except Exception as e:
-            log.LogDebug(f"[Boobpedia] Error fetching {base_url}: {e}")
-
-    except Exception as e:
-        log.LogWarning(f"[Boobpedia] Error: {e}")
-
-    return results
+    log.LogInfo(f"[Boobpedia] Found {len(results)} images for: {name}")
+    return SourceResult(results)
 
 
-def search_javdatabase(name, max_results=100, max_pages=5):
+def _parse_javdatabase_page(html, name, seen, results, max_results):
+    """Append the idol images, covers and vertical images on one JavDatabase page to results."""
+    # Extract profile/idol images (webp format)
+    # Pattern: /idolimages/full/name.webp or /idolimages/thumb/name.webp
+    idol_pattern = r'(https://www\.javdatabase\.com/idolimages/(?:full|thumb)/[^"\'>\s]+\.webp)'
+    idol_matches = re.findall(idol_pattern, html)
+    log.LogDebug(f"[JavDatabase] Found {len(idol_matches)} idol image matches")
+
+    for img_url in idol_matches:
+        if img_url in seen:
+            continue
+        seen.add(img_url)
+
+        # Use thumb as thumbnail, full as image
+        if '/thumb/' in img_url:
+            thumb_url = img_url
+            image_url = img_url.replace('/thumb/', '/full/')
+        else:
+            image_url = img_url
+            thumb_url = img_url.replace('/full/', '/thumb/')
+
+        results.append({
+            "thumbnail": thumb_url,
+            "image": image_url,
+            "title": f"{name} - JavDatabase",
+            "source": "JavDatabase",
+            "width": 0,
+            "height": 0,
+        })
+
+        if len(results) >= max_results:
+            break
+
+    # Also extract movie cover thumbnails
+    # Pattern: /covers/thumb/prefix/codeps.webp
+    cover_pattern = r'(https://www\.javdatabase\.com/covers/thumb/[^"\'>\s]+\.webp)'
+    cover_matches = re.findall(cover_pattern, html)
+    log.LogDebug(f"[JavDatabase] Found {len(cover_matches)} cover matches")
+
+    for img_url in cover_matches[:20]:  # Limit covers per page
+        if img_url in seen or len(results) >= max_results:
+            continue
+        seen.add(img_url)
+
+        # Covers: thumb -> full by replacing path
+        thumb_url = img_url
+        image_url = img_url.replace('/covers/thumb/', '/covers/full/')
+
+        results.append({
+            "thumbnail": thumb_url,
+            "image": image_url,
+            "title": f"{name} - JavDatabase Cover",
+            "source": "JavDatabase",
+            "width": 0,
+            "height": 0,
+        })
+
+    # Extract vertical/promotional images
+    vertical_pattern = r'(https://www\.javdatabase\.com/vertical/[^"\'>\s]+\.jpg)'
+    vertical_matches = re.findall(vertical_pattern, html)
+    log.LogDebug(f"[JavDatabase] Found {len(vertical_matches)} vertical matches")
+
+    for img_url in vertical_matches[:10]:
+        if img_url in seen or len(results) >= max_results:
+            continue
+        seen.add(img_url)
+
+        results.append({
+            "thumbnail": img_url,
+            "image": img_url,
+            "title": f"{name} - JavDatabase",
+            "source": "JavDatabase",
+            "width": 0,
+            "height": 0,
+        })
+
+
+def search_javdatabase(name, max_results=100, max_pages=5, deadline=None):
     """
     Search JavDatabase for JAV performer images.
     JavDatabase has idol profiles with photos and movie covers.
     URL format: https://www.javdatabase.com/idols/name-here/
     Image format: https://www.javdatabase.com/idolimages/full/name.webp
+
+    Reads the profile page, then ?ipage=2..max_pages one at a time until a 404
+    (the last page). A later page that fails is skipped.
     """
+    deadline = _default_deadline(deadline)
+    # JavDatabase uses lowercase hyphenated names
+    url_name = name.lower().replace(" ", "-")
+    base_url = f"https://www.javdatabase.com/idols/{urllib.parse.quote(url_name)}/"
+    html = _fetch_performer_page("JavDatabase", name, base_url, deadline)
+    if html is None:
+        return SourceResult()
+
     results = []
+    seen = set()
+    pages = [html]
+    _parse_javdatabase_page(html, name, seen, results, max_results)
 
-    try:
-        # JavDatabase uses lowercase hyphenated names
-        url_name = name.lower().replace(" ", "-")
-        base_url = f"https://www.javdatabase.com/idols/{urllib.parse.quote(url_name)}/"
-        log.LogDebug(f"[JavDatabase] Base URL: {base_url}")
+    for page_url in [f"{base_url}?ipage={i}" for i in range(2, max_pages + 1)]:
+        if len(results) >= max_results:
+            break
+        log.LogDebug(f"[JavDatabase] Fetching: {page_url}")
+        try:
+            html = _fetch(page_url, deadline)
+        except SourceNotFound:
+            log.LogDebug(f"[JavDatabase] Page not found: {page_url}")
+            break  # No more pages
+        except SourceError as e:
+            log.LogDebug(f"[JavDatabase] Skipped {page_url}: {e}")
+            pages.append(e)
+            continue
+        pages.append(html)
+        _parse_javdatabase_page(html, name, seen, results, max_results)
 
-        seen = set()
-
-        # Try to get the main profile page and paginated gallery pages
-        pages_to_try = [base_url] + [f"{base_url}?ipage={i}" for i in range(2, max_pages + 1)]
-
-        for page_url in pages_to_try:
-            if len(results) >= max_results:
-                break
-
-            try:
-                log.LogDebug(f"[JavDatabase] Fetching: {page_url}")
-                req = urllib.request.Request(page_url, headers=HEADERS)
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    html = response.read().decode('utf-8', errors='ignore')
-
-                # Extract profile/idol images (webp format)
-                # Pattern: /idolimages/full/name.webp or /idolimages/thumb/name.webp
-                idol_pattern = r'(https://www\.javdatabase\.com/idolimages/(?:full|thumb)/[^"\'>\s]+\.webp)'
-                idol_matches = re.findall(idol_pattern, html)
-                log.LogDebug(f"[JavDatabase] Found {len(idol_matches)} idol image matches")
-
-                for img_url in idol_matches:
-                    if img_url in seen:
-                        continue
-                    seen.add(img_url)
-
-                    # Use thumb as thumbnail, full as image
-                    if '/thumb/' in img_url:
-                        thumb_url = img_url
-                        image_url = img_url.replace('/thumb/', '/full/')
-                    else:
-                        image_url = img_url
-                        thumb_url = img_url.replace('/full/', '/thumb/')
-
-                    results.append({
-                        "thumbnail": thumb_url,
-                        "image": image_url,
-                        "title": f"{name} - JavDatabase",
-                        "source": "JavDatabase",
-                        "width": 0,
-                        "height": 0,
-                    })
-
-                    if len(results) >= max_results:
-                        break
-
-                # Also extract movie cover thumbnails
-                # Pattern: /covers/thumb/prefix/codeps.webp
-                cover_pattern = r'(https://www\.javdatabase\.com/covers/thumb/[^"\'>\s]+\.webp)'
-                cover_matches = re.findall(cover_pattern, html)
-                log.LogDebug(f"[JavDatabase] Found {len(cover_matches)} cover matches")
-
-                for img_url in cover_matches[:20]:  # Limit covers per page
-                    if img_url in seen or len(results) >= max_results:
-                        continue
-                    seen.add(img_url)
-
-                    # Covers: thumb -> full by replacing path
-                    thumb_url = img_url
-                    image_url = img_url.replace('/covers/thumb/', '/covers/full/')
-
-                    results.append({
-                        "thumbnail": thumb_url,
-                        "image": image_url,
-                        "title": f"{name} - JavDatabase Cover",
-                        "source": "JavDatabase",
-                        "width": 0,
-                        "height": 0,
-                    })
-
-                # Extract vertical/promotional images
-                vertical_pattern = r'(https://www\.javdatabase\.com/vertical/[^"\'>\s]+\.jpg)'
-                vertical_matches = re.findall(vertical_pattern, html)
-                log.LogDebug(f"[JavDatabase] Found {len(vertical_matches)} vertical matches")
-
-                for img_url in vertical_matches[:10]:
-                    if img_url in seen or len(results) >= max_results:
-                        continue
-                    seen.add(img_url)
-
-                    results.append({
-                        "thumbnail": img_url,
-                        "image": img_url,
-                        "title": f"{name} - JavDatabase",
-                        "source": "JavDatabase",
-                        "width": 0,
-                        "height": 0,
-                    })
-
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    log.LogDebug(f"[JavDatabase] Page not found: {page_url}")
-                    break  # No more pages
-                else:
-                    log.LogDebug(f"[JavDatabase] HTTP {e.code} for {page_url}")
-                continue
-            except Exception as e:
-                log.LogDebug(f"[JavDatabase] Error fetching {page_url}: {e}")
-                continue
-
-        log.LogInfo(f"[JavDatabase] Found {len(results)} images for: {name}")
-
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            log.LogDebug(f"[JavDatabase] Performer not found: {name}")
-        else:
-            log.LogWarning(f"[JavDatabase] HTTP error {e.code}: {name}")
-    except Exception as e:
-        log.LogWarning(f"[JavDatabase] Error: {e}")
-
-    return results
+    warnings, _ = _page_failures(pages, "pages")  # page 1 loaded, so never all failed
+    for warning in warnings:
+        log.LogWarning(f"[JavDatabase] {warning}")
+    log.LogInfo(f"[JavDatabase] Found {len(results)} images for: {name}")
+    return SourceResult(results, warnings, partial=bool(warnings))
 
 
-def search_duckduckgo_images(query, size="Large", layout="All", max_results=50):
+def search_duckduckgo_images(query, size="Large", layout="All", max_results=50, deadline=None):
     """
     Search DuckDuckGo Images with safe search off.
     Used as a fallback when performer-specific sites don't have results.
     DDG requires a two-step process: get vqd token, then query /i.js
     """
+    deadline = _default_deadline(deadline)
     results = []
 
     log.LogDebug(f"[DuckDuckGo] Query: {query}, size: {size}, layout: {layout}")
 
-    try:
-        # DDG requires specific headers to avoid 403
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "identity",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        }
+    # DDG wants these on top of the shared HEADERS to avoid 403
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Encoding": "identity",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
 
-        # Step 1: Get the vqd token from the HTML search page
-        search_params = urllib.parse.urlencode({
-            "q": query,
-            "t": "h_",
-            "iar": "images",
-            "iax": "images",
-            "ia": "images",
-        })
-        search_url = f"https://duckduckgo.com/?{search_params}"
+    # Step 1: Get the vqd token from the HTML search page
+    search_params = urllib.parse.urlencode({
+        "q": query,
+        "t": "h_",
+        "iar": "images",
+        "iax": "images",
+        "ia": "images",
+    })
+    search_url = f"https://duckduckgo.com/?{search_params}"
 
-        log.LogDebug(f"[DuckDuckGo] Getting vqd token...")
-        req = urllib.request.Request(search_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            html = response.read().decode('utf-8', errors='ignore')
+    log.LogDebug(f"[DuckDuckGo] Getting vqd token...")
+    html = _fetch(search_url, deadline, headers)
 
-        # Extract vqd token - multiple patterns
-        vqd = None
-        vqd_patterns = [
-            r'vqd="([^"]+)"',
-            r"vqd='([^']+)'",
-            r'vqd=([0-9a-zA-Z_-]+)',
-            r'"vqd":"([^"]+)"',
-        ]
-        for pattern in vqd_patterns:
-            match = re.search(pattern, html)
-            if match:
-                vqd = match.group(1)
-                break
+    # Extract vqd token - multiple patterns
+    vqd = None
+    vqd_patterns = [
+        r'vqd="([^"]+)"',
+        r"vqd='([^']+)'",
+        r'vqd=([0-9a-zA-Z_-]+)',
+        r'"vqd":"([^"]+)"',
+    ]
+    for pattern in vqd_patterns:
+        match = re.search(pattern, html)
+        if match:
+            vqd = match.group(1)
+            break
 
-        if not vqd:
-            log.LogWarning("[DuckDuckGo] Could not extract vqd token, trying HTML scraping")
-            # Fallback: scrape images directly from HTML
-            img_pattern = r'"image":"(https?://[^"]+)"'
-            thumb_pattern = r'"thumbnail":"(https?://[^"]+)"'
+    if not vqd:
+        log.LogWarning("[DuckDuckGo] Could not extract vqd token, trying HTML scraping")
+        # Fallback: scrape images directly from HTML
+        img_pattern = r'"image":"(https?://[^"]+)"'
+        thumb_pattern = r'"thumbnail":"(https?://[^"]+)"'
 
-            images_found = re.findall(img_pattern, html)
-            thumbs_found = re.findall(thumb_pattern, html)
+        images_found = re.findall(img_pattern, html)
+        thumbs_found = re.findall(thumb_pattern, html)
 
-            for i, img_url in enumerate(images_found[:max_results]):
-                thumb_url = thumbs_found[i] if i < len(thumbs_found) else img_url
-                img_url = img_url.replace("\\u002F", "/").replace("\\/", "/")
-                thumb_url = thumb_url.replace("\\u002F", "/").replace("\\/", "/")
-
-                results.append({
-                    "thumbnail": thumb_url,
-                    "image": img_url,
-                    "title": query,
-                    "source": "DuckDuckGo",
-                    "width": 0,
-                    "height": 0,
-                })
-
-            if results:
-                log.LogInfo(f"[DuckDuckGo] Found {len(results)} images via HTML scraping")
-                return results
-            return results
-
-        log.LogDebug(f"[DuckDuckGo] Got vqd token: {vqd[:20]}...")
-
-        # Step 2: Query the image API
-        size_map = {"Large": "Large", "Medium": "Medium", "Small": "Small", "All": ""}
-        layout_map = {"Portrait": "Tall", "Landscape": "Wide", "Square": "Square", "All": ""}
-
-        filters = []
-        if size_map.get(size):
-            filters.append(f"size:{size_map[size]}")
-        if layout_map.get(layout):
-            filters.append(f"aspectratio:{layout_map[layout]}")
-        filter_str = ",".join(filters) if filters else ""
-
-        image_params = {
-            "l": "us-en",
-            "o": "json",
-            "q": query,
-            "vqd": vqd,
-            "f": filter_str + ",,,",
-            "p": "-1",  # SafeSearch off (-1 = off, 1 = moderate)
-            "s": "0",
-        }
-
-        api_url = "https://duckduckgo.com/i.js?" + urllib.parse.urlencode(image_params)
-        log.LogDebug(f"[DuckDuckGo] Fetching images from API...")
-
-        # Update headers for API request
-        api_headers = {
-            **headers,
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Referer": search_url,
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
-        req = urllib.request.Request(api_url, headers=api_headers)
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = response.read().decode('utf-8', errors='ignore')
-
-        # Parse JSON response
-        try:
-            json_data = json.loads(data)
-            images = json_data.get("results", [])
-            log.LogDebug(f"[DuckDuckGo] Got {len(images)} results from API")
-        except json.JSONDecodeError:
-            log.LogDebug("[DuckDuckGo] JSON parse failed, trying regex extraction")
-            pattern = r'"image"\s*:\s*"([^"]+)"'
-            thumb_pat = r'"thumbnail"\s*:\s*"([^"]+)"'
-            title_pat = r'"title"\s*:\s*"([^"]*)"'
-
-            img_matches = re.findall(pattern, data)
-            thumb_matches = re.findall(thumb_pat, data)
-            title_matches = re.findall(title_pat, data)
-
-            images = []
-            for i, img in enumerate(img_matches):
-                images.append({
-                    "image": img,
-                    "thumbnail": thumb_matches[i] if i < len(thumb_matches) else img,
-                    "title": title_matches[i] if i < len(title_matches) else "",
-                })
-            log.LogDebug(f"[DuckDuckGo] Regex found {len(images)} images")
-
-        for img in images[:max_results]:
-            img_url = img.get("image", "")
-            thumb_url = img.get("thumbnail", "")
-            title = img.get("title", "")
-
-            if not img_url:
-                continue
-
-            # Unescape URLs
-            img_url = img_url.replace("\\u0026", "&").replace("\\/", "/").replace("\\u002F", "/")
-            thumb_url = thumb_url.replace("\\u0026", "&").replace("\\/", "/").replace("\\u002F", "/")
-
-            width = img.get("width", 0)
-            height = img.get("height", 0)
-
-            # Skip small images (< 300px on shorter dimension)
-            if width > 0 and height > 0:
-                if min(width, height) < 300:
-                    continue
+        for i, img_url in enumerate(images_found[:max_results]):
+            thumb_url = thumbs_found[i] if i < len(thumbs_found) else img_url
+            img_url = img_url.replace("\\u002F", "/").replace("\\/", "/")
+            thumb_url = thumb_url.replace("\\u002F", "/").replace("\\/", "/")
 
             results.append({
-                "thumbnail": thumb_url or img_url,
+                "thumbnail": thumb_url,
                 "image": img_url,
-                "title": unescape(title) if title else query,
+                "title": query,
                 "source": "DuckDuckGo",
-                "width": width,
-                "height": height,
+                "width": 0,
+                "height": 0,
             })
 
-        log.LogInfo(f"[DuckDuckGo] Found {len(results)} images for query: {query}")
+        if not results:
+            # No token is how DDG turns away a search it is rate-limiting
+            raise SourceBlocked("DuckDuckGo did not return a search token; it may be rate-limiting this address")
+        log.LogInfo(f"[DuckDuckGo] Found {len(results)} images via HTML scraping")
+        return SourceResult(results)
 
-    except Exception as e:
-        log.LogWarning(f"[DuckDuckGo] Error: {e}")
-        import traceback
-        log.LogDebug(f"[DuckDuckGo] Traceback: {traceback.format_exc()}")
+    log.LogDebug(f"[DuckDuckGo] Got vqd token: {vqd[:20]}...")
 
-    return results
+    # Step 2: Query the image API
+    size_map = {"Large": "Large", "Medium": "Medium", "Small": "Small", "All": ""}
+    layout_map = {"Portrait": "Tall", "Landscape": "Wide", "Square": "Square", "All": ""}
+
+    filters = []
+    if size_map.get(size):
+        filters.append(f"size:{size_map[size]}")
+    if layout_map.get(layout):
+        filters.append(f"aspectratio:{layout_map[layout]}")
+    filter_str = ",".join(filters) if filters else ""
+
+    image_params = {
+        "l": "us-en",
+        "o": "json",
+        "q": query,
+        "vqd": vqd,
+        "f": filter_str + ",,,",
+        "p": "-1",  # SafeSearch off (-1 = off, 1 = moderate)
+        "s": "0",
+    }
+
+    api_url = "https://duckduckgo.com/i.js?" + urllib.parse.urlencode(image_params)
+    log.LogDebug(f"[DuckDuckGo] Fetching images from API...")
+
+    # Update headers for API request
+    api_headers = {
+        **headers,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": search_url,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+    data = _fetch(api_url, deadline, api_headers)
+
+    # Parse JSON response
+    try:
+        json_data = json.loads(data)
+        images = json_data.get("results", [])
+        log.LogDebug(f"[DuckDuckGo] Got {len(images)} results from API")
+    except json.JSONDecodeError:
+        log.LogDebug("[DuckDuckGo] JSON parse failed, trying regex extraction")
+        pattern = r'"image"\s*:\s*"([^"]+)"'
+        thumb_pat = r'"thumbnail"\s*:\s*"([^"]+)"'
+        title_pat = r'"title"\s*:\s*"([^"]*)"'
+
+        img_matches = re.findall(pattern, data)
+        thumb_matches = re.findall(thumb_pat, data)
+        title_matches = re.findall(title_pat, data)
+
+        images = []
+        for i, img in enumerate(img_matches):
+            images.append({
+                "image": img,
+                "thumbnail": thumb_matches[i] if i < len(thumb_matches) else img,
+                "title": title_matches[i] if i < len(title_matches) else "",
+            })
+        log.LogDebug(f"[DuckDuckGo] Regex found {len(images)} images")
+
+    for img in images[:max_results]:
+        img_url = img.get("image", "")
+        thumb_url = img.get("thumbnail", "")
+        title = img.get("title", "")
+
+        if not img_url:
+            continue
+
+        # Unescape URLs
+        img_url = img_url.replace("\\u0026", "&").replace("\\/", "/").replace("\\u002F", "/")
+        thumb_url = thumb_url.replace("\\u0026", "&").replace("\\/", "/").replace("\\u002F", "/")
+
+        width = img.get("width", 0)
+        height = img.get("height", 0)
+
+        # Skip small images (< 300px on shorter dimension)
+        if width > 0 and height > 0:
+            if min(width, height) < 300:
+                continue
+
+        results.append({
+            "thumbnail": thumb_url or img_url,
+            "image": img_url,
+            "title": unescape(title) if title else query,
+            "source": "DuckDuckGo",
+            "width": width,
+            "height": height,
+        })
+
+    log.LogInfo(f"[DuckDuckGo] Found {len(results)} images for query: {query}")
+    return SourceResult(results)
 
 
 def _is_small_image_url(img_url, min_size=300):
@@ -1037,45 +991,76 @@ def _is_small_image_url(img_url, min_size=300):
     return False
 
 
+def _run_scraper(source, name, query, size_filter, layout_filter, deadline):
+    """Call the scraper for source. Returns its SourceResult, or None for an unknown source."""
+    if source == "babepedia":
+        return search_babepedia(name, 50, deadline=deadline)
+    if source == "pornpics":
+        return search_pornpics(name, 200, 20, deadline=deadline)
+    if source == "freeones":
+        return search_freeones(name, 200, 20, deadline=deadline)
+    if source == "elitebabes":
+        return search_elitebabes(name, 100, 10, deadline=deadline)
+    if source == "boobpedia":
+        return search_boobpedia(name, 50, deadline=deadline)
+    if source == "javdatabase":
+        return search_javdatabase(name, 100, 5, deadline=deadline)
+    if source == "duckduckgo":
+        # Use the full query (with suffix) for DuckDuckGo
+        return search_duckduckgo_images(query, size_filter, layout_filter, 50, deadline=deadline)
+    if source == "bing":
+        # Legacy - kept for backwards compatibility but DuckDuckGo preferred
+        log.LogDebug("[Bing] Redirecting to DuckDuckGo (Bing deprecated)")
+        return search_duckduckgo_images(query, size_filter, layout_filter, 50, deadline=deadline)
+    return None
+
+
 def search_single_source(source, name, query, size_filter="All", layout_filter="All"):
     """
-    Search a single source for images.
+    Search a single source for images, within SOURCE_BUDGET_SECONDS.
     Used for streaming results to the client one source at a time.
+
+    Returns {"results": [...], "status": ..., "error": ..., "warnings": [...]}, where
+    status is one of:
+      ok       results, nothing went wrong
+      empty    the source has nothing for this performer
+      partial  results, but some pages failed (see warnings)
+      error    the source failed (see error)
+      blocked  the site refused the request (403, 429 or a Cloudflare challenge)
+      timeout  the site did not answer in time
+    error is present only for error, blocked and timeout; warnings only when there are any.
     """
     performer_name = name.strip()
-    results = []
 
     log.LogInfo(f"[{source}] Starting search for: {performer_name}")
     log.LogDebug(f"[{source}] Full query: {query}")
 
     start_time = time.time()
+    deadline = _now() + SOURCE_BUDGET_SECONDS
 
-    if source == "babepedia":
-        results = search_babepedia(performer_name, 50)
-    elif source == "pornpics":
-        results = search_pornpics(performer_name, 200, 20)
-    elif source == "freeones":
-        results = search_freeones(performer_name, 200, 20)
-    elif source == "elitebabes":
-        results = search_elitebabes(performer_name, 100, 10)
-    elif source == "boobpedia":
-        results = search_boobpedia(performer_name, 50)
-    elif source == "javdatabase":
-        results = search_javdatabase(performer_name, 100, 5)
-    elif source == "duckduckgo":
-        # Use the full query (with suffix) for DuckDuckGo
-        results = search_duckduckgo_images(query, size_filter, layout_filter, 50)
-    elif source == "bing":
-        # Legacy - kept for backwards compatibility but DuckDuckGo preferred
-        log.LogDebug("[Bing] Redirecting to DuckDuckGo (Bing deprecated)")
-        results = search_duckduckgo_images(query, size_filter, layout_filter, 50)
-    else:
+    try:
+        found = _run_scraper(source, performer_name, query, size_filter, layout_filter, deadline)
+    except SourceError as e:
+        log.LogWarning(f"[{source}] Search failed ({e.result_status}): {e}")
+        return {"results": [], "status": e.result_status, "error": str(e)}
+    except Exception as e:
+        log.LogError(f"[{source}] Search failed: {e}")
+        log.LogDebug(f"[{source}] Traceback: {traceback.format_exc()}")
+        return {"results": [], "status": "error", "error": f"Unexpected error: {e}"}
+
+    if found is None:
         log.LogWarning(f"Unknown source: {source}")
+        return {"results": [], "status": "error", "error": "Unknown source"}
 
     elapsed = time.time() - start_time
-    log.LogDebug(f"[{source}] Search completed in {elapsed:.2f}s, found {len(results)} results")
+    log.LogDebug(f"[{source}] Search completed in {elapsed:.2f}s, found {len(found)} results")
 
-    results = drop_disallowed_hosts(results, source)
+    warnings = list(found.warnings)
+    results, dropped = drop_disallowed_hosts(list(found), source)
+    if dropped == 1:
+        warnings.append("1 result from an unexpected host was dropped")
+    elif dropped:
+        warnings.append(f"{dropped} results from unexpected hosts were dropped")
 
     # Deduplicate within this source
     seen_urls = set()
@@ -1089,8 +1074,18 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
     if len(unique_results) != len(results):
         log.LogDebug(f"[{source}] Removed {len(results) - len(unique_results)} duplicates within source")
 
-    log.LogInfo(f"[{source}] Returning {len(unique_results)} unique images")
-    return unique_results
+    if found.partial:
+        status = "partial"
+    elif not unique_results:
+        status = "empty"
+    else:
+        status = "ok"
+
+    log.LogInfo(f"[{source}] Returning {len(unique_results)} unique images ({status})")
+    outcome = {"results": unique_results, "status": status}
+    if warnings:
+        outcome["warnings"] = warnings
+    return outcome
 
 
 def search_all_sources(name, query, size_filter="All", layout_filter="All"):
@@ -1110,24 +1105,17 @@ def search_all_sources(name, query, size_filter="All", layout_filter="All"):
     log.LogInfo(f"Searching for performer: {performer_name}")
 
     # 1. Babepedia - usually has good profile photos (up to 50)
-    babepedia_results = search_babepedia(performer_name, 50)
-    all_results.extend(babepedia_results)
-
     # 2. PornPics - drills into galleries (up to 200 images from 20 galleries)
-    pornpics_results = search_pornpics(performer_name, 200, 20)
-    all_results.extend(pornpics_results)
-
     # 3. FreeOnes - drills into galleries (up to 200 images from 20 galleries)
-    freeones_results = search_freeones(performer_name, 200, 20)
-    all_results.extend(freeones_results)
+    # Each one's host check and time budget apply (see search_single_source)
+    for source in ("babepedia", "pornpics", "freeones"):
+        all_results.extend(search_single_source(source, performer_name, query)["results"])
 
     # 4. DuckDuckGo as fallback if we didn't find much from adult sites
     if len(all_results) < 20:
         # Use the full query (with suffix) for DuckDuckGo, pass filters
-        ddg_results = search_duckduckgo_images(query, size_filter, layout_filter, 50)
-        all_results.extend(ddg_results)
-
-    all_results = drop_disallowed_hosts(all_results, "all")
+        ddg = search_single_source("duckduckgo", performer_name, query, size_filter, layout_filter)
+        all_results.extend(ddg["results"])
 
     # Deduplicate by image URL
     seen_urls = set()
@@ -1190,14 +1178,16 @@ def main():
 
     try:
         if source:
-            # Search single source (streaming mode)
-            results = search_single_source(
+            # Search single source (streaming mode): results, status, and error
+            # and warnings when there are any
+            outcome = search_single_source(
                 source=source,
                 name=performer_name,
                 query=query,
                 size_filter=size_filter,
                 layout_filter=layout_filter
             )
+            output = {"output": {**outcome, "query": query, "source": source}}
         else:
             # Search all sources (legacy mode)
             results = search_all_sources(
@@ -1206,14 +1196,13 @@ def main():
                 size_filter=size_filter,
                 layout_filter=layout_filter
             )
-
-        output = {
-            "output": {
-                "results": results,
-                "query": query,
-                "source": source
+            output = {
+                "output": {
+                    "results": results,
+                    "query": query,
+                    "source": source
+                }
             }
-        }
     except Exception as e:
         log.LogError(f"Search failed: {e}")
         output = {
@@ -1221,6 +1210,7 @@ def main():
                 "results": [],
                 "query": query,
                 "source": source,
+                "status": "error",
                 "error": str(e)
             }
         }

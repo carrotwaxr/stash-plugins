@@ -1,0 +1,787 @@
+"""Offline tests for the fetch seam, per-source status and each source's parser.
+
+The fixtures in tests/fixtures/ are synthetic: hand-written copies of the markup each
+site uses, trimmed to what the parsers read, with a made-up performer (Jane Example)
+and made-up image paths on each site's real image hosts.
+"""
+
+import ast
+import email.message
+import io
+import json
+import os
+import re
+import socket
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+
+import pytest
+
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PLUGIN_DIR)
+
+import image_search  # noqa: E402
+from image_search import (  # noqa: E402
+    SourceBlocked,
+    SourceError,
+    SourceHTTPError,
+    SourceNotFound,
+    SourceResult,
+    SourceTimeout,
+)
+
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+NAME = "Jane Example"
+
+BABEPEDIA_URL = "https://www.babepedia.com/babe/Jane_Example"
+FREEONES_LIST_URL = "https://www.freeones.com/jane-example/photos"
+FREEONES_GALLERY_1 = "https://www.freeones.com/jane-example/photos/jane-example-in-the-garden"
+FREEONES_GALLERY_2 = "https://www.freeones.com/jane-example/photos/jane-example-by-the-pool"
+PORNPICS_INDEX_URL = "https://www.pornpics.com/pornstars/jane-example/"
+ELITEBABES_INDEX_URL = "https://www.elitebabes.com/model/jane-example/"
+BOOBPEDIA_URL = "https://www.boobpedia.com/boobs/Jane_Example"
+JAVDATABASE_URL = "https://www.javdatabase.com/idols/jane-example/"
+
+
+def fixture(name):
+    with open(os.path.join(FIXTURES, name), encoding="utf-8") as f:
+        return f.read()
+
+
+def pairs(results):
+    """(image, thumbnail) for each result, in order."""
+    return [(r["image"], r["thumbnail"]) for r in results]
+
+
+class FakeWeb:
+    """Stands in for image_search._fetch: serves pages by URL and records each request.
+
+    A route's value is the page text, an exception to raise, or a callable returning
+    the page. Unknown URLs answer 404, as a real site would.
+    """
+
+    def __init__(self):
+        self.routes = {}
+        self.fallback = None  # callable(url) -> page or None
+        self.requests = []
+        self._lock = threading.Lock()
+
+    def __call__(self, url, deadline, headers=None):
+        with self._lock:
+            self.requests.append((url, headers))
+        page = self.routes.get(url)
+        if page is None and self.fallback is not None:
+            page = self.fallback(url)
+        if page is None:
+            raise SourceNotFound(url)
+        if isinstance(page, BaseException):
+            raise page
+        if callable(page):
+            return page()
+        return page
+
+    def urls(self):
+        return [url for url, _ in self.requests]
+
+
+@pytest.fixture
+def web(monkeypatch):
+    fake = FakeWeb()
+    monkeypatch.setattr(image_search, "_fetch", fake)
+    return fake
+
+
+# --- PornPics helpers: build pages for any gallery ids from the fixtures ---
+
+def pornpics_gallery_url(gid):
+    return f"https://www.pornpics.com/galleries/{gid}/"
+
+
+def pornpics_gallery(gid):
+    return fixture("pornpics_gallery.html").replace("30000001", gid)
+
+
+def pornpics_index(ids):
+    """A PornPics performer page listing these gallery ids, in this order."""
+    tile = (
+        "<li class='thumbwook'><a class='rel-link' href='https://www.pornpics.com/galleries/"
+        "jane-example-set-{gid}/' data-gid='{gid}'><img src='https://static.pornpics.com/style/img/1px.png'"
+        " data-src='https://cdni.pornpics.com/460/1/2/{gid}/{gid}_001_ab12.jpg' /></a></li>\n"
+    )
+    return "<ul id='tiles'>\n" + "".join(tile.format(gid=gid) for gid in ids) + "</ul>\n"
+
+
+def serve_pornpics(web, ids):
+    web.routes[PORNPICS_INDEX_URL] = pornpics_index(ids)
+    for gid in ids:
+        web.routes[pornpics_gallery_url(gid)] = pornpics_gallery(gid)
+
+
+def elitebabes_gallery(url):
+    """The EliteBabes gallery fixture, re-labelled for gallery <slug>-<id>/ (content id 5<id>)."""
+    gid = re.search(r"-(\d+)/$", url).group(1)
+    return fixture("elitebabes_gallery.html").replace("500001", "5" + gid.zfill(5))
+
+
+# ---------------------------------------------------------------------------
+# _fetch: the one place requests are made
+# ---------------------------------------------------------------------------
+
+class FakeResponse:
+    def __init__(self, body=b"<html>ok</html>", status=200):
+        self.status = status
+        self._body = io.BytesIO(body)
+
+    def read(self, size=-1):
+        return self._body.read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def http_error(code, body=b""):
+    return urllib.error.HTTPError(
+        "https://www.example.com/page", code, "error", email.message.Message(), io.BytesIO(body)
+    )
+
+
+class FakeUrlopen:
+    """Replaces urllib.request.urlopen and records (request, timeout)."""
+
+    def __init__(self):
+        self.calls = []
+        self.outcome = FakeResponse()
+
+    def __call__(self, request, timeout=None):
+        self.calls.append((request, timeout))
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+@pytest.fixture
+def urlopen(monkeypatch):
+    fake = FakeUrlopen()
+    monkeypatch.setattr(image_search.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(image_search, "_now", lambda: 100.0)
+    return fake
+
+
+def test_fetch_is_the_only_place_requests_are_made():
+    path = os.path.join(PLUGIN_DIR, "image_search.py")
+    with open(path, encoding="utf-8") as f:
+        source = f.read()
+    fetch = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "_fetch"
+    )
+    lines = source.splitlines()
+    outside = lines[:fetch.lineno - 1] + lines[fetch.end_lineno:]
+    hits = [line for line in outside if re.search(r"\burlopen\(|\bRequest\(", line)]
+    assert hits == []
+
+
+def test_fetch_sends_the_shared_headers_with_a_current_browser_user_agent(urlopen):
+    image_search._fetch("https://www.example.com/page", 150.0)
+    request, _ = urlopen.calls[0]
+    user_agent = request.get_header("User-agent")
+    assert user_agent == image_search.HEADERS["User-Agent"]
+    chrome = re.search(r"Chrome/(\d+)\.", user_agent)
+    assert chrome and int(chrome.group(1)) >= 140, user_agent
+    assert user_agent.startswith("Mozilla/5.0 (")
+    assert request.get_header("Accept") == image_search.HEADERS["Accept"]
+    assert request.get_header("Accept-language") == image_search.HEADERS["Accept-Language"]
+
+
+def test_fetch_adds_extra_headers(urlopen):
+    image_search._fetch("https://www.example.com/page", 150.0, headers={"Referer": "https://www.example.com/"})
+    request, _ = urlopen.calls[0]
+    assert request.get_header("Referer") == "https://www.example.com/"
+    assert request.get_header("User-agent") == image_search.USER_AGENT
+
+
+def test_fetch_returns_the_body_as_text(urlopen):
+    urlopen.outcome = FakeResponse("<p>Jane Example ü</p>".encode("utf-8"))
+    assert image_search._fetch("https://www.example.com/page", 150.0) == "<p>Jane Example ü</p>"
+
+
+@pytest.mark.parametrize("deadline,expected", [(103.5, 3.5), (110.0, 10), (500.0, 10)])
+def test_fetch_socket_timeout_is_the_smaller_of_10s_and_the_time_left(urlopen, deadline, expected):
+    image_search._fetch("https://www.example.com/page", deadline)
+    _, timeout = urlopen.calls[0]
+    assert timeout == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("deadline", [100.0, 99.0])
+def test_fetch_raises_timeout_once_the_deadline_has_passed(urlopen, deadline):
+    with pytest.raises(SourceTimeout):
+        image_search._fetch("https://www.example.com/page", deadline)
+    assert urlopen.calls == []
+
+
+@pytest.mark.parametrize("error", [
+    socket.timeout("timed out"),
+    TimeoutError("timed out"),
+    urllib.error.URLError(socket.timeout("timed out")),
+])
+def test_fetch_turns_socket_timeouts_into_source_timeout(urlopen, error):
+    urlopen.outcome = error
+    with pytest.raises(SourceTimeout):
+        image_search._fetch("https://www.example.com/page", 150.0)
+
+
+def test_fetch_times_out_when_the_deadline_passes_mid_download(urlopen, monkeypatch):
+    calls = []
+
+    def clock():  # the deadline check before the request passes; every later one fails
+        calls.append(1)
+        return 100.0 if len(calls) == 1 else 200.0
+
+    monkeypatch.setattr(image_search, "_now", clock)
+    urlopen.outcome = FakeResponse(b"x" * 200000)
+    with pytest.raises(SourceTimeout):
+        image_search._fetch("https://www.example.com/page", 150.0)
+
+
+@pytest.mark.parametrize("code", [403, 429])
+def test_fetch_raises_blocked_on_403_and_429(urlopen, code):
+    urlopen.outcome = http_error(code)
+    with pytest.raises(SourceBlocked) as caught:
+        image_search._fetch("https://www.example.com/page", 150.0)
+    assert str(code) in str(caught.value)
+
+
+@pytest.mark.parametrize("outcome", [
+    http_error(503, b"<html><head><title>Just a moment...</title></head><body></body></html>"),
+    FakeResponse(b"<html><script>window._cf_chl_opt={};</script><div id='cf-chl-widget'></div></html>"),
+    FakeResponse(b"<html><head><title>Just a moment...</title></head></html>"),
+])
+def test_fetch_raises_blocked_on_a_cloudflare_challenge_page(urlopen, outcome):
+    urlopen.outcome = outcome
+    with pytest.raises(SourceBlocked) as caught:
+        image_search._fetch("https://www.example.com/page", 150.0)
+    assert "Cloudflare" in str(caught.value)
+
+
+def test_fetch_raises_not_found_on_404(urlopen):
+    urlopen.outcome = http_error(404)
+    with pytest.raises(SourceNotFound) as caught:
+        image_search._fetch("https://www.example.com/page", 150.0)
+    assert isinstance(caught.value, SourceHTTPError)
+    assert caught.value.status == 404
+
+
+@pytest.mark.parametrize("outcome,status", [
+    (http_error(500), 500),
+    (http_error(502, b"<html>Bad gateway</html>"), 502),
+    (FakeResponse(b"", status=204), 204),
+])
+def test_fetch_raises_http_error_on_other_statuses(urlopen, outcome, status):
+    urlopen.outcome = outcome
+    with pytest.raises(SourceHTTPError) as caught:
+        image_search._fetch("https://www.example.com/page", 150.0)
+    assert caught.value.status == status
+    assert not isinstance(caught.value, (SourceNotFound, SourceBlocked))
+    assert str(status) in str(caught.value)
+
+
+@pytest.mark.parametrize("error", [
+    urllib.error.URLError("[Errno -2] Name or service not known"),
+    ConnectionResetError("reset by peer"),
+])
+def test_fetch_raises_source_error_on_network_failures(urlopen, error):
+    urlopen.outcome = error
+    with pytest.raises(SourceError) as caught:
+        image_search._fetch("https://www.example.com/page", 150.0)
+    assert type(caught.value) is SourceError
+    assert "www.example.com" in str(caught.value)
+
+
+def test_source_budget_is_25_seconds():
+    assert image_search.SOURCE_BUDGET_SECONDS == 25
+
+
+# ---------------------------------------------------------------------------
+# Each source parses its fixture
+# ---------------------------------------------------------------------------
+
+def test_babepedia_fixture(web):
+    web.routes[BABEPEDIA_URL] = fixture("babepedia.html")
+    found = image_search.search_babepedia(NAME)
+    assert isinstance(found, SourceResult)
+    assert pairs(found) == [
+        ("https://www.babepedia.com/pics/Jane%20Example.jpg",
+         "https://www.babepedia.com/pics/Jane%20Example_thumb3.jpg"),
+        ("https://www.babepedia.com/pics/Jane%20Example2.jpg",
+         "https://www.babepedia.com/pics/Jane%20Example2_thumb3.jpg"),
+        ("https://www.babepedia.com/galleries/ExampleStudio-JaneExampleInTheGarden/05.jpg",
+         "https://www.babepedia.com/galleries-thumbs/ExampleStudio-JaneExampleInTheGarden/05.jpg"),
+        ("https://www.babepedia.com/galleries/ExampleStudio-JaneExampleByThePool/04.jpg",
+         "https://www.babepedia.com/galleries-thumbs/ExampleStudio-JaneExampleByThePool/04.jpg"),
+    ]
+    assert {r["source"] for r in found} == {"Babepedia"}
+    assert found[0]["title"] == "Jane Example - Babepedia"
+    assert not found.partial and found.warnings == []
+    assert web.urls() == [BABEPEDIA_URL]
+
+
+FREEONES_EXPECTED = [
+    "https://thumbs.freeones.com/photo/fakeSigHead01/290x100:744x554/350x350/center/middle/"
+    "filters:upscale():quality(85)/ee/ff/fakePathHead1/Jane-Example-001.jpg",
+    "https://thumbs.freeones.com/photo/fakeSigFull01/1440x0/filters:quality(85)/gg/hh/fakePath00011/photo-0001.jpg",
+    "https://thumbs.freeones.com/photo/fakeSigCrop01/350x350/center/middle/"
+    "filters:upscale():quality(85)/gg/hh/fakePath00011/photo-0001.jpg",
+    "https://thumbs.freeones.com/photo/fakeSigFull02/1440x0/filters:quality(85)/gg/hh/fakePath00012/photo-0002.jpg",
+    "https://thumbs.freeones.com/photo/fakeSigCrop02/350x350/center/middle/"
+    "filters:upscale():quality(85)/gg/hh/fakePath00012/photo-0002.jpg",
+    "https://thumbs.freeones.com/photo/fakeSigCrop03/350x350/center/middle/"
+    "filters:upscale():quality(85)/gg/hh/fakePath00013/photo-0003.jpg",
+]
+
+
+def test_freeones_fixture(web):
+    web.routes[FREEONES_LIST_URL] = fixture("freeones_list.html")
+    web.routes[FREEONES_GALLERY_1] = fixture("freeones_gallery.html")
+    web.routes[FREEONES_GALLERY_2] = fixture("freeones_gallery.html")
+    found = image_search.search_freeones(NAME)
+    # Gallery links are deduplicated and kept in page order
+    assert web.urls()[0] == FREEONES_LIST_URL
+    assert sorted(web.urls()[1:]) == sorted([FREEONES_GALLERY_1, FREEONES_GALLERY_2])
+    # Current behaviour (Task 2 changes it): every freeones image URL on the page, as found
+    assert pairs(found) == [(url, url) for url in FREEONES_EXPECTED]
+    assert {r["source"] for r in found} == {"FreeOnes"}
+    assert not found.partial
+
+
+def test_pornpics_fixture(web):
+    web.routes[PORNPICS_INDEX_URL] = fixture("pornpics_index.html")
+    for gid in ("30000001", "30000002", "30000003"):
+        web.routes[pornpics_gallery_url(gid)] = pornpics_gallery(gid)
+    found = image_search.search_pornpics(NAME)
+    expected = [("https://cdni.pornpics.com/models/j/jane_example.jpg",
+                 "https://cdni.pornpics.com/models/j/jane_example.jpg")]
+    for gid in ("30000001", "30000002", "30000003"):  # sorted, not page order
+        for photo in ("001_aa11", "002_bb22"):
+            expected.append((f"https://cdni.pornpics.com/1280/1/2/{gid}/{gid}_{photo}.jpg",
+                             f"https://cdni.pornpics.com/460/1/2/{gid}/{gid}_{photo}.jpg"))
+    assert pairs(found) == expected
+    assert found[0]["title"] == "Jane Example - PornPics Profile"
+    assert not found.partial
+
+
+def test_elitebabes_fixture(web):
+    web.routes[ELITEBABES_INDEX_URL] = fixture("elitebabes_index.html")
+    web.fallback = lambda url: elitebabes_gallery(url) if url != ELITEBABES_INDEX_URL else None
+    found = image_search.search_elitebabes(NAME)
+    assert sorted(web.urls()[1:]) == [
+        "https://www.elitebabes.com/jane-example-by-the-pool-40003/",
+        "https://www.elitebabes.com/jane-example-in-the-garden-40001/",
+    ]
+    expected = []
+    for content in ("540003", "540001"):  # gallery URLs sorted: by-the-pool before in-the-garden
+        for photo in ("0001-01", "0001-02"):
+            base = f"https://cdn.elitebabes.com/content/{content}/{photo}"
+            expected.append((base + ".jpg", base + "_w400.jpg"))
+    assert pairs(found) == expected
+    assert {r["source"] for r in found} == {"EliteBabes"}
+
+
+def test_boobpedia_fixture(web):
+    web.routes[BOOBPEDIA_URL] = fixture("boobpedia.html")
+    found = image_search.search_boobpedia(NAME)
+    assert pairs(found) == [
+        ("https://www.boobpedia.com/wiki/images/a/ab/Jane_Example_01.jpg",
+         "https://www.boobpedia.com/wiki/images/thumb/a/ab/Jane_Example_01.jpg/240px-Jane_Example_01.jpg"),
+        ("https://www.boobpedia.com/wiki/images/c/cd/Jane_Example_02.jpg",
+         "https://www.boobpedia.com/wiki/images/thumb/c/cd/Jane_Example_02.jpg/120px-Jane_Example_02.jpg"),
+    ]
+
+
+def test_javdatabase_fixture_reads_pages_until_a_404(web):
+    web.routes[JAVDATABASE_URL] = fixture("javdatabase_1.html")
+    web.routes[JAVDATABASE_URL + "?ipage=2"] = fixture("javdatabase_2.html")
+    found = image_search.search_javdatabase(NAME)
+    # Page 3 is a 404: the end of the pages, not a failure
+    assert web.urls() == [JAVDATABASE_URL, JAVDATABASE_URL + "?ipage=2", JAVDATABASE_URL + "?ipage=3"]
+    cover = "https://www.javdatabase.com/covers/{}/ex/exmp0000{}ps.webp"
+    assert pairs(found) == [
+        ("https://www.javdatabase.com/idolimages/full/jane-example.webp",
+         "https://www.javdatabase.com/idolimages/thumb/jane-example.webp"),
+        (cover.format("full", 1), cover.format("thumb", 1)),
+        (cover.format("full", 2), cover.format("thumb", 2)),
+        (cover.format("full", 3), cover.format("thumb", 3)),
+    ]
+    assert not found.partial and found.warnings == []
+
+
+def ddg_routes(web, vqd_page=None, api=None):
+    def route(url):
+        if url.startswith("https://duckduckgo.com/i.js?"):
+            return api if api is not None else fixture("duckduckgo.json")
+        if url.startswith("https://duckduckgo.com/?"):
+            return vqd_page if vqd_page is not None else fixture("duckduckgo_vqd.html")
+        return None
+    web.fallback = route
+
+
+def test_duckduckgo_fixture(web):
+    ddg_routes(web)
+    found = image_search.search_duckduckgo_images("Jane Example pornstar")
+    token_url, api_url = web.urls()
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(token_url).query)["q"] == ["Jane Example pornstar"]
+    api = urllib.parse.parse_qs(urllib.parse.urlsplit(api_url).query)
+    assert api["vqd"] == ["4-11112222333344445555666677778888"]
+    assert api["p"] == ["-1"]
+    api_headers = web.requests[1][1]
+    assert api_headers["Referer"] == token_url
+    # The 200x150 image and the result without an image are skipped
+    assert pairs(found) == [
+        ("https://images.example.com/photos/jane-example-1.jpg", "https://tse1.explicit.bing.net/th/id/OIP.fakeThumbnail1"),
+        ("https://images.example.org/jane-example-3.jpg", "https://tse3.explicit.bing.net/th/id/OIP.fakeThumbnail3"),
+    ]
+    assert found[0]["title"] == "Jane Example & friends"
+    assert (found[0]["width"], found[0]["height"]) == (1280, 1920)
+
+
+def test_duckduckgo_without_a_token_is_blocked(web):
+    ddg_routes(web, vqd_page="<html><body>Sorry</body></html>")
+    with pytest.raises(SourceBlocked):
+        image_search.search_duckduckgo_images("Jane Example pornstar")
+
+
+# ---------------------------------------------------------------------------
+# Not found, failed galleries and failed index pages
+# ---------------------------------------------------------------------------
+
+SITE_SOURCES = ["babepedia", "freeones", "pornpics", "elitebabes", "boobpedia", "javdatabase"]
+SCRAPERS = {
+    "babepedia": image_search.search_babepedia,
+    "freeones": image_search.search_freeones,
+    "pornpics": image_search.search_pornpics,
+    "elitebabes": image_search.search_elitebabes,
+    "boobpedia": image_search.search_boobpedia,
+    "javdatabase": image_search.search_javdatabase,
+}
+
+
+@pytest.mark.parametrize("source", SITE_SOURCES)
+def test_a_404_on_the_performer_page_is_not_found_not_an_error(web, source):
+    found = SCRAPERS[source](NAME)
+    assert list(found) == [] and not found.partial and found.warnings == []
+    outcome = image_search.search_single_source(source, NAME, NAME)
+    assert outcome == {"results": [], "status": "empty"}
+
+
+def test_a_failed_gallery_is_skipped_and_the_source_is_partial(web):
+    serve_pornpics(web, ["30000001", "30000002", "30000003"])
+    web.routes[pornpics_gallery_url("30000002")] = SourceHTTPError(500, pornpics_gallery_url("30000002"))
+    found = image_search.search_pornpics(NAME)
+    galleries = {r["image"].split("/")[-2] for r in found}
+    assert galleries == {"30000001", "30000003"}
+    assert found.partial
+    assert found.warnings == ["1 of 3 galleries failed to load (www.pornpics.com returned HTTP 500)"]
+
+    outcome = image_search.search_single_source("pornpics", NAME, NAME)
+    assert outcome["status"] == "partial"
+    assert len(outcome["results"]) == 4
+    assert outcome["warnings"] == found.warnings
+    assert "error" not in outcome
+
+
+def test_freeones_skips_a_blocked_gallery(web):
+    web.routes[FREEONES_LIST_URL] = fixture("freeones_list.html")
+    web.routes[FREEONES_GALLERY_1] = SourceBlocked("www.freeones.com blocked the request (HTTP 403)")
+    web.routes[FREEONES_GALLERY_2] = fixture("freeones_gallery.html")
+    found = image_search.search_freeones(NAME)
+    assert len(found) == len(FREEONES_EXPECTED)
+    assert found.partial
+    assert found.warnings == ["1 of 2 galleries failed to load (www.freeones.com blocked the request (HTTP 403))"]
+
+
+def test_javdatabase_skips_a_failed_later_page(web):
+    web.routes[JAVDATABASE_URL] = fixture("javdatabase_1.html")
+    web.routes[JAVDATABASE_URL + "?ipage=2"] = SourceHTTPError(503, JAVDATABASE_URL)
+    web.routes[JAVDATABASE_URL + "?ipage=3"] = fixture("javdatabase_2.html")
+    found = image_search.search_javdatabase(NAME)
+    assert len(found) == 4  # idol, 2 covers from page 1, the new cover from page 3
+    assert found.partial
+    # Pages 1-3 were read (page 4 is a 404, the end); page 2 failed
+    assert found.warnings == ["1 of 3 pages failed to load (www.javdatabase.com returned HTTP 503)"]
+
+
+@pytest.mark.parametrize("source,index_url", [
+    ("pornpics", PORNPICS_INDEX_URL),
+    ("elitebabes", ELITEBABES_INDEX_URL),
+    ("freeones", FREEONES_LIST_URL),
+])
+def test_an_index_page_failure_is_an_error(web, source, index_url):
+    web.routes[index_url] = SourceHTTPError(500, index_url)
+    with pytest.raises(SourceHTTPError):
+        SCRAPERS[source](NAME)
+    outcome = image_search.search_single_source(source, NAME, NAME)
+    assert outcome["status"] == "error"
+    assert outcome["results"] == []
+    assert "HTTP 500" in outcome["error"]
+
+
+def test_a_blocked_index_page_is_blocked(web):
+    web.routes[ELITEBABES_INDEX_URL] = SourceBlocked("www.elitebabes.com answered with a Cloudflare challenge page")
+    outcome = image_search.search_single_source("elitebabes", NAME, NAME)
+    assert outcome == {
+        "results": [],
+        "status": "blocked",
+        "error": "www.elitebabes.com answered with a Cloudflare challenge page",
+    }
+
+
+def test_a_timed_out_index_page_is_a_timeout(web):
+    web.routes[BABEPEDIA_URL] = SourceTimeout("www.babepedia.com did not answer in time")
+    outcome = image_search.search_single_source("babepedia", NAME, NAME)
+    assert outcome["status"] == "timeout"
+    assert outcome["error"] == "www.babepedia.com did not answer in time"
+
+
+def test_when_every_gallery_fails_the_source_fails(web):
+    web.routes[FREEONES_LIST_URL] = fixture("freeones_list.html")
+    web.routes[FREEONES_GALLERY_1] = SourceTimeout("www.freeones.com did not answer in time")
+    web.routes[FREEONES_GALLERY_2] = SourceTimeout("www.freeones.com did not answer in time")
+    outcome = image_search.search_single_source("freeones", NAME, NAME)
+    assert outcome["status"] == "timeout"
+    assert outcome["results"] == []
+    assert outcome["error"] == "None of the 2 galleries loaded in time"
+
+    web.routes[FREEONES_GALLERY_1] = SourceHTTPError(500, FREEONES_GALLERY_1)
+    web.routes[FREEONES_GALLERY_2] = SourceHTTPError(500, FREEONES_GALLERY_2)
+    outcome = image_search.search_single_source("freeones", NAME, NAME)
+    assert outcome["status"] == "error"
+    assert outcome["error"] == "None of the 2 galleries loaded (www.freeones.com returned HTTP 500)"
+
+    web.routes[FREEONES_GALLERY_2] = SourceBlocked("www.freeones.com blocked the request (HTTP 403)")
+    outcome = image_search.search_single_source("freeones", NAME, NAME)
+    assert outcome["status"] == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# Parallel galleries, deterministic caps, deadlines
+# ---------------------------------------------------------------------------
+
+def test_gallery_ids_are_sorted_before_the_cap(web):
+    ids = [str(30000100 - 3 * i) for i in range(21)]  # descending: page order is not sorted order
+    serve_pornpics(web, ids)
+    found = image_search.search_pornpics(NAME, max_galleries=20)
+    fetched = [u for u in web.urls() if "/galleries/" in u]
+    assert sorted(fetched) == [pornpics_gallery_url(gid) for gid in sorted(ids)[:20]]
+    # Results follow the sorted gallery order, whatever order the fetches finished in
+    order = list(dict.fromkeys(r["image"].split("/")[-2] for r in found))
+    assert order == sorted(ids)[:20]
+
+
+def test_elitebabes_gallery_links_are_sorted_before_the_cap(web):
+    slugs = [f"https://www.elitebabes.com/jane-example-set-{n}-{40000 + n}/" for n in (12, 3, 7, 1, 9, 11, 2, 5, 10, 4, 8, 6)]
+    web.routes[ELITEBABES_INDEX_URL] = "".join(f'<a href="{u}" title="x">x</a>\n' for u in slugs)
+    web.fallback = lambda url: elitebabes_gallery(url) if url != ELITEBABES_INDEX_URL else None
+    image_search.search_elitebabes(NAME, max_galleries=10)
+    assert sorted(web.urls()[1:]) == sorted(slugs)[:10]
+
+
+def test_gallery_pages_are_fetched_four_at_a_time(web):
+    ids = [str(30000001 + i) for i in range(12)]
+    serve_pornpics(web, ids)
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
+
+    def slow(gid):
+        def page():
+            with lock:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            time.sleep(0.05)
+            with lock:
+                state["active"] -= 1
+            return pornpics_gallery(gid)
+        return page
+
+    for gid in ids:
+        web.routes[pornpics_gallery_url(gid)] = slow(gid)
+    found = image_search.search_pornpics(NAME)
+    assert len(found) == 24
+    assert state["peak"] == image_search.GALLERY_WORKERS == 4
+
+
+def test_the_executor_is_shut_down_without_waiting(web, monkeypatch):
+    calls = []
+    real = image_search.concurrent.futures.ThreadPoolExecutor
+
+    class SpyExecutor(real):
+        def __init__(self, *args, **kwargs):
+            calls.append(("init", kwargs.get("max_workers", args[0] if args else None)))
+            super().__init__(*args, **kwargs)
+
+        def shutdown(self, *args, **kwargs):
+            calls.append(("shutdown", kwargs))
+            return super().shutdown(*args, **kwargs)
+
+    monkeypatch.setattr(image_search.concurrent.futures, "ThreadPoolExecutor", SpyExecutor)
+    serve_pornpics(web, ["30000001", "30000002"])
+    image_search.search_pornpics(NAME)
+    assert calls == [("init", 4), ("shutdown", {"wait": False, "cancel_futures": True})]
+
+
+def test_a_hung_gallery_is_abandoned_at_the_deadline(web, monkeypatch):
+    budget = 0.6
+    monkeypatch.setattr(image_search, "SOURCE_BUDGET_SECONDS", budget)
+    ids = [str(30000001 + i) for i in range(20)]
+    serve_pornpics(web, ids)
+    hung = ids[7]
+    release = threading.Event()
+
+    def hang():
+        release.wait(10)
+        raise SourceTimeout("www.pornpics.com did not answer in time")
+
+    web.routes[pornpics_gallery_url(hung)] = hang
+    try:
+        started = time.monotonic()
+        outcome = image_search.search_single_source("pornpics", NAME, NAME)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert elapsed < budget + 0.5
+    assert outcome["status"] == "partial"
+    assert outcome["warnings"] == ["1 of 20 galleries timed out"]
+    galleries = {r["image"].split("/")[-2] for r in outcome["results"]}
+    assert galleries == set(ids) - {hung}
+    assert len(outcome["results"]) == 19 * 2
+
+
+def test_search_single_source_gives_each_source_the_budget(monkeypatch):
+    monkeypatch.setattr(image_search, "_now", lambda: 1000.0)
+    seen = {}
+
+    def fake_babepedia(name, max_results=50, deadline=None):
+        seen["deadline"] = deadline
+        return SourceResult()
+
+    monkeypatch.setattr(image_search, "search_babepedia", fake_babepedia)
+    image_search.search_single_source("babepedia", NAME, NAME)
+    assert seen["deadline"] == 1000.0 + image_search.SOURCE_BUDGET_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# search_single_source: status, errors and warnings
+# ---------------------------------------------------------------------------
+
+def test_status_ok(web):
+    web.routes[BABEPEDIA_URL] = fixture("babepedia.html")
+    outcome = image_search.search_single_source("babepedia", NAME, NAME)
+    assert outcome["status"] == "ok"
+    assert len(outcome["results"]) == 4
+    assert set(outcome) == {"results", "status"}
+
+
+def test_status_empty_when_the_page_has_no_images(web):
+    web.routes[BOOBPEDIA_URL] = "<html><body>No pictures yet</body></html>"
+    assert image_search.search_single_source("boobpedia", NAME, NAME) == {"results": [], "status": "empty"}
+
+
+def test_unknown_source_is_an_error():
+    outcome = image_search.search_single_source("nosuchsite", NAME, NAME)
+    assert outcome == {"results": [], "status": "error", "error": "Unknown source"}
+
+
+def test_an_unexpected_exception_is_an_error(monkeypatch):
+    def broken(*args, **kwargs):
+        raise ValueError("parser exploded")
+
+    monkeypatch.setattr(image_search, "search_boobpedia", broken)
+    outcome = image_search.search_single_source("boobpedia", NAME, NAME)
+    assert outcome["status"] == "error"
+    assert "parser exploded" in outcome["error"]
+    assert outcome["results"] == []
+
+
+def test_duckduckgo_uses_the_full_query(web):
+    ddg_routes(web)
+    outcome = image_search.search_single_source("duckduckgo", NAME, "Jane Example pornstar")
+    assert outcome["status"] == "ok"
+    assert len(outcome["results"]) == 2
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(web.urls()[0]).query)["q"]
+    assert query == ["Jane Example pornstar"]
+
+
+def _result(image, source="Babepedia"):
+    return {"thumbnail": image, "image": image, "title": "t", "source": source, "width": 0, "height": 0}
+
+
+@pytest.mark.parametrize("bad,warning", [
+    (2, "2 results from unexpected hosts were dropped"),
+    (1, "1 result from an unexpected host was dropped"),
+])
+def test_dropped_hosts_add_a_warning(monkeypatch, bad, warning):
+    results = [_result("https://www.babepedia.com/pics/Jane%20Example.jpg")]
+    results += [_result(f"https://evil.example.com/{i}.jpg") for i in range(bad)]
+    monkeypatch.setattr(image_search, "search_babepedia", lambda *a, **k: SourceResult(results))
+    outcome = image_search.search_single_source("babepedia", NAME, NAME)
+    assert outcome["status"] == "ok"
+    assert [r["image"] for r in outcome["results"]] == ["https://www.babepedia.com/pics/Jane%20Example.jpg"]
+    assert outcome["warnings"] == [warning]
+
+
+def test_drop_disallowed_hosts_returns_the_dropped_count():
+    kept, dropped = image_search.drop_disallowed_hosts(
+        [_result("https://www.babepedia.com/pics/a.jpg"), _result("http://10.0.0.4/b.jpg")], "test"
+    )
+    assert [r["image"] for r in kept] == ["https://www.babepedia.com/pics/a.jpg"]
+    assert dropped == 1
+
+
+def test_warnings_are_combined(web, monkeypatch):
+    found = SourceResult(
+        [_result("https://www.babepedia.com/pics/a.jpg"), _result("https://evil.example.com/b.jpg")],
+        warnings=["1 of 2 galleries timed out"],
+        partial=True,
+    )
+    monkeypatch.setattr(image_search, "search_babepedia", lambda *a, **k: found)
+    outcome = image_search.search_single_source("babepedia", NAME, NAME)
+    assert outcome["status"] == "partial"
+    assert outcome["warnings"] == ["1 of 2 galleries timed out", "1 result from an unexpected host was dropped"]
+
+
+# ---------------------------------------------------------------------------
+# main(): the reply the current UI reads
+# ---------------------------------------------------------------------------
+
+def run_main(monkeypatch, capsys, args):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"args": args})))
+    image_search.main()
+    return json.loads(capsys.readouterr().out)
+
+
+def test_main_reply_shape(web, monkeypatch, capsys):
+    web.routes[BABEPEDIA_URL] = fixture("babepedia.html")
+    reply = run_main(monkeypatch, capsys, {
+        "mode": "search", "query": "Jane Example pornstar", "performerName": NAME, "source": "babepedia",
+    })
+    output = reply["output"]
+    assert output["query"] == "Jane Example pornstar"
+    assert output["source"] == "babepedia"
+    assert output["status"] == "ok"
+    assert len(output["results"]) == 4
+    assert "error" not in output
+
+
+def test_main_reply_carries_the_source_error(web, monkeypatch, capsys):
+    web.routes[BABEPEDIA_URL] = SourceBlocked("www.babepedia.com blocked the request (HTTP 403)")
+    reply = run_main(monkeypatch, capsys, {
+        "mode": "search", "query": NAME, "performerName": NAME, "source": "babepedia",
+    })
+    assert reply["output"]["status"] == "blocked"
+    assert reply["output"]["error"] == "www.babepedia.com blocked the request (HTTP 403)"
+    assert reply["output"]["results"] == []

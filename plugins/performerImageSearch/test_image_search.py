@@ -205,7 +205,7 @@ def test_single_source():
                 name="Kayden Kross",
                 query="Kayden Kross pornstar",
             )
-        print(f"  {source}: {len(results)} results")
+        print(f"  {source}: {len(results['results'])} results ({results['status']})")
 
     print("  PASSED")
 
