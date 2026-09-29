@@ -422,6 +422,7 @@
         allTags {
           id
           name
+          aliases
           image_path
           scene_count
           parent_count
@@ -3010,16 +3011,6 @@
       tab.addEventListener('click', () => {
         const newTab = tab.dataset.tab;
         if (newTab !== activeTab) {
-          // Warn if there are pending hierarchy changes
-          if (isEditMode && pendingChanges.length > 0) {
-            if (!confirm('You have unsaved hierarchy changes. Discard them?')) {
-              return;
-            }
-            // Discard changes
-            isEditMode = false;
-            pendingChanges = [];
-            originalParentMap.clear();
-          }
           activeTab = newTab;
           renderPage(container);
         }
@@ -4448,6 +4439,7 @@
   let contextMenuTag = null;
   let contextMenuParentId = null;
   let contextMenuEscapeHandler = null;
+  let tagSearchEscHandler = null;
   let draggedTagId = null;
   let draggedFromParentId = null;
   let selectedTagId = null;
@@ -4457,6 +4449,23 @@
   let isEditMode = false;
   let pendingChanges = [];
   let originalParentMap = new Map(); // tagId -> array of parent ids (snapshot at edit start)
+
+  /**
+   * Drop all hierarchy edit/selection state. Runs when the hierarchy page
+   * mounts and unmounts so nothing stale leaks between visits.
+   */
+  function resetHierarchyEditState() {
+    isEditMode = false;
+    pendingChanges = [];
+    originalParentMap.clear();
+    selectedTagId = null;
+    copiedTagId = null;
+    draggedTagId = null;
+    draggedFromParentId = null;
+    hideContextMenu();
+    closeTagSearchDialog();
+    document.getElementById('th-changes-panel')?.remove();
+  }
 
   /**
    * Enter edit mode - snapshot current state and show changes panel
@@ -4552,7 +4561,13 @@
     if (!isEditMode) return;
 
     if (save && pendingChanges.length > 0) {
-      await savePendingChanges();
+      const allSaved = await savePendingChanges();
+      if (!allSaved) {
+        // Keep failed changes pending and stay in edit mode so they can be retried
+        applyPendingChangesToTree();
+        renderChangesPanel();
+        return;
+      }
     }
 
     isEditMode = false;
@@ -4624,47 +4639,57 @@
    * Save all pending changes to the server
    */
   async function savePendingChanges() {
-    if (pendingChanges.length === 0) return;
+    if (pendingChanges.length === 0) return true;
 
     console.debug('[tagManager] savePendingChanges: Saving', pendingChanges.length, 'changes:', pendingChanges);
 
-    // Compute final parent state for each modified tag
-    const tagUpdates = new Map(); // tagId -> Set of final parent ids
-
-    // Start with original parents
+    // Group pending changes by tag
+    const changesByTag = new Map(); // tagId -> changes
     for (const change of pendingChanges) {
-      if (!tagUpdates.has(change.tagId)) {
-        const original = originalParentMap.get(change.tagId) || [];
-        tagUpdates.set(change.tagId, new Set(original));
-      }
+      if (!changesByTag.has(change.tagId)) changesByTag.set(change.tagId, []);
+      changesByTag.get(change.tagId).push(change);
     }
 
-    // Apply changes
-    for (const change of pendingChanges) {
-      const parentSet = tagUpdates.get(change.tagId);
-      if (change.type === 'add-parent') {
-        parentSet.add(change.parentId);
-      } else {
-        parentSet.delete(change.parentId);
-      }
-    }
-
-    // Send mutations
+    const failedTagIds = new Set();
     const errors = [];
-    for (const [tagId, parentSet] of tagUpdates) {
+    let savedCount = 0;
+
+    for (const [tagId, changes] of changesByTag) {
+      const tag = hierarchyTags.find(t => t.id === tagId);
       try {
-        await updateTagParents(tagId, Array.from(parentSet));
+        // Read the tag's CURRENT parents so edits made elsewhere are not overwritten
+        const parentSet = new Set(await fetchTagParentIds(tagId));
+        for (const change of changes) {
+          if (change.type === 'add-parent') {
+            parentSet.add(change.parentId);
+          } else {
+            parentSet.delete(change.parentId);
+          }
+        }
+        const result = Array.from(parentSet);
+        await updateTagParents(tagId, result);
+
+        savedCount += changes.length;
+        // Keep local state in step with the server for the saved tag
+        originalParentMap.set(tagId, result);
+        if (tag) {
+          tag.parents = result.map(pid => ({ id: pid }));
+        }
       } catch (err) {
-        const tag = hierarchyTags.find(t => t.id === tagId);
+        failedTagIds.add(tagId);
         errors.push(`Failed to update "${tag?.name || tagId}": ${err.message}`);
       }
     }
 
+    // Successful changes are done; failed ones stay pending
+    pendingChanges = pendingChanges.filter(c => failedTagIds.has(c.tagId));
+
     if (errors.length > 0) {
-      showToast(`Some changes failed:\n${errors.join('\n')}`, 'error');
-    } else {
-      showToast(`Saved ${pendingChanges.length} change${pendingChanges.length !== 1 ? 's' : ''}`);
+      showToast(`Some changes failed (still pending):\n${errors.join('\n')}`, 'error');
+      return false;
     }
+    showToast(`Saved ${savedCount} change${savedCount !== 1 ? 's' : ''}`);
+    return true;
   }
 
   /**
@@ -4794,6 +4819,7 @@
     if (menu) menu.remove();
     contextMenuTag = null;
     contextMenuParentId = null;
+    document.removeEventListener('click', hideContextMenu);
     if (contextMenuEscapeHandler) {
       document.removeEventListener('keydown', contextMenuEscapeHandler);
       contextMenuEscapeHandler = null;
@@ -4830,6 +4856,7 @@
    */
   function showTagSearchDialog(mode, targetTag) {
     // mode: 'parent' or 'child'
+    closeTagSearchDialog(); // never stack a second dialog/listener
     const backdrop = document.createElement('div');
     backdrop.className = 'th-search-dialog-backdrop';
     backdrop.id = 'th-search-backdrop';
@@ -4867,12 +4894,10 @@
 
     // Close on backdrop click or escape
     backdrop.addEventListener('click', closeTagSearchDialog);
-    document.addEventListener('keydown', function escHandler(e) {
-      if (e.key === 'Escape') {
-        closeTagSearchDialog();
-        document.removeEventListener('keydown', escHandler);
-      }
-    });
+    tagSearchEscHandler = (e) => {
+      if (e.key === 'Escape') closeTagSearchDialog();
+    };
+    document.addEventListener('keydown', tagSearchEscHandler);
 
     input.focus();
   }
@@ -4881,6 +4906,10 @@
    * Close the tag search dialog
    */
   function closeTagSearchDialog() {
+    if (tagSearchEscHandler) {
+      document.removeEventListener('keydown', tagSearchEscHandler);
+      tagSearchEscHandler = null;
+    }
     document.getElementById('th-search-backdrop')?.remove();
     document.getElementById('th-search-dialog')?.remove();
   }
@@ -5233,7 +5262,10 @@
     // Children HTML (recursive)
     let childrenHtml = '';
     if (hasChildren) {
-      const childNodes = node.childNodes.map(child => renderTreeNode(child, false)).join('');
+      // Only build the DOM for expanded branches; expanding renders on demand
+      const childNodes = isExpanded
+        ? node.childNodes.map(child => renderTreeNode(child, false)).join('')
+        : '';
       childrenHtml = `<div class="th-children ${isExpanded ? 'th-expanded' : ''}" data-parent-id="${node.id}">${childNodes}</div>`;
     }
 
@@ -5315,12 +5347,42 @@
   /**
    * Keyboard shortcuts
    */
+  /**
+   * Is this element somewhere a user types (input, select, textarea, contentEditable)?
+   */
+  function isEditableElement(el) {
+    if (!el) return false;
+    const tag = String(el.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return true;
+    return el.isContentEditable === true || el.contentEditable === 'true';
+  }
+
+  /**
+   * Should a tree shortcut (copy/paste/delete) act for this key event?
+   * Rule: never while an editable element has focus; otherwise only when focus
+   * is inside the tree container, or nothing is focused (body) and the event
+   * target is inside the tree.
+   */
+  function shouldHandleHierarchyKey(e, activeElement) {
+    const inTree = (el) => !!(el && typeof el.closest === 'function' && el.closest('.tag-hierarchy-container'));
+    if (isEditableElement(activeElement) || isEditableElement(e && e.target)) return false;
+    if (inTree(activeElement)) return true;
+    const nothingFocused = !activeElement || activeElement === document.body;
+    return nothingFocused && inTree(e && e.target);
+  }
+
   function handleHierarchyKeyboard(e) {
     // Only handle if hierarchy page is active
     if (!document.querySelector('.tag-hierarchy-container')) return;
 
-    // Ctrl+C - copy selected tag
-    if (e.ctrlKey && e.key === 'c' && selectedTagId) {
+    const key = String(e.key || '').toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
+    const treeKey = shouldHandleHierarchyKey(e, document.activeElement);
+
+    // Ctrl/Cmd+C - copy selected tag (leave native copy alone if text is selected)
+    const hasTextSelection = typeof window.getSelection === 'function' &&
+      String(window.getSelection() || '') !== '';
+    if (treeKey && mod && key === 'c' && selectedTagId && !hasTextSelection) {
       e.preventDefault();
       copiedTagId = selectedTagId;
 
@@ -5336,8 +5398,8 @@
       showToast('Tag copied - select target and press Ctrl+V to add as child');
     }
 
-    // Ctrl+V - paste (add copied tag as child of selected)
-    if (e.ctrlKey && e.key === 'v' && copiedTagId && selectedTagId && copiedTagId !== selectedTagId) {
+    // Ctrl/Cmd+V - paste (add copied tag as child of selected)
+    if (treeKey && mod && key === 'v' && copiedTagId && selectedTagId && copiedTagId !== selectedTagId) {
       e.preventDefault();
 
       if (wouldCreateCircularRef(selectedTagId, copiedTagId)) {
@@ -5349,10 +5411,7 @@
     }
 
     // Delete/Backspace - remove selected tag from its current parent
-    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedTagId) {
-      // Don't handle if typing in an input
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
+    if (treeKey && (e.key === 'Delete' || e.key === 'Backspace') && selectedTagId) {
       e.preventDefault();
       const selectedNode = document.querySelector(`.th-node.th-selected[data-tag-id="${selectedTagId}"]`);
       // Use parentContext data attribute for correct parent identification
@@ -5381,40 +5440,51 @@
   /**
    * Attach event handlers for hierarchy page
    */
+  /**
+   * Find a tag's child nodes in the tree (every instance of a tag shares them).
+   */
+  function findTreeChildNodes(tagId) {
+    const seen = new Set();
+    function walk(nodes) {
+      for (const node of nodes) {
+        if (node.id === tagId) return node.childNodes;
+        if (seen.has(node.id)) continue;
+        seen.add(node.id);
+        const found = walk(node.childNodes);
+        if (found) return found;
+      }
+      return null;
+    }
+    return walk(hierarchyTree) || [];
+  }
+
+  /**
+   * Add every tag that has children to expandedNodes (for Expand All).
+   */
+  function expandAllNodes() {
+    const seen = new Set();
+    function walk(nodes) {
+      for (const node of nodes) {
+        if (node.childNodes.length === 0 || seen.has(node.id)) continue;
+        seen.add(node.id);
+        expandedNodes.add(node.id);
+        walk(node.childNodes);
+      }
+    }
+    walk(hierarchyTree);
+  }
+
   function attachHierarchyEventHandlers(container) {
-    // Toggle expand/collapse on node click
-    container.querySelectorAll('.th-toggle').forEach(toggle => {
-      toggle.addEventListener('click', (e) => {
-        const tagId = e.target.dataset.tagId;
-        if (!tagId) return;
-
-        const childrenContainer = container.querySelector(`.th-children[data-parent-id="${tagId}"]`);
-        if (!childrenContainer) return;
-
-        if (expandedNodes.has(tagId)) {
-          expandedNodes.delete(tagId);
-          childrenContainer.classList.remove('th-expanded');
-          e.target.innerHTML = '&#9654;';  // Right arrow
-        } else {
-          expandedNodes.add(tagId);
-          childrenContainer.classList.add('th-expanded');
-          e.target.innerHTML = '&#9660;';  // Down arrow
-        }
-      });
-    });
+    attachNodeHandlers(container, container);
 
     // Expand All button
     const expandAllBtn = container.querySelector('#th-expand-all');
     if (expandAllBtn) {
       expandAllBtn.addEventListener('click', () => {
-        container.querySelectorAll('.th-children').forEach(el => {
-          el.classList.add('th-expanded');
-          const parentId = el.dataset.parentId;
-          if (parentId) expandedNodes.add(parentId);
-        });
-        container.querySelectorAll('.th-toggle:not(.th-leaf)').forEach(el => {
-          el.innerHTML = '&#9660;';
-        });
+        // Collapsed branches have no DOM yet, so mark everything expanded and re-render
+        expandAllNodes();
+        renderHierarchyPage(container);
+        if (isEditMode) renderChangesPanel();
       });
     }
 
@@ -5443,8 +5513,75 @@
       });
     }
 
+    // Root drop zone handler
+    const rootDropZone = container.querySelector('#th-root-drop-zone');
+    if (rootDropZone) {
+      rootDropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (draggedTagId) {
+          rootDropZone.classList.add('drag-over');
+        }
+      });
+
+      rootDropZone.addEventListener('dragleave', () => {
+        rootDropZone.classList.remove('drag-over');
+      });
+
+      rootDropZone.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        rootDropZone.classList.remove('drag-over');
+
+        if (!draggedTagId) return;
+
+        // If dragged from a specific parent, just remove that parent
+        if (draggedFromParentId) {
+          await removeParent(draggedTagId, draggedFromParentId);
+        } else {
+          // Make completely root
+          await makeRoot(draggedTagId);
+        }
+      });
+    }
+  }
+
+  /**
+   * Attach per-node handlers (toggle, context menu, hover, drag/drop, select)
+   * to every node under `scope`. Used for the whole page and for lazily
+   * rendered subtrees.
+   */
+  function attachNodeHandlers(container, scope) {
+    // Toggle expand/collapse
+    scope.querySelectorAll('.th-toggle').forEach(toggle => {
+      toggle.addEventListener('click', () => {
+        const tagId = toggle.dataset.tagId;
+        if (!tagId) return;
+
+        const nodeEl = toggle.closest('.th-node');
+        const childrenContainer = nodeEl
+          ? Array.from(nodeEl.children).find(c => c.classList.contains('th-children'))
+          : null;
+        if (!childrenContainer) return;
+
+        if (expandedNodes.has(tagId)) {
+          expandedNodes.delete(tagId);
+          childrenContainer.classList.remove('th-expanded');
+          toggle.innerHTML = '&#9654;';  // Right arrow
+        } else {
+          expandedNodes.add(tagId);
+          // Collapsed branches are not rendered up front; build them now
+          if (!childrenContainer.firstElementChild) {
+            childrenContainer.innerHTML = findTreeChildNodes(tagId)
+              .map(child => renderTreeNode(child, false)).join('');
+            attachNodeHandlers(container, childrenContainer);
+          }
+          childrenContainer.classList.add('th-expanded');
+          toggle.innerHTML = '&#9660;';  // Down arrow
+        }
+      });
+    });
+
     // Context menu on right-click
-    container.querySelectorAll('.th-node').forEach(node => {
+    scope.querySelectorAll('.th-node').forEach(node => {
       node.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         e.stopPropagation(); // Prevent bubbling to parent .th-node elements
@@ -5457,7 +5594,7 @@
     });
 
     // Highlight all instances of a tag on hover
-    container.querySelectorAll('.th-node').forEach(node => {
+    scope.querySelectorAll('.th-node').forEach(node => {
       node.addEventListener('mouseenter', () => {
         const tagId = node.dataset.tagId;
         container.querySelectorAll(`.th-node[data-tag-id="${tagId}"]`).forEach(n => {
@@ -5473,7 +5610,7 @@
     });
 
     // Drag and drop handlers
-    container.querySelectorAll('.th-node').forEach(node => {
+    scope.querySelectorAll('.th-node').forEach(node => {
       node.addEventListener('dragstart', (e) => {
         draggedTagId = node.dataset.tagId;
         // Use parentContext data attribute for correct parent identification
@@ -5526,38 +5663,8 @@
       });
     });
 
-    // Root drop zone handler
-    const rootDropZone = container.querySelector('#th-root-drop-zone');
-    if (rootDropZone) {
-      rootDropZone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        if (draggedTagId) {
-          rootDropZone.classList.add('drag-over');
-        }
-      });
-
-      rootDropZone.addEventListener('dragleave', () => {
-        rootDropZone.classList.remove('drag-over');
-      });
-
-      rootDropZone.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        rootDropZone.classList.remove('drag-over');
-
-        if (!draggedTagId) return;
-
-        // If dragged from a specific parent, just remove that parent
-        if (draggedFromParentId) {
-          await removeParent(draggedTagId, draggedFromParentId);
-        } else {
-          // Make completely root
-          await makeRoot(draggedTagId);
-        }
-      });
-    }
-
     // Click to select (for keyboard operations)
-    container.querySelectorAll('.th-node-content').forEach(content => {
+    scope.querySelectorAll('.th-node-content').forEach(content => {
       content.addEventListener('click', (e) => {
         // Don't select if clicking on a link or toggle
         if (e.target.closest('a') || e.target.closest('.th-toggle')) return;
@@ -5586,6 +5693,9 @@
     const containerRef = React.useRef(null);
 
     React.useEffect(() => {
+      // Start every visit from a clean edit/selection state
+      resetHierarchyEditState();
+
       // Register keyboard handler for this page
       document.addEventListener('keydown', handleHierarchyKeyboard);
 
@@ -5621,12 +5731,14 @@
       // Cleanup: remove keyboard handler when component unmounts
       return () => {
         document.removeEventListener('keydown', handleHierarchyKeyboard);
+        resetHierarchyEditState();
       };
     }, []);
 
     return React.createElement('div', {
       ref: containerRef,
-      className: 'tag-hierarchy-container'
+      className: 'tag-hierarchy-container',
+      tabIndex: 0  // focusable so clicks inside the tree scope keyboard shortcuts
     });
   }
 
@@ -5821,11 +5933,24 @@
       handleUpdateLinkedTags,
       showDiffDialog,
       applyDiff,
+      wouldCreateCircularRef,
+      buildTagTree,
+      getTreeStats,
+      resetHierarchyEditState,
+      savePendingChanges,
+      exitEditMode,
+      fetchAllTagsWithHierarchy,
+      showTagSearchDialog,
+      closeTagSearchDialog,
+      renderTreeNode,
+      handleHierarchyKeyboard,
+      shouldHandleHierarchyKey,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,
       categoryMappings, tagBlacklist, isImporting, pendingChanges, isEditMode, cacheStatus,
-      selectedForImport,
+      selectedForImport, hierarchyTags, hierarchyTree, expandedNodes, selectedTagId, copiedTagId,
+      originalParentMap,
     });
     window.__TAG_MANAGER_TEST__.setState = (patch) => {
       if ("localTags" in patch) localTags = patch.localTags;
@@ -5840,6 +5965,12 @@
       if ("pendingChanges" in patch) pendingChanges = patch.pendingChanges;
       if ("isEditMode" in patch) isEditMode = patch.isEditMode;
       if ("selectedForImport" in patch) selectedForImport = patch.selectedForImport;
+      if ("hierarchyTags" in patch) hierarchyTags = patch.hierarchyTags;
+      if ("hierarchyTree" in patch) hierarchyTree = patch.hierarchyTree;
+      if ("expandedNodes" in patch) expandedNodes = patch.expandedNodes;
+      if ("selectedTagId" in patch) selectedTagId = patch.selectedTagId;
+      if ("copiedTagId" in patch) copiedTagId = patch.copiedTagId;
+      if ("originalParentMap" in patch) originalParentMap = patch.originalParentMap;
     };
   }
 })();

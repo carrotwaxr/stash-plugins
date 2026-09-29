@@ -547,6 +547,10 @@
    Tag Hierarchy View Styles
    ============================================ */
 
+.tag-hierarchy-container:focus {
+  outline: none;
+}
+
 .tag-hierarchy-container {
   padding: 20px;
   max-width: 1400px;

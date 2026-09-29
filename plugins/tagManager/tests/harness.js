@@ -6,7 +6,7 @@
  *   const tm = loadTagManager({ fetchResponses: { Configuration: {...} } });
  *   await tm.settle();
  *
- * Returns { exports, getState, setState, fetchCalls, confirmCalls, routes,
+ * Returns { exports, getState, setState, fetchCalls, confirmCalls, routes, effects,
  *           document, settle, flushTimers, window }.
  * `exports`/`getState`/`setState` come from the hook at the end of tag-manager.js
  * (active only when window.__TAG_MANAGER_TEST__ is set).
@@ -175,6 +175,7 @@ function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true 
 
   // ---- PluginApi ----
   const routes = [];
+  const effects = []; // callbacks passed to React.useEffect (tests run them by hand)
   const PluginApi = {
     React: {
       createElement: (type, props, ...children) => ({ type, props, children }),
@@ -182,7 +183,7 @@ function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true 
         const v = typeof init === "function" ? init() : init;
         return [v, () => {}];
       },
-      useEffect: () => {},
+      useEffect: (fn) => { effects.push(fn); },
       useRef: (init) => ({ current: init }),
     },
     register: { route: (p, component) => routes.push({ path: p, component }) },
@@ -220,6 +221,7 @@ function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true 
     fetchCalls,
     confirmCalls,
     routes,
+    effects,
     document,
     window,
     settle,
