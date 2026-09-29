@@ -293,11 +293,6 @@
   background: rgba(13, 110, 253, 0.1);
 }
 
-.sh-node.sh-highlighted > .sh-node-content {
-  background: rgba(13, 202, 240, 0.15);
-  border-radius: 4px;
-}
-
 /* ============================================
    Drag and Drop
    ============================================ */
@@ -363,6 +358,7 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   animation: sh-toast-in 0.3s ease;
   max-width: 350px;
+  white-space: pre-line;
 }
 
 .sh-toast.success {
@@ -383,17 +379,6 @@
   to {
     opacity: 1;
     transform: translateY(0);
-  }
-}
-
-@keyframes sh-toast-out {
-  from {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(-20px);
   }
 }
 
@@ -440,6 +425,17 @@
   font-size: 0.9rem;
 }
 
+.sh-change-failed {
+  border-left: 3px solid var(--bs-danger, #dc3545);
+}
+
+.sh-change-error {
+  display: block;
+  color: var(--bs-danger, #dc3545);
+  font-size: 0.8rem;
+  margin-top: 2px;
+}
+
 .sh-change-remove {
   background: none;
   border: none;
@@ -454,12 +450,6 @@
   color: var(--bs-danger, #dc3545);
 }
 
-.sh-no-changes {
-  color: var(--bs-gray-500, #adb5bd);
-  font-style: italic;
-  padding: 8px;
-}
-
 .sh-changes-actions {
   display: flex;
   justify-content: flex-end;
@@ -467,110 +457,31 @@
 }
 
 /* ============================================
-   Search Dialog (for moving studios)
+   Restored-changes banner
    ============================================ */
 
-.sh-search-dialog {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  background: var(--bs-body-bg, #1a1d1e);
-  border: 1px solid var(--bs-border-color, #444);
-  border-radius: 8px;
-  padding: 20px;
-  min-width: 400px;
-  max-width: 500px;
-  max-height: 80vh;
-  z-index: 10001;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-}
-
-.sh-search-dialog-backdrop {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 10000;
-}
-
-.sh-search-dialog h3 {
-  margin: 0 0 16px 0;
-  font-size: 1.1rem;
-}
-
-.sh-search-input {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--bs-border-color, #444);
-  border-radius: 4px;
-  background: var(--bs-body-bg, #1a1d1e);
-  color: inherit;
+.sh-restored-banner {
   margin-bottom: 12px;
-}
-
-.sh-search-results {
-  max-height: 300px;
-  overflow-y: auto;
-  border: 1px solid var(--bs-border-color, #444);
+  padding: 8px 12px;
   border-radius: 4px;
+  border: 1px solid var(--bs-warning, #ffc107);
+  background: rgba(255, 193, 7, 0.1);
 }
 
-.sh-search-result {
-  padding: 10px 12px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-bottom: 1px solid var(--bs-border-color, #333);
+.sh-cycle-warning {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--bs-danger, #dc3545);
+  background: rgba(220, 53, 69, 0.1);
 }
 
-.sh-search-result:last-child {
-  border-bottom: none;
-}
-
-.sh-search-result:hover {
-  background: var(--bs-primary, #137cbd);
-}
-
-.sh-search-result.disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.sh-search-result.disabled:hover {
-  background: transparent;
-}
-
-.sh-search-result-name {
-  flex: 1;
-}
-
-.sh-search-result-badge {
-  font-size: 0.75rem;
-  padding: 2px 6px;
+.sh-cycle-badge {
+  margin-left: 6px;
+  padding: 0 6px;
   border-radius: 3px;
-  background: var(--bs-secondary, #495057);
-}
-
-.sh-search-empty {
-  padding: 20px;
-  text-align: center;
-  color: var(--bs-secondary, #6c757d);
-}
-
-/* ============================================
-   Child Count Badge
-   ============================================ */
-
-.sh-child-count-badge {
-  font-size: 0.7rem;
-  padding: 2px 6px;
-  border-radius: 10px;
-  background: var(--bs-info, #0dcaf0);
-  color: var(--bs-dark, #212529);
-  margin-left: 8px;
-  white-space: nowrap;
+  font-size: 0.75em;
+  background: var(--bs-danger, #dc3545);
+  color: #fff;
+  vertical-align: middle;
 }

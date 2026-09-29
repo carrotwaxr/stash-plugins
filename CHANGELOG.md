@@ -49,7 +49,13 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ## Studio Manager
 
-No release this cycle yet.
+### 0.1.1
+- Studios in an existing parent cycle are no longer hidden. The smallest id of each cycle is shown at the top level with the rest beneath it, each marked "cycle", with a warning above the tree. A parent whose chain runs into a cycle is refused.
+- Removing one pending change keeps the others, and Cancel no longer refetches. Stats and the context menu reflect pending changes, and a moved studio's ancestors are expanded.
+- Saves lock editing while running, remove parents first and then set new parents shallowest first, and refuse cycles before any request. Failed changes stay pending with the error on the row, and the toast reads "N saved, M failed". A failed reload keeps pending changes.
+- The studio link, context menu View/Edit and the toolbar button navigate inside Stash, including under a sub-path. Leaving with unsaved changes asks first, the browser warns before a reload, and pending changes are restored when you return.
+- Only Delete removes a parent (not Backspace), and no shortcuts fire while you type. Event listeners no longer pile up, and there is no page-wide MutationObserver.
+- The Stash floor is v0.30.
 
 ## Repository
 

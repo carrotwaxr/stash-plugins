@@ -14,22 +14,102 @@
   let pendingChanges = [];
   let isEditMode = false;
   let originalParentMap = new Map();
+  let isSaving = false;       // a save is running: editing is locked
 
   // Drag state
   let draggedStudioId = null;
 
   // Context menu state
   let contextMenuStudioId = null;
+  let contextMenuCloser = null;   // { menu, close } while a menu is open
+
+  // Lifecycle: bumped on every mount and unmount; async work started under an
+  // older value must not render, toast or touch the page.
+  let mountToken = 0;
+  let savesFinished = 0;          // bumped when a save ends (it has loaded newer data)
+  let restoredCount = 0;          // changes re-applied on the last mount (banner, until the next edit or save)
+  let titleTimers = [];
+  let leaveGuardOn = false;
 
   /**
-   * Set page title with retry to overcome Stash's title management
+   * Set page title with retry to overcome Stash's title management.
+   * The retries are cleared on unmount (clearTitleTimers).
    */
   function setPageTitle(title) {
     const doSet = () => { document.title = title; };
+    clearTitleTimers();
     doSet();
-    setTimeout(doSet, 50);
-    setTimeout(doSet, 200);
-    setTimeout(doSet, 500);
+    for (const ms of [50, 200, 500]) titleTimers.push(setTimeout(doSet, ms));
+  }
+
+  function clearTitleTimers() {
+    titleTimers.forEach(id => clearTimeout(id));
+    titleTimers = [];
+  }
+
+  /**
+   * An app path under Stash's <base href> (e.g. "/stash/"). Accepts paths with
+   * or without a leading slash; never doubles slashes.
+   */
+  function stashPath(path) {
+    const baseEl = document.querySelector('base');
+    let base = (baseEl && baseEl.getAttribute('href')) || '/';
+    if (/^([a-z][a-z\d+.-]*:)?\/\//i.test(base)) { // absolute or protocol-relative
+      try { base = new URL(base, window.location.href).pathname; } catch (e) { /* keep the raw href */ }
+    }
+    let prefix = base.replace(/\/+$/, '');
+    if (prefix && !prefix.startsWith('/')) prefix = `/${prefix}`;
+    const rel = String(path == null ? '' : path).replace(/^\/+/, '');
+    return `${prefix}/${rel}`;
+  }
+
+  function unsavedMessage(n) {
+    if (isSaving) {
+      return `${n} change${n === 1 ? ' is' : 's are'} still being saved. Leave anyway? ` +
+        'Saving carries on, and any that fail are kept for when you return.';
+    }
+    return `You have ${n} unsaved change${n === 1 ? '' : 's'}. Leave anyway?`;
+  }
+
+  /** The hierarchy page's container while the page is in the document, else null. */
+  function pageContainer() {
+    return document.querySelector('.studio-hierarchy-container');
+  }
+
+  /**
+   * Navigate inside Stash's single-page app (react-router listens for popstate).
+   * With pending changes, asks first; the hierarchy page itself is exempt because
+   * it restores them.
+   */
+  function navigateTo(path) {
+    if (pendingChanges.length > 0 && path !== HIERARCHY_ROUTE_PATH &&
+        !window.confirm(unsavedMessage(pendingChanges.length))) {
+      return;
+    }
+    const url = stashPath(path);
+    try {
+      window.history.pushState({}, '', url);
+      // history v4 ignores a popstate whose state is undefined, so pass one.
+      window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+    } catch (e) {
+      console.warn('[studioManager] In-app navigation failed; loading the page instead:', e);
+      window.location.href = url;
+    }
+  }
+
+  function beforeUnloadGuard(e) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+
+  /**
+   * beforeunload is set exactly while changes are pending.
+   */
+  function syncLeaveGuard() {
+    const want = pendingChanges.length > 0;
+    if (want && !leaveGuardOn) window.addEventListener('beforeunload', beforeUnloadGuard);
+    if (!want && leaveGuardOn) window.removeEventListener('beforeunload', beforeUnloadGuard);
+    leaveGuardOn = want;
   }
 
   /**
@@ -134,52 +214,273 @@
   }
 
   /**
-   * Build tree structure from flat studio list
-   * Simpler than Tag Manager since studios have single parent
+   * Effective parent map: original parents with pending changes applied.
+   * Returns a new Map of studio id -> parent id (or null). Never mutates its inputs.
+   * @param {Map} originalParentMap studio id -> parent id or null (see enterEditMode)
+   * @param {Array} pending items {type: 'set-parent'|'remove-parent', studioId, parentId, ...}
+   */
+  function effectiveParentMap(originalParentMap, pending) {
+    const effective = new Map(originalParentMap);
+    for (const change of pending || []) {
+      if (change.type === 'set-parent') {
+        effective.set(change.studioId, change.parentId);
+      } else if (change.type === 'remove-parent') {
+        effective.set(change.studioId, null);
+      }
+    }
+    return effective;
+  }
+
+  /**
+   * Ids from the parent of `id` up to the root. Stops at a cycle (no id repeats,
+   * and `id` itself only appears if it is on a cycle).
+   */
+  function ancestorsOf(id, parentMap) {
+    const result = [];
+    const visited = new Set([id]);
+    let current = parentMap.get(id);
+    while (current && !visited.has(current)) {
+      result.push(current);
+      visited.add(current);
+      current = parentMap.get(current);
+    }
+    return result;
+  }
+
+  /**
+   * True if making newParentId the parent of studioId is unsafe: newParentId is the
+   * studio itself or one of its descendants, or the walk up from newParentId meets an
+   * existing cycle (Stash's own check would recurse forever on that).
+   */
+  function wouldCreateCycle(studioId, newParentId, parentMap) {
+    if (!newParentId) return false;
+    const visited = new Set();
+    let current = newParentId;
+    while (current) {
+      if (current === studioId) return true;
+      if (visited.has(current)) return true; // existing cycle upstream
+      visited.add(current);
+      current = parentMap.get(current);
+    }
+    return false;
+  }
+
+  /**
+   * Find the cycles in a studio list. Returns arrays of ids, one per cycle
+   * (a self-parent is a cycle of one).
+   */
+  function findCycles(parentOf) {
+    const state = new Map(); // id -> 1 (on current path) | 2 (done)
+    const cycles = [];
+    for (const start of parentOf.keys()) {
+      if (state.has(start)) continue;
+      const path = [];
+      let current = start;
+      while (current && parentOf.has(current) && !state.has(current)) {
+        state.set(current, 1);
+        path.push(current);
+        current = parentOf.get(current);
+      }
+      if (current && state.get(current) === 1) {
+        cycles.push(path.slice(path.indexOf(current)));
+      }
+      path.forEach(id => state.set(id, 2));
+    }
+    return cycles;
+  }
+
+  /** studio id -> parent id, only for parents present in the list (else null). */
+  function parentsInList(studios) {
+    const ids = new Set(studios.map(s => s.id));
+    const parentOf = new Map();
+    for (const s of studios) {
+      const p = s.parent_studio?.id || null;
+      parentOf.set(s.id, p && ids.has(p) ? p : null);
+    }
+    return parentOf;
+  }
+
+  /**
+   * Ids of studios on a parent cycle, plus all their descendants. Returns a Set.
+   */
+  function findCycleMembers(studios) {
+    const parentOf = parentsInList(studios);
+    const members = new Set();
+    findCycles(parentOf).forEach(cycle => cycle.forEach(id => members.add(id)));
+    if (members.size === 0) return members;
+    const memo = new Map();
+    function reaches(id) {
+      const path = [];
+      let current = id;
+      let result = false;
+      while (current) {
+        if (members.has(current)) { result = true; break; }
+        if (memo.has(current)) { result = memo.get(current); break; }
+        path.push(current);
+        current = parentOf.get(current);
+      }
+      path.forEach(p => memo.set(p, result));
+      return result;
+    }
+    for (const id of parentOf.keys()) {
+      if (reaches(id)) members.add(id);
+    }
+    return members;
+  }
+
+  /** Compare ids numerically when both are numeric, else as strings. */
+  function compareIds(a, b) {
+    const na = Number(a), nb = Number(b);
+    if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+    return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
+  }
+
+  /**
+   * Build tree structure from flat studio list.
+   * Returns the array of root nodes ({...studio, childNodes, inCycle}); the array also
+   * carries a non-enumerable `totalStudios` (number of nodes reachable from the roots).
+   * An orphan whose parent is missing is a root. Each parent cycle is broken at its
+   * smallest id, which becomes a pseudo-root; cycle members and their descendants are
+   * flagged inCycle, so no studio disappears.
    */
   function buildStudioTree(studios) {
-    const studioMap = new Map();
+    const parentOf = parentsInList(studios);
+    const inCycle = findCycleMembers(studios);
+    const breakAt = new Set();
+    for (const cycle of findCycles(parentOf)) {
+      breakAt.add(cycle.slice().sort(compareIds)[0]);
+    }
 
-    // First pass: create nodes
+    const studioMap = new Map();
     studios.forEach(studio => {
       studioMap.set(studio.id, {
         ...studio,
-        childNodes: []
+        childNodes: [],
+        inCycle: inCycle.has(studio.id)
       });
     });
 
-    // Second pass: build parent-child relationships
     const roots = [];
     studios.forEach(studio => {
       const node = studioMap.get(studio.id);
-      const parentId = studio.parent_studio?.id;
-
-      if (!parentId) {
-        // Root studio
+      const parentId = parentOf.get(studio.id);
+      if (!parentId || breakAt.has(studio.id)) {
         roots.push(node);
       } else {
-        // Add to parent's children
-        const parentNode = studioMap.get(parentId);
-        if (parentNode) {
-          parentNode.childNodes.push(node);
-        } else {
-          // Parent not found, treat as root
-          roots.push(node);
-        }
+        studioMap.get(parentId).childNodes.push(node);
       }
     });
 
     // Sort roots and children by name
-    const sortByName = (a, b) => a.name.localeCompare(b.name);
+    const sortByName = (a, b) => (a.name || '').localeCompare(b.name || '');
     roots.sort(sortByName);
 
+    let total = 0;
     function sortChildren(node) {
+      total++;
       node.childNodes.sort(sortByName);
       node.childNodes.forEach(sortChildren);
     }
     roots.forEach(sortChildren);
 
+    Object.defineProperty(roots, 'totalStudios', { value: total, enumerable: false });
     return roots;
+  }
+
+  /**
+   * Order pending changes for saving: every remove-parent first, then set-parent
+   * changes by the studio's depth in the final tree, shallowest first (ties keep
+   * insertion order). `parentMap` is the final effective map (or the original map;
+   * pending is applied on top either way). Returns a new array.
+   */
+  function orderForSave(pending, parentMap) {
+    const finalMap = effectiveParentMap(parentMap, pending);
+    const removes = pending.filter(c => c.type === 'remove-parent');
+    const depth = c => ancestorsOf(c.studioId, finalMap).length;
+    const sets = pending
+      .map((c, index) => ({ c, index }))
+      .filter(({ c }) => c.type === 'set-parent')
+      .sort((a, b) => depth(a.c) - depth(b.c) || a.index - b.index)
+      .map(({ c }) => c);
+    return [...removes, ...sets];
+  }
+
+  /**
+   * Ids of studios that are their own ancestor (on a loop), not their descendants.
+   */
+  function studiosOnCycle(parentMap) {
+    const on = new Set();
+    for (const start of parentMap.keys()) {
+      const seen = new Set([start]);
+      let current = parentMap.get(start);
+      while (current != null && !seen.has(current)) {
+        seen.add(current);
+        current = parentMap.get(current);
+      }
+      if (current === start) on.add(start);
+    }
+    return on;
+  }
+
+  /** studio id -> parent id (or null) of a studio list. */
+  function parentMapOf(studios) {
+    const map = new Map();
+    for (const studio of studios) map.set(studio.id, studio.parent_studio?.id || null);
+    return map;
+  }
+
+  /**
+   * Parent map of the server state, with the edit snapshot when one exists.
+   */
+  function baseParentMap() {
+    if (originalParentMap.size > 0) return originalParentMap;
+    return parentMapOf(hierarchyStudios);
+  }
+
+  /**
+   * Copies of `studios` with parent_studio taken from `parentMap` (a studio the
+   * map doesn't list keeps its own) and child_studios recomputed to match.
+   */
+  function withParents(studios, parentMap) {
+    const byId = new Map(studios.map(s => [s.id, s]));
+    const parentOf = s => (parentMap.has(s.id) ? parentMap.get(s.id) : s.parent_studio?.id || null);
+    const kids = new Map();
+    for (const studio of studios) {
+      const pid = parentOf(studio);
+      if (pid && byId.has(pid)) {
+        if (!kids.has(pid)) kids.set(pid, []);
+        kids.get(pid).push({ id: studio.id, name: studio.name });
+      }
+    }
+    return studios.map(studio => {
+      const pid = parentOf(studio);
+      const parent = pid ? byId.get(pid) : null;
+      return {
+        ...studio,
+        parent_studio: pid ? { ...(studio.parent_studio || {}), id: pid, name: parent ? parent.name : studio.parent_studio?.name } : null,
+        child_studios: kids.get(studio.id) || []
+      };
+    });
+  }
+
+  /**
+   * The displayed studios: copies of hierarchyStudios (the server state, never
+   * mutated by edits) with parent_studio and child_studios taken from the
+   * effective parent map (original parents plus pending changes).
+   */
+  function derivedStudios() {
+    return withParents(hierarchyStudios, effectiveParentMap(baseParentMap(), pendingChanges));
+  }
+
+  /**
+   * Recompute the tree and stats from the derived studios; re-render if the page is mounted.
+   */
+  function refreshView() {
+    const studios = derivedStudios();
+    hierarchyTree = buildStudioTree(studios);
+    hierarchyStats = getTreeStats(studios);
+    const container = pageContainer();
+    if (container) renderHierarchyPage(container);
   }
 
   /**
@@ -218,45 +519,18 @@
   }
 
   /**
-   * Check if adding parentId as parent of studioId would create a cycle
+   * Check if adding parentId as parent of studioId would create a cycle, in the
+   * tree as displayed (the same baseline as derivedStudios)
    */
   function wouldCreateCircularRef(potentialParentId, studioId) {
-    if (potentialParentId === studioId) return true;
-
-    // Build effective parent map considering pending changes
-    const effectiveParent = new Map();
-
-    for (const studio of hierarchyStudios) {
-      effectiveParent.set(studio.id, studio.parent_studio?.id || null);
-    }
-
-    // Apply pending changes
-    for (const change of pendingChanges) {
-      if (change.type === 'set-parent') {
-        effectiveParent.set(change.studioId, change.parentId);
-      } else if (change.type === 'remove-parent') {
-        effectiveParent.set(change.studioId, null);
-      }
-    }
-
-    // Walk up from potentialParentId, check if we hit studioId
-    let current = potentialParentId;
-    const visited = new Set();
-
-    while (current) {
-      if (current === studioId) return true;
-      if (visited.has(current)) break; // Existing cycle, stop
-      visited.add(current);
-      current = effectiveParent.get(current);
-    }
-
-    return false;
+    return wouldCreateCycle(studioId, potentialParentId, effectiveParentMap(baseParentMap(), pendingChanges));
   }
 
   /**
    * Show a toast notification
    */
   function showToast(message, type = 'info', duration = 3000) {
+    if (!pageContainer()) return; // toasts belong to the hierarchy page, never another one
     let container = document.querySelector('.sh-toast-container');
     if (!container) {
       container = document.createElement('div');
@@ -266,7 +540,7 @@
 
     const toast = document.createElement('div');
     toast.className = `sh-toast ${type}`;
-    toast.textContent = message;
+    toast.textContent = message; // .sh-toast is white-space: pre-line
     container.appendChild(toast);
 
     setTimeout(() => {
@@ -279,6 +553,12 @@
    * Hide context menu
    */
   function hideContextMenu() {
+    if (contextMenuCloser) {
+      document.removeEventListener('click', contextMenuCloser.close);
+      document.removeEventListener('contextmenu', contextMenuCloser.close);
+      contextMenuCloser.cancelled = true;
+      contextMenuCloser = null;
+    }
     const menu = document.querySelector('.sh-context-menu');
     if (menu) menu.remove();
     contextMenuStudioId = null;
@@ -291,7 +571,7 @@
     hideContextMenu();
     contextMenuStudioId = studioId;
 
-    const studio = hierarchyStudios.find(s => s.id === studioId);
+    const studio = derivedStudios().find(s => s.id === studioId);
     if (!studio) return;
 
     const hasParent = !!studio.parent_studio?.id;
@@ -332,10 +612,10 @@
 
       switch (action) {
         case 'view':
-          window.location.href = `/studios/${studioId}`;
+          navigateTo(`/studios/${studioId}`);
           break;
         case 'edit':
-          window.location.href = `/studios/${studioId}/edit`;
+          navigateTo(`/studios/${studioId}/edit`);
           break;
         case 'remove-parent':
           removeParent(studioId);
@@ -350,9 +630,14 @@
       hideContextMenu();
     });
 
-    // Close on click outside
+    // Close on any click or right-click elsewhere. Registered next tick so the
+    // event that opened the menu does not close it; skipped if it was closed already.
+    const closer = { close: () => hideContextMenu(), cancelled: false };
+    contextMenuCloser = closer;
     setTimeout(() => {
-      document.addEventListener('click', hideContextMenu, { once: true });
+      if (closer.cancelled) return;
+      document.addEventListener('click', closer.close);
+      document.addEventListener('contextmenu', closer.close);
     }, 0);
   }
 
@@ -425,79 +710,71 @@
   }
 
   /**
-   * Add a pending change
+   * Add a pending change. A change that returns a studio to its original parent
+   * just drops its pending entry.
    */
   function addPendingChange(type, studioId, studioName, parentId, parentName) {
     enterEditMode();
+    restoredCount = 0;
 
-    // Check if this change cancels out an existing one
-    const existingIndex = pendingChanges.findIndex(c =>
-      c.studioId === studioId &&
-      ((c.type === 'set-parent' && type === 'remove-parent') ||
-       (c.type === 'remove-parent' && type === 'set-parent'))
-    );
+    // Replace any existing change for this studio
+    pendingChanges = pendingChanges.filter(c => c.studioId !== studioId);
 
-    if (existingIndex >= 0) {
-      // Check if this returns to original state
-      const originalParent = originalParentMap.get(studioId);
-      if ((type === 'set-parent' && parentId === originalParent) ||
-          (type === 'remove-parent' && originalParent === null)) {
-        pendingChanges.splice(existingIndex, 1);
-        renderChangesPanel();
-        return;
-      }
+    const originalParent = originalParentMap.get(studioId) || null;
+    const target = type === 'set-parent' ? parentId : null;
+    if (target !== originalParent) {
+      pendingChanges.push({ type, studioId, studioName, parentId, parentName });
     }
-
-    // Remove any existing change for this studio
-    const existingChangeIndex = pendingChanges.findIndex(c => c.studioId === studioId);
-    if (existingChangeIndex >= 0) {
-      pendingChanges.splice(existingChangeIndex, 1);
-    }
-
-    // Check if this is actually a change from original
-    const originalParent = originalParentMap.get(studioId);
-    if (type === 'set-parent' && parentId === originalParent) {
-      renderChangesPanel();
-      return; // No actual change
-    }
-    if (type === 'remove-parent' && originalParent === null) {
-      renderChangesPanel();
-      return; // Already a root
-    }
-
-    pendingChanges.push({
-      type,
-      studioId,
-      studioName,
-      parentId,
-      parentName
-    });
 
     renderChangesPanel();
   }
 
   /**
-   * Remove a pending change by index
+   * Leave edit mode and forget pending changes (no refetch: the server state is intact)
+   */
+  function cancelPendingChanges() {
+    if (isSaving) return;
+    restoredCount = 0;
+    pendingChanges = [];
+    isEditMode = false;
+    originalParentMap.clear();
+    renderChangesPanel();
+    refreshView();
+  }
+
+  /**
+   * Remove a pending change by index; the others stay applied. Refused (with a
+   * toast) when another pending change needs it to stay out of a cycle.
    */
   function removePendingChange(index) {
-    pendingChanges.splice(index, 1);
+    if (isSaving) return;
+    const rest = pendingChanges.filter((_, i) => i !== index);
+    const base = baseParentMap();
+    const before = studiosOnCycle(effectiveParentMap(base, pendingChanges));
+    const after = studiosOnCycle(effectiveParentMap(base, rest));
+    const dependents = rest.filter(c => after.has(c.studioId) && !before.has(c.studioId));
+    if (dependents.length > 0) {
+      const names = dependents.map(c => `"${c.studioName}"`).join(', ');
+      showToast(dependents.length === 1
+        ? `Remove the change for ${names} first: it needs this one to avoid a cycle`
+        : `Remove the changes for ${names} first: they need this one to avoid a cycle`, 'error');
+      return;
+    }
+    pendingChanges = rest;
+    restoredCount = 0;
     if (pendingChanges.length === 0) {
       isEditMode = false;
       originalParentMap.clear();
     }
     renderChangesPanel();
-
-    // Re-render tree to reflect removed change
-    const container = document.querySelector('.studio-hierarchy-container');
-    if (container) {
-      reloadHierarchy(container);
-    }
+    refreshView();
   }
 
   /**
    * Render the pending changes panel
    */
   function renderChangesPanel() {
+    syncLeaveGuard();
     let panel = document.querySelector('.sh-changes-panel');
 
     if (pendingChanges.length === 0) {
@@ -517,9 +794,9 @@
         : `Remove parent from "${escapeHtml(change.studioName)}"`;
 
       return `
-        <div class="sh-change-item">
-          <span class="sh-change-text">${text}</span>
-          <button class="sh-change-remove" data-index="${index}">&times;</button>
+        <div class="sh-change-item${change.error ? ' sh-change-failed' : ''}">
+          <span class="sh-change-text">${text}${change.error ? `<span class="sh-change-error">${escapeHtml(change.error)}</span>` : ''}</span>
+          <button class="sh-change-remove" data-index="${index}" ${isSaving ? 'disabled' : ''}>&times;</button>
         </div>
       `;
     }).join('');
@@ -532,8 +809,8 @@
         ${changesHtml}
       </div>
       <div class="sh-changes-actions">
-        <button class="btn btn-secondary" id="sh-cancel-changes">Cancel</button>
-        <button class="btn btn-primary" id="sh-save-changes">Save Changes</button>
+        <button class="btn btn-secondary" id="sh-cancel-changes" ${isSaving ? 'disabled' : ''}>Cancel</button>
+        <button class="btn btn-primary" id="sh-save-changes" ${isSaving ? 'disabled' : ''}>${isSaving ? 'Saving…' : 'Save Changes'}</button>
       </div>
     `;
 
@@ -545,74 +822,108 @@
     });
 
     panel.querySelector('#sh-cancel-changes')?.addEventListener('click', () => {
-      pendingChanges = [];
-      isEditMode = false;
-      originalParentMap.clear();
-      renderChangesPanel();
-
-      const container = document.querySelector('.studio-hierarchy-container');
-      if (container) {
-        reloadHierarchy(container);
-      }
+      cancelPendingChanges();
     });
 
     panel.querySelector('#sh-save-changes')?.addEventListener('click', savePendingChanges);
   }
 
   /**
-   * Save all pending changes to server
+   * Save pending changes in a safe order (see orderForSave). Editing is locked
+   * meanwhile. Failed changes stay pending with their error; the data is then
+   * refetched and the failures re-applied on top of it. The page may be left
+   * and re-entered while this runs: results are shown on whichever hierarchy
+   * page is there when it ends, and none if there is none.
    */
   async function savePendingChanges() {
-    if (pendingChanges.length === 0) return;
-
-    const saveBtn = document.querySelector('#sh-save-changes');
-    if (saveBtn) {
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Saving...';
-    }
-
-    const errors = [];
-
-    for (const change of pendingChanges) {
-      try {
-        const parentId = change.type === 'set-parent' ? change.parentId : null;
-        await updateStudioParent(change.studioId, parentId);
-      } catch (err) {
-        errors.push(`Failed to update "${change.studioName}": ${err.message}`);
-      }
-    }
-
-    if (errors.length > 0) {
-      showToast(`Some changes failed:\n${errors.join('\n')}`, 'error', 5000);
-    } else {
-      showToast(`Saved ${pendingChanges.length} change${pendingChanges.length !== 1 ? 's' : ''}`, 'success');
-    }
-
-    // Reset state
-    pendingChanges = [];
-    isEditMode = false;
-    originalParentMap.clear();
+    if (isSaving || pendingChanges.length === 0) return;
+    isSaving = true;
+    restoredCount = 0;
+    const onPage = () => !!pageContainer();
     renderChangesPanel();
 
-    // Reload data
-    const container = document.querySelector('.studio-hierarchy-container');
-    if (container) {
-      reloadHierarchy(container);
+    const total = pendingChanges.length;
+    const failed = [];
+    let saved = 0;
+    try {
+      // Parent map as the server evolves while we save
+      const running = new Map(baseParentMap());
+      for (const change of orderForSave(pendingChanges, running)) {
+        delete change.error;
+        const parentId = change.type === 'set-parent' ? change.parentId : null;
+        if (parentId && wouldCreateCycle(change.studioId, parentId, running)) {
+          const ownAncestor = parentId === change.studioId || ancestorsOf(parentId, running).includes(change.studioId);
+          change.error = ownAncestor
+            ? `Would make "${change.studioName}" its own ancestor`
+            : 'Its parent chain runs into an existing cycle; fix that first';
+          failed.push(change);
+          continue;
+        }
+        try {
+          await updateStudioParent(change.studioId, parentId);
+          running.set(change.studioId, parentId);
+          saved++;
+        } catch (err) {
+          change.error = err.message || String(err);
+          failed.push(change);
+        }
+      }
+
+      if (onPage()) {
+        if (failed.length === 0) {
+          showToast(`${saved} saved`, 'success');
+        } else {
+          const lines = failed.map(c => `"${c.studioName}": ${c.error}`);
+          showToast(`${saved} saved, ${failed.length} failed\n${lines.join('\n')}`, 'error', 8000);
+        }
+      }
+
+      const failedById = new Map(failed.map(c => [c.studioId, c]));
+      pendingChanges = pendingChanges
+        .filter(c => failedById.has(c.studioId))
+        .map(c => ({ ...c, error: failedById.get(c.studioId).error }));
+      const reloaded = await reloadHierarchy(onPage);
+      if (!reloaded) {
+        // No fresh data: the successes become the server state and the baseline
+        hierarchyStudios = withParents(hierarchyStudios, running);
+        originalParentMap = running;
+        if (onPage()) {
+          showToast(pendingChanges.length > 0
+            ? "Couldn't reload the hierarchy; the failed changes are still pending"
+            : "Saved, but the hierarchy couldn't be reloaded", 'error');
+        }
+      }
+      if (pendingChanges.length === 0) {
+        isEditMode = false;
+        originalParentMap.clear();
+      }
+    } finally {
+      isSaving = false;
+      savesFinished++;
+      if (onPage()) {
+        renderChangesPanel();
+        refreshView();
+      } else {
+        syncLeaveGuard();
+      }
     }
   }
 
   /**
-   * Reload hierarchy data and re-render
+   * Refetch the studios and re-snapshot the baseline from them. Returns false,
+   * leaving state untouched, when the fetch fails (the caller reports it) or
+   * when `isPresent()` says the page is gone (it loads afresh when reopened).
    */
-  async function reloadHierarchy(container) {
+  async function reloadHierarchy(isPresent = () => !!pageContainer()) {
+    if (!isPresent()) return false;
     try {
-      hierarchyStudios = await fetchAllStudiosWithHierarchy();
-      hierarchyTree = buildStudioTree(hierarchyStudios);
-      hierarchyStats = getTreeStats(hierarchyStudios);
-      renderHierarchyPage(container);
+      const studios = await fetchAllStudiosWithHierarchy();
+      hierarchyStudios = studios;
+      originalParentMap = parentMapOf(studios);
+      return true;
     } catch (e) {
       console.error('[studioManager] Failed to reload hierarchy:', e);
-      showToast('Failed to reload hierarchy', 'error');
+      return false;
     }
   }
 
@@ -620,6 +931,7 @@
    * Set a studio's parent (queue as pending change)
    */
   function setParent(studioId, newParentId) {
+    if (isSaving) return;
     if (studioId === newParentId) {
       showToast('Cannot set studio as its own parent', 'error');
       return;
@@ -641,21 +953,18 @@
     addPendingChange('set-parent', studioId, studio.name, newParentId, parent.name);
     showToast(`Will set "${studio.name}" parent to "${parent.name}"`);
 
-    // Update local state for immediate visual feedback
-    studio.parent_studio = { id: newParentId };
-    hierarchyTree = buildStudioTree(hierarchyStudios);
-
-    const container = document.querySelector('.studio-hierarchy-container');
-    if (container) {
-      renderHierarchyPage(container);
-    }
+    // Make the moved studio visible: expand every ancestor in the edited tree
+    const effective = effectiveParentMap(baseParentMap(), pendingChanges);
+    for (const id of ancestorsOf(studioId, effective)) expandedNodes.add(id);
+    refreshView();
   }
 
   /**
    * Remove a studio's parent (make it a root studio)
    */
   function removeParent(studioId) {
-    const studio = hierarchyStudios.find(s => s.id === studioId);
+    if (isSaving) return;
+    const studio = derivedStudios().find(s => s.id === studioId);
 
     if (!studio) {
       showToast('Studio not found', 'error');
@@ -670,21 +979,17 @@
     addPendingChange('remove-parent', studioId, studio.name, null, null);
     showToast(`Will remove parent from "${studio.name}"`);
 
-    // Update local state for immediate visual feedback
-    studio.parent_studio = null;
-    hierarchyTree = buildStudioTree(hierarchyStudios);
-
-    const container = document.querySelector('.studio-hierarchy-container');
-    if (container) {
-      renderHierarchyPage(container);
-    }
+    refreshView();
   }
 
   /**
    * Render a single tree node (recursive)
    */
-  function renderTreeNode(node, isRoot = false) {
+  function renderTreeNode(node, isRoot = false, onCycle = new Set()) {
     const hasChildren = node.childNodes.length > 0;
+    const cycleBadge = onCycle.has(node.id)
+      ? '<span class="sh-cycle-badge" title="This studio is its own ancestor. Give one studio in the loop a different parent, or none.">cycle</span>'
+      : '';
     const isExpanded = expandedNodes.has(node.id);
 
     // Build metadata
@@ -715,7 +1020,7 @@
     // Children (recursive)
     let childrenHtml = '';
     if (hasChildren) {
-      const childNodes = node.childNodes.map(child => renderTreeNode(child, false)).join('');
+      const childNodes = node.childNodes.map(child => renderTreeNode(child, false, onCycle)).join('');
       childrenHtml = `<div class="sh-children ${isExpanded ? 'sh-expanded' : ''}" data-parent-id="${node.id}">${childNodes}</div>`;
     }
 
@@ -725,12 +1030,12 @@
       : '';
 
     return `
-      <div class="sh-node ${isRoot ? 'sh-root' : ''}" data-studio-id="${node.id}" draggable="true">
+      <div class="sh-node ${isRoot ? 'sh-root' : ''} ${node.id === selectedStudioId ? 'sh-selected' : ''} ${cycleBadge ? 'sh-in-cycle' : ''}" data-studio-id="${node.id}" draggable="true">
         <div class="sh-node-content">
           <span class="sh-toggle ${hasChildren ? '' : 'sh-leaf'}" data-studio-id="${node.id}">${toggleIcon}</span>
           ${imageHtml}
           <div class="sh-info">
-            <a class="sh-name" href="/studios/${node.id}">${escapeHtml(node.name)}</a>
+            <a class="sh-name" href="${escapeHtml(stashPath(`/studios/${node.id}`))}" data-sh-route="/studios/${escapeHtml(node.id)}">${escapeHtml(node.name)}</a>${cycleBadge}
             <div class="sh-meta">${metaText}</div>
           </div>
         </div>
@@ -743,7 +1048,15 @@
    * Render the full hierarchy page
    */
   function renderHierarchyPage(container) {
-    const treeHtml = hierarchyTree.map(root => renderTreeNode(root, true)).join('');
+    const onCycle = studiosOnCycle(effectiveParentMap(baseParentMap(), pendingChanges));
+    const treeHtml = hierarchyTree.map(root => renderTreeNode(root, true, onCycle)).join('');
+    const cycleHtml = onCycle.size > 0
+      ? `<div class="sh-cycle-warning">${onCycle.size} studio${onCycle.size === 1 ? ' is' : 's are'} in a parent cycle (marked "cycle"). Stash can't save a new parent under them until one studio in each loop gets a different parent, or none.</div>`
+      : '';
+    if (pendingChanges.length === 0) restoredCount = 0;
+    const bannerHtml = restoredCount > 0
+      ? `<div class="sh-restored-banner">${restoredCount} unsaved change${restoredCount === 1 ? '' : 's'} restored</div>`
+      : '';
 
     container.innerHTML = `
       <div class="studio-hierarchy">
@@ -758,6 +1071,8 @@
             </label>
           </div>
         </div>
+        ${bannerHtml}
+        ${cycleHtml}
         <div class="sh-stats">
           <span class="stat"><strong>${hierarchyStats.totalStudios}</strong> total studios</span>
           <span class="stat"><strong>${hierarchyStats.rootStudios}</strong> root studios</span>
@@ -773,180 +1088,185 @@
       </div>
     `;
 
-    // Attach event handlers
-    attachHierarchyEventHandlers(container);
+    // The selected studio may be gone (or hidden) after a re-render
+    if (selectedStudioId && !container.querySelector('.sh-node.sh-selected')) {
+      selectedStudioId = null;
+    }
   }
 
   /**
-   * Attach event handlers for hierarchy page
+   * The element for a delegated event: the closest ancestor of the target matching sel.
+   */
+  function closestFrom(e, sel) {
+    const t = e.target;
+    if (!t) return null;
+    if (typeof t.closest === 'function') return t.closest(sel);
+    return t.parentElement && typeof t.parentElement.closest === 'function' ? t.parentElement.closest(sel) : null;
+  }
+
+  function clearDragMarks(container) {
+    container.querySelectorAll('.drag-over, .drag-invalid, .dragging').forEach(n => {
+      n.classList.remove('drag-over', 'drag-invalid', 'dragging');
+    });
+  }
+
+  /**
+   * Attach the page's event handlers once per mount, delegated on the container
+   * (its content is replaced on every render). Returns a function that removes them.
    */
   function attachHierarchyEventHandlers(container) {
-    // Toggle expand/collapse on arrow click
-    container.querySelectorAll('.sh-toggle').forEach(toggle => {
-      toggle.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const studioId = e.target.dataset.studioId;
-        if (!studioId) return;
-
-        const childrenContainer = container.querySelector(`.sh-children[data-parent-id="${studioId}"]`);
-        if (!childrenContainer) return;
-
-        if (expandedNodes.has(studioId)) {
-          expandedNodes.delete(studioId);
-          childrenContainer.classList.remove('sh-expanded');
-          e.target.innerHTML = '&#9654;';
-        } else {
-          expandedNodes.add(studioId);
-          childrenContainer.classList.add('sh-expanded');
-          e.target.innerHTML = '&#9660;';
+    const handlers = {
+      click(e) {
+        // Toggle expand/collapse on arrow click
+        const toggle = closestFrom(e, '.sh-toggle');
+        if (toggle) {
+          const studioId = toggle.dataset.studioId;
+          if (!studioId) return;
+          const childrenContainer = container.querySelector(`.sh-children[data-parent-id="${studioId}"]`);
+          if (!childrenContainer) return;
+          if (expandedNodes.has(studioId)) {
+            expandedNodes.delete(studioId);
+            childrenContainer.classList.remove('sh-expanded');
+            toggle.innerHTML = '&#9654;';
+          } else {
+            expandedNodes.add(studioId);
+            childrenContainer.classList.add('sh-expanded');
+            toggle.innerHTML = '&#9660;';
+          }
+          return;
         }
-      });
-    });
 
-    // Expand All button
-    container.querySelector('#sh-expand-all')?.addEventListener('click', () => {
-      container.querySelectorAll('.sh-children').forEach(el => {
-        el.classList.add('sh-expanded');
-        const parentId = el.dataset.parentId;
-        if (parentId) expandedNodes.add(parentId);
-      });
-      container.querySelectorAll('.sh-toggle:not(.sh-leaf)').forEach(el => {
-        el.innerHTML = '&#9660;';
-      });
-    });
+        // Studio link: in-app navigation (modified clicks stay with the browser)
+        const link = closestFrom(e, 'a[data-sh-route]');
+        if (link) {
+          if (e.defaultPrevented || (e.button && e.button !== 0)) return;
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          e.preventDefault();
+          navigateTo(link.getAttribute('data-sh-route'));
+          return;
+        }
 
-    // Collapse All button
-    container.querySelector('#sh-collapse-all')?.addEventListener('click', () => {
-      container.querySelectorAll('.sh-children').forEach(el => {
-        el.classList.remove('sh-expanded');
-        const parentId = el.dataset.parentId;
-        if (parentId) expandedNodes.delete(parentId);
-      });
-      container.querySelectorAll('.sh-toggle:not(.sh-leaf)').forEach(el => {
-        el.innerHTML = '&#9654;';
-      });
-    });
+        if (closestFrom(e, '#sh-expand-all')) {
+          container.querySelectorAll('.sh-children').forEach(el => {
+            el.classList.add('sh-expanded');
+            const parentId = el.dataset.parentId;
+            if (parentId) expandedNodes.add(parentId);
+          });
+          container.querySelectorAll('.sh-toggle:not(.sh-leaf)').forEach(el => {
+            el.innerHTML = '&#9660;';
+          });
+          return;
+        }
+        if (closestFrom(e, '#sh-collapse-all')) {
+          container.querySelectorAll('.sh-children').forEach(el => {
+            el.classList.remove('sh-expanded');
+            const parentId = el.dataset.parentId;
+            if (parentId) expandedNodes.delete(parentId);
+          });
+          container.querySelectorAll('.sh-toggle:not(.sh-leaf)').forEach(el => {
+            el.innerHTML = '&#9654;';
+          });
+          return;
+        }
 
-    // Show/hide images toggle
-    container.querySelector('#sh-show-images')?.addEventListener('change', (e) => {
-      showImages = e.target.checked;
-      container.querySelectorAll('.sh-image, .sh-image-placeholder').forEach(el => {
-        el.classList.toggle('sh-hidden', !showImages);
-      });
-    });
-
-    // Node selection and context menu
-    container.querySelectorAll('.sh-node').forEach(node => {
-      // Click to select
-      node.addEventListener('click', (e) => {
-        if (e.target.closest('.sh-toggle') || e.target.closest('.sh-name')) return;
-        e.stopPropagation();
-
-        // Clear previous selection
+        // Select a node; a click anywhere else clears the selection
+        const node = closestFrom(e, '.sh-node');
         container.querySelectorAll('.sh-node.sh-selected').forEach(n => {
           n.classList.remove('sh-selected');
         });
+        if (node) {
+          node.classList.add('sh-selected');
+          selectedStudioId = node.dataset.studioId;
+        } else {
+          selectedStudioId = null;
+        }
+      },
 
-        // Select this node
-        node.classList.add('sh-selected');
-        selectedStudioId = node.dataset.studioId;
-      });
+      change(e) {
+        if (e.target && e.target.id === 'sh-show-images') {
+          showImages = e.target.checked;
+          container.querySelectorAll('.sh-image, .sh-image-placeholder').forEach(el => {
+            el.classList.toggle('sh-hidden', !showImages);
+          });
+        }
+      },
 
-      // Right-click for context menu
-      node.addEventListener('contextmenu', (e) => {
+      contextmenu(e) {
+        const node = closestFrom(e, '.sh-node');
+        if (!node) return;
         e.preventDefault();
-        e.stopPropagation();
         showContextMenu(e.clientX, e.clientY, node.dataset.studioId);
-      });
+      },
 
-      // Drag start
-      node.addEventListener('dragstart', (e) => {
-        e.stopPropagation();
+      dragstart(e) {
+        const node = closestFrom(e, '.sh-node');
+        if (!node) return;
         draggedStudioId = node.dataset.studioId;
         node.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', draggedStudioId);
-      });
+      },
 
-      // Drag end
-      node.addEventListener('dragend', () => {
-        node.classList.remove('dragging');
+      dragend(e) {
+        const node = closestFrom(e, '.sh-node');
+        if (node) node.classList.remove('dragging');
         draggedStudioId = null;
-        container.querySelectorAll('.drag-over, .drag-invalid').forEach(n => {
-          n.classList.remove('drag-over', 'drag-invalid');
-        });
-      });
+        clearDragMarks(container);
+      },
 
-      // Drag over
-      node.addEventListener('dragover', (e) => {
+      dragover(e) {
+        const zone = closestFrom(e, '#sh-root-drop-zone');
+        if (zone) {
+          e.preventDefault();
+          if (draggedStudioId) zone.classList.add('drag-over');
+          return;
+        }
+        const node = closestFrom(e, '.sh-node');
+        if (!node) return;
         e.preventDefault();
-        e.stopPropagation();
         if (!draggedStudioId || node.dataset.studioId === draggedStudioId) return;
-
-        const targetId = node.dataset.studioId;
-        const wouldCircle = wouldCreateCircularRef(targetId, draggedStudioId);
-
+        const wouldCircle = wouldCreateCircularRef(node.dataset.studioId, draggedStudioId);
         node.classList.remove('drag-over', 'drag-invalid');
         node.classList.add(wouldCircle ? 'drag-invalid' : 'drag-over');
-      });
+      },
 
-      // Drag leave
-      node.addEventListener('dragleave', (e) => {
-        e.stopPropagation();
-        node.classList.remove('drag-over', 'drag-invalid');
-      });
+      dragleave(e) {
+        const zone = closestFrom(e, '#sh-root-drop-zone');
+        if (zone) { zone.classList.remove('drag-over'); return; }
+        const node = closestFrom(e, '.sh-node');
+        if (node) node.classList.remove('drag-over', 'drag-invalid');
+      },
 
-      // Drop
-      node.addEventListener('drop', (e) => {
+      drop(e) {
+        const zone = closestFrom(e, '#sh-root-drop-zone');
+        const node = zone ? null : closestFrom(e, '.sh-node');
+        if (!zone && !node) return;
         e.preventDefault();
-        e.stopPropagation();
-        node.classList.remove('drag-over', 'drag-invalid');
-
-        if (!draggedStudioId || node.dataset.studioId === draggedStudioId) return;
-
+        // End the drag here: the re-render below detaches the dragged node, so its
+        // dragend never reaches this container. No id means the drag came from
+        // outside the page (a file or text): ignore it.
+        const draggedId = draggedStudioId;
+        draggedStudioId = null;
+        clearDragMarks(container);
+        if (!draggedId) return;
+        if (zone) {
+          removeParent(draggedId);
+          return;
+        }
         const targetId = node.dataset.studioId;
-        if (wouldCreateCircularRef(targetId, draggedStudioId)) {
+        if (targetId === draggedId) return;
+        if (wouldCreateCircularRef(targetId, draggedId)) {
           showToast('Cannot create circular reference', 'error');
           return;
         }
+        setParent(draggedId, targetId);
+      },
+    };
 
-        setParent(draggedStudioId, targetId);
-      });
-    });
-
-    // Root drop zone
-    const rootDropZone = container.querySelector('#sh-root-drop-zone');
-    if (rootDropZone) {
-      rootDropZone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        if (draggedStudioId) {
-          rootDropZone.classList.add('drag-over');
-        }
-      });
-
-      rootDropZone.addEventListener('dragleave', () => {
-        rootDropZone.classList.remove('drag-over');
-      });
-
-      rootDropZone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        rootDropZone.classList.remove('drag-over');
-
-        if (draggedStudioId) {
-          removeParent(draggedStudioId);
-        }
-      });
-    }
-
-    // Clear selection when clicking outside
-    container.addEventListener('click', (e) => {
-      if (!e.target.closest('.sh-node')) {
-        container.querySelectorAll('.sh-node.sh-selected').forEach(n => {
-          n.classList.remove('sh-selected');
-        });
-        selectedStudioId = null;
-      }
-    });
+    for (const [type, fn] of Object.entries(handlers)) container.addEventListener(type, fn);
+    return () => {
+      for (const [type, fn] of Object.entries(handlers)) container.removeEventListener(type, fn);
+    };
   }
 
   /**
@@ -955,10 +1275,12 @@
   function handleHierarchyKeyboard(e) {
     if (!document.querySelector('.studio-hierarchy-container')) return;
 
-    // Delete - remove parent from selected studio
-    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedStudioId) {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    // Never act while the user is typing
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
 
+    // Delete - remove parent from selected studio
+    if (e.key === 'Delete' && selectedStudioId) {
       e.preventDefault();
       removeParent(selectedStudioId);
     }
@@ -975,6 +1297,40 @@
   }
 
   /**
+   * After a remount: re-apply the pending changes still held in module state to
+   * freshly fetched data. Changes whose studio or parent is gone, or that became
+   * no-ops, are dropped. The rest are checked for cycles the way a save applies
+   * them (orderForSave), so a set that works together is kept whatever order it
+   * was made in, and only a change that would now form a cycle is dropped. The
+   * order shown is kept. Sets the "restored" banner count.
+   */
+  function restorePendingChanges() {
+    const original = parentMapOf(hierarchyStudios);
+    const byId = new Map(hierarchyStudios.map(s => [s.id, s]));
+    const candidates = [];
+    for (const change of pendingChanges) {
+      const studio = byId.get(change.studioId);
+      const target = change.type === 'set-parent' ? change.parentId : null;
+      if (!studio || (target && !byId.has(target))) continue;
+      if (target === original.get(change.studioId)) continue;
+      candidates.push({ ...change, studioName: studio.name, parentName: target ? byId.get(target).name : null });
+    }
+    const running = new Map(original);
+    const fits = new Set();
+    for (const change of orderForSave(candidates, original)) {
+      const target = change.type === 'set-parent' ? change.parentId : null;
+      if (target && wouldCreateCycle(change.studioId, target, running)) continue;
+      running.set(change.studioId, target);
+      fits.add(change);
+    }
+    const kept = candidates.filter(c => fits.has(c));
+    pendingChanges = kept;
+    isEditMode = kept.length > 0;
+    originalParentMap = kept.length > 0 ? original : new Map();
+    restoredCount = kept.length;
+  }
+
+  /**
    * Studio Hierarchy Page React component
    */
   function StudioHierarchyPage() {
@@ -982,38 +1338,53 @@
     const containerRef = React.useRef(null);
 
     React.useEffect(() => {
+      const token = ++mountToken;
+      const live = () => token === mountToken;
+      const container = containerRef.current;
+
       document.addEventListener('keydown', handleHierarchyKeyboard);
+      const detachHandlers = container ? attachHierarchyEventHandlers(container) : () => {};
 
       async function init() {
-        if (!containerRef.current) return;
+        if (!container) return;
 
         setPageTitle("Studio Hierarchy | Stash");
-        containerRef.current.innerHTML = '<div class="studio-hierarchy"><div class="sh-loading">Loading studios...</div></div>';
+        container.innerHTML = '<div class="studio-hierarchy"><div class="sh-loading">Loading studios...</div></div>';
 
+        // A save that ends while this fetch runs loads newer data and renders this
+        // page itself; this fetch's result (or error) is then stale
+        const saves = savesFinished;
+        const stale = () => !live() || saves !== savesFinished;
         try {
-          hierarchyStudios = await fetchAllStudiosWithHierarchy();
+          const studios = await fetchAllStudiosWithHierarchy();
+          if (stale()) return;
+          hierarchyStudios = studios;
           console.debug(`[studioManager] Loaded ${hierarchyStudios.length} studios`);
 
-          hierarchyTree = buildStudioTree(hierarchyStudios);
-          hierarchyStats = getTreeStats(hierarchyStudios);
-
-          // Reset UI state
           expandedNodes.clear();
-          pendingChanges = [];
-          isEditMode = false;
-          originalParentMap.clear();
-
-          renderHierarchyPage(containerRef.current);
+          selectedStudioId = null;
+          if (isSaving) {
+            // Left and re-entered mid-save: show it running; it re-renders when done
+            restoredCount = 0;
+          } else {
+            restorePendingChanges();
+          }
+          renderChangesPanel();
+          refreshView();
         } catch (e) {
+          if (stale()) return;
           console.error("[studioManager] Failed to load hierarchy:", e);
-          containerRef.current.innerHTML = `<div class="studio-hierarchy"><div class="sh-loading">Error: ${escapeHtml(e.message)}</div></div>`;
+          container.innerHTML = `<div class="studio-hierarchy"><div class="sh-loading">Error: ${escapeHtml(e.message)}</div></div>`;
         }
       }
 
       init();
 
       return () => {
+        mountToken++; // in-flight fetches and saves must not render or toast any more
         document.removeEventListener('keydown', handleHierarchyKeyboard);
+        detachHandlers();
+        clearTitleTimers();
         // Clean up any panels
         document.querySelector('.sh-changes-panel')?.remove();
         document.querySelector('.sh-toast-container')?.remove();
@@ -1054,8 +1425,8 @@
    * Inject navigation button into Studios page toolbar
    */
   function injectNavButton() {
-    // Only run on Studios list page
-    if (!window.location.pathname.endsWith('/studios')) {
+    // Only run on Studios list page (with or without a trailing slash)
+    if (!/\/studios\/?$/.test(window.location.pathname)) {
       return;
     }
 
@@ -1102,9 +1473,7 @@
     btn.title = 'Studio Hierarchy';
     btn.style.marginLeft = '0.5rem';
     btn.appendChild(createHierarchyIcon());
-    btn.addEventListener('click', () => {
-      window.location.href = HIERARCHY_ROUTE_PATH;
-    });
+    btn.addEventListener('click', () => navigateTo(HIERARCHY_ROUTE_PATH));
 
     // Insert button
     insertionPoint.parentNode.insertBefore(btn, insertionPoint.nextSibling);
@@ -1112,29 +1481,18 @@
   }
 
   /**
-   * Watch for navigation to Studios page and inject button
+   * Inject the button now and on every Stash location change (the toolbar renders
+   * shortly after the route changes, hence the short retries).
    */
   function setupNavButtonInjection() {
     injectNavButton();
-
-    // Watch for URL changes (SPA navigation)
-    let lastUrl = window.location.href;
-    const observer = new MutationObserver(() => {
-      if (window.location.href !== lastUrl) {
-        lastUrl = window.location.href;
-        setTimeout(injectNavButton, 100);
-        setTimeout(injectNavButton, 500);
-        setTimeout(injectNavButton, 1000);
-      }
-    });
-
-    observer.observe(document.body, { childList: true, subtree: true });
-
+    const onLocation = () => {
+      injectNavButton();
+      for (const ms of [100, 500, 1000]) setTimeout(injectNavButton, ms);
+    };
+    PluginApi.Event.addEventListener('stash:location', onLocation);
     // Retry on initial load
-    setTimeout(injectNavButton, 100);
-    setTimeout(injectNavButton, 500);
-    setTimeout(injectNavButton, 1000);
-    setTimeout(injectNavButton, 2000);
+    for (const ms of [100, 500, 1000, 2000]) setTimeout(injectNavButton, ms);
   }
 
   // Initialize
@@ -1142,4 +1500,29 @@
   setupNavButtonInjection();
 
   console.log('[studioManager] Plugin loaded');
+
+  // Test hook: only active when a test harness sets window.__STUDIO_MANAGER_TEST__.
+  if (typeof window !== 'undefined' && window.__STUDIO_MANAGER_TEST__) {
+    window.__STUDIO_MANAGER_TEST__.exports = {
+      effectiveParentMap, ancestorsOf, wouldCreateCycle, findCycleMembers,
+      buildStudioTree, orderForSave, wouldCreateCircularRef, getTreeStats,
+      derivedStudios, savePendingChanges, reloadHierarchy, addPendingChange, removePendingChange, cancelPendingChanges,
+      setParent, removeParent, renderChangesPanel, showContextMenu,
+      renderHierarchyPage, handleHierarchyKeyboard, navigateTo, stashPath, injectNavButton,
+    };
+    window.__STUDIO_MANAGER_TEST__.getState = () => ({
+      hierarchyStudios, hierarchyTree, hierarchyStats, expandedNodes, selectedStudioId,
+      pendingChanges, isEditMode, originalParentMap,
+    });
+    window.__STUDIO_MANAGER_TEST__.setState = (patch) => {
+      if ('hierarchyStudios' in patch) hierarchyStudios = patch.hierarchyStudios;
+      if ('hierarchyTree' in patch) hierarchyTree = patch.hierarchyTree;
+      if ('hierarchyStats' in patch) hierarchyStats = patch.hierarchyStats;
+      if ('expandedNodes' in patch) expandedNodes = patch.expandedNodes;
+      if ('selectedStudioId' in patch) selectedStudioId = patch.selectedStudioId;
+      if ('pendingChanges' in patch) pendingChanges = patch.pendingChanges;
+      if ('isEditMode' in patch) isEditMode = patch.isEditMode;
+      if ('originalParentMap' in patch) originalParentMap = patch.originalParentMap;
+    };
+  }
 })();
