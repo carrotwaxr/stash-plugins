@@ -153,6 +153,46 @@ class TestRenameFile(_Base):
         self.assertEqual(_read(dst), "dst")
 
 
+class TestCollisionSuffix(_Base):
+    """The " (N)" suffix for a scene's second file keeps within the budget and the 255-byte cap."""
+
+    def _two_files(self, title="New Name", **settings):
+        videos = [os.path.join(self.incoming, n) for n in ("one.mp4", "two.mp4")]
+        for v in videos:
+            _write(v)
+        files = [{"id": f"f{i}", "path": p, "height": 1080, "width": 1920} for i, p in enumerate(videos)]
+        scene = {"id": "5", "title": title, "date": None, "files": files,
+                 "performers": [], "studio": None, "tags": [], "stash_ids": []}
+        stash = _FakeStash({f["id"]: f["path"] for f in files})
+        with patch.object(scene_module.log, "error") as error:
+            self.rename(scene, stash, self._settings(**settings))
+        return sorted(os.listdir(self.lib)), [c.args[0] for c in error.call_args_list]
+
+    def test_suffix_trims_the_name_to_stay_within_the_budget(self):
+        budget = len(os.path.join(self.lib, "New Name.mp4"))
+        names, errors = self._two_files(renamer_filepath_budget=budget)
+        self.assertEqual(errors, [])
+        self.assertEqual(names, ["New (2).mp4", "New Name.mp4"])
+        for name in names:
+            self.assertLessEqual(len(os.path.join(self.lib, name)), budget)
+
+    def test_suffix_keeps_the_name_within_255_bytes(self):
+        names, errors = self._two_files(title="é" * 200, renamer_filepath_budget=800)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(names), 2)
+        for name in names:
+            self.assertLessEqual(len(name.encode("utf-8")), 255)
+        self.assertIn("é" * 123 + " (2).mp4", names)
+
+    def test_no_room_for_a_suffix_skips_the_file_with_an_error(self):
+        budget = len(os.path.join(self.lib, "N.mp4"))
+        names, errors = self._two_files(title="N", renamer_filepath_budget=budget)
+        self.assertEqual(names, ["N.mp4"])
+        self.assertEqual(os.listdir(self.incoming), ["two.mp4"])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("renamerFilepathBudget", errors[0])
+
+
 class TestSidecarMoves(_Base):
     def test_sidecars_follow_every_moved_file(self):
         v1 = os.path.join(self.incoming, "one.mp4")

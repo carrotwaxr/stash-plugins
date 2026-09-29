@@ -355,6 +355,27 @@ def get_new_path(scene, basepath, template, budget):
     return new_path
 
 
+def with_collision_suffix(path, number, budget):
+    """path with " (number)" before its extension, re-fitted like get_new_path's result.
+
+    The name before the suffix is trimmed so the file name stays within
+    MAX_COMPONENT_BYTES bytes of UTF-8 and the whole path within budget characters.
+    None if no name is left to keep (the budget has no room for the suffix).
+    """
+    folder, name = os.path.split(path)
+    stem, ext = os.path.splitext(name)
+    suffix = f" ({number}){ext}"
+    room = __coerce_budget(budget) - len(os.path.join(folder, suffix))
+    if room <= 0:
+        return None
+    stem = fit_bytes(stem[:room] + suffix, MAX_COMPONENT_BYTES, keep_suffix=suffix)[: -len(suffix)]
+    # the cut can leave a trailing space or dot, which Windows drops
+    stem = stem.rstrip(" .")
+    if not stem:
+        return None
+    return os.path.join(folder, stem + suffix)
+
+
 def __coerce_budget(budget):
     """renamerFilepathBudget as an int (Stash NUMBER settings can arrive as floats)."""
     try:

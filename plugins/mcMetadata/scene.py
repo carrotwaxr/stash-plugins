@@ -5,7 +5,7 @@ from performer import process_performer
 from utils.files import authenticated_url, download_image, find_sidecars, rename_file, replace_file_ext
 from utils.nfo import _is_plex, _count_videos, artwork_filenames, artwork_templates, build_nfo_xml, is_folder_level, _render
 from utils.paths import is_inside
-from utils.replacer import get_new_path
+from utils.replacer import get_new_path, with_collision_suffix
 from utils.run_flow import is_dry_run
 from utils.self_updates import consume, mark
 from utils.videos import is_video
@@ -361,11 +361,12 @@ def __rename_videos(scene, stash, settings, pending=None):
         scene_for_file["files"] = [file_info] + [f for f in files if f != file_info]
 
         # Calculate expected path for this specific file
+        budget = settings.get("renamer_filepath_budget", 250)
         expected_path = get_new_path(
             scene_for_file,
             settings["renamer_path"],
             settings["renamer_path_template"],
-            settings.get("renamer_filepath_budget", 250),
+            budget,
         )
 
         if not expected_path:
@@ -377,10 +378,18 @@ def __rename_videos(scene, stash, settings, pending=None):
         # This handles cases where files have the same resolution
         original_expected = expected_path
         suffix_num = 2
-        while expected_path in used_paths:
-            base, ext = os.path.splitext(original_expected)
-            expected_path = f"{base} ({suffix_num}){ext}"
+        while expected_path and expected_path in used_paths:
+            expected_path = with_collision_suffix(original_expected, suffix_num, budget)
             suffix_num += 1
+        if not expected_path:
+            log.error(
+                f"Skipping renaming file {idx + 1} of Scene {scene['id']}: {original_expected} is taken "
+                f"by another file of the scene, and a numbered suffix doesn't fit your "
+                f"renamerFilepathBudget ({budget} characters)"
+            )
+            if idx == 0:
+                primary_path = video_path
+            continue
 
         # Check if we should rename this file
         renamer_path = settings.get("renamer_path", IMPOSSIBLE_PATH)
