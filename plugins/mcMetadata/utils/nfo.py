@@ -101,7 +101,8 @@ def _valid_name(value, setting, extensions, default):
     return value
 
 
-def _render(template, video_path):
+def render_filename(template, video_path):
+    """The file name template gives for video_path: {basename} becomes the video's stem."""
     stem = os.path.splitext(os.path.basename(video_path))[0]
     return template.replace(BASENAME_PLACEHOLDER, stem)
 
@@ -111,7 +112,8 @@ def is_folder_level(template):
     return BASENAME_PLACEHOLDER not in template
 
 
-def _count_videos(folder):
+def count_videos(folder):
+    """Video files directly in folder (0 if it can't be listed)."""
     try:
         return sum(
             1 for n in os.listdir(folder)
@@ -151,7 +153,7 @@ def artwork_filenames(settings, video_path, warn=True, video_count=None):
     folder = os.path.dirname(video_path) if video_path else ""
     for key, template in (("nfo", nfo), ("poster", poster), ("backdrop", backdrop)):
         if template is not None and is_folder_level(template) and video_count is None:
-            video_count = _count_videos(folder)
+            video_count = count_videos(folder)
         if template is None:
             result[key] = None
         elif is_folder_level(template) and video_count > 1:
@@ -162,7 +164,7 @@ def artwork_filenames(settings, video_path, warn=True, video_count=None):
                 )
             result[key] = None
         else:
-            result[key] = _render(template, video_path)
+            result[key] = render_filename(template, video_path)
     return result
 
 

@@ -674,5 +674,37 @@ class TestHookTriggerMode(unittest.TestCase):
         self.assertEqual(mode, "always")
 
 
+class TestModuleImports(unittest.TestCase):
+    """scene.py uses only public helpers of the other modules, and imports nothing it doesn't use."""
+
+    def test_scene_imports_are_public_and_used(self):
+        import ast
+
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scene.py")
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        imported = {}
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    imported[alias.asname or alias.name] = node.module
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported[(alias.asname or alias.name).split(".")[0]] = alias.name
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        private = sorted(name for name in imported if name.startswith("_"))
+        unused = sorted(name for name in imported if name not in used)
+        self.assertEqual(private, [])
+        self.assertEqual(unused, [])
+
+    def test_nfo_helpers_are_public(self):
+        from utils import nfo
+
+        self.assertEqual(nfo.render_filename("{basename}-poster.jpg", "/x/My Video.mp4"), "My Video-poster.jpg")
+        self.assertEqual(nfo.count_videos("/nonexistent/folder"), 0)
+        for old_name in ("_render", "_count_videos"):
+            self.assertFalse(hasattr(nfo, old_name), old_name)
+
+
 if __name__ == "__main__":
     unittest.main()

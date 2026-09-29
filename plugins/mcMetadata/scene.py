@@ -2,8 +2,10 @@ import os
 from collections import Counter
 import utils.logger as log
 from performer import process_performer
-from utils.files import authenticated_url, download_image, find_sidecars, is_same_file, rename_file, replace_file_ext
-from utils.nfo import _is_plex, _count_videos, artwork_filenames, artwork_templates, build_nfo_xml, is_folder_level, _render
+from utils.files import authenticated_url, download_image, find_sidecars, is_same_file, rename_file
+from utils.nfo import (
+    artwork_filenames, artwork_templates, build_nfo_xml, count_videos, is_folder_level, render_filename,
+)
 from utils.paths import is_inside
 from utils.replacer import get_new_path, with_collision_suffix
 from utils.run_flow import is_dry_run
@@ -218,7 +220,7 @@ class _PendingMoves:
 
     def video_count(self, folder):
         """Videos folder would hold after the run."""
-        count = _count_videos(folder)
+        count = count_videos(folder)
         for source, dest in self.videos:
             count += (os.path.dirname(dest) == folder) - (os.path.dirname(source) == folder)
         return count
@@ -357,7 +359,7 @@ def __rename_videos(scene, stash, settings, pending=None):
     # Videos per source folder before anything moves: folder-level files (movie.nfo,
     # poster.jpg ...) only travel from a folder that held just this one video
     folder_video_counts = {
-        os.path.dirname(f["path"]): _count_videos(os.path.dirname(f["path"])) for f in files_to_process
+        os.path.dirname(f["path"]): count_videos(os.path.dirname(f["path"])) for f in files_to_process
     }
 
     for idx, file_info in enumerate(files_to_process):
@@ -493,7 +495,9 @@ def __collect_sidecars(video_path, settings, other_videos=()):
     sidecars = find_sidecars(video_path, other_videos)
     if settings.get("renamer_move_sidecars", True):
         return sidecars
-    keep = tuple(_render(t, video_path) for t in artwork_templates(settings) if t and not is_folder_level(t))
+    keep = tuple(
+        render_filename(t, video_path) for t in artwork_templates(settings) if t and not is_folder_level(t)
+    )
     return [p for p in sidecars if os.path.basename(p) in keep]
 
 

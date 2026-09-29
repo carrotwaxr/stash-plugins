@@ -133,7 +133,7 @@ class TestFindSidecars(_Base):
 
         for name in ("a.mp4", "b.mpg", "c.iso", "d.srt"):
             _write(os.path.join(self.incoming, name))
-        self.assertEqual(nfo_module._count_videos(self.incoming), 3)
+        self.assertEqual(nfo_module.count_videos(self.incoming), 3)
         for ext in ("mp4 m4v mkv avi mov wmv webm flv ts m2ts mts mpg mpeg vob 3gp 3g2 rm rmvb ogv "
                     "divx xvid asf iso f4v").split():
             self.assertTrue(videos.is_video(f"x.{ext.upper()}"), ext)
