@@ -3,7 +3,7 @@ from collections import Counter
 import utils.logger as log
 from performer import process_performer
 from utils.files import download_image, find_sidecars, rename_file, replace_file_ext
-from utils.nfo import build_nfo_xml
+from utils.nfo import _is_plex, build_nfo_xml
 from utils.paths import is_inside
 from utils.replacer import get_new_path
 from utils.self_updates import consume, mark
@@ -132,7 +132,7 @@ def process_scene(scene, stash, settings, api_key):
 
     # overwrite nfo named after file, at file location (use renamed path if applicable)
     nfo_path = replace_file_ext(target_video_path, "nfo")
-    __write_nfo(scene, nfo_path, settings, target_video_path)
+    __write_nfo(scene, nfo_path, settings, target_video_path, api_key)
 
     # copy any performer images to people directory
     for performer in scene["performers"] or []:
@@ -146,6 +146,13 @@ def process_scene(scene, stash, settings, api_key):
     if not os.path.exists(poster_path):
         screenshot_url = f"{scene['paths']['screenshot']}&apikey={api_key}"
         download_image(screenshot_url, poster_path, settings)
+
+    # Plex reads <stem>-fanart.jpg as the movie background (plex mode only)
+    if _is_plex(settings):
+        fanart_path = replace_file_ext(target_video_path, "jpg", "-fanart")
+        if not os.path.exists(fanart_path):
+            screenshot_url = f"{scene['paths']['screenshot']}&apikey={api_key}"
+            download_image(screenshot_url, fanart_path, settings)
 
 
 def __hydrate_scene(scene, stash):
@@ -361,6 +368,8 @@ def __collect_sidecars(video_path, settings):
         return sidecars
     stem = os.path.splitext(os.path.basename(video_path))[0]
     keep = (stem + ".nfo", stem + "-poster.jpg")
+    if _is_plex(settings):
+        keep += (stem + "-fanart.jpg",)
     return [p for p in sidecars if os.path.basename(p) in keep]
 
 
@@ -429,7 +438,7 @@ def __move_file_graphql(stash, file_id, dest_folder, dest_basename):
         return False
 
 
-def __write_nfo(scene, filepath, settings, video_path=None):
+def __write_nfo(scene, filepath, settings, video_path=None, api_key=None):
     """Write NFO file for a scene.
 
     Args:
@@ -437,6 +446,7 @@ def __write_nfo(scene, filepath, settings, video_path=None):
         filepath: Destination path for NFO file
         settings: Plugin settings dict
         video_path: Path to the video file (for poster thumb references)
+        api_key: Stash API key; only used to decide whether Plex actor thumb URLs are fetchable
     """
     # Check if we should skip existing NFO files
     skip_existing = settings.get("nfo_skip_existing", False)
@@ -445,7 +455,7 @@ def __write_nfo(scene, filepath, settings, video_path=None):
         return
 
     try:
-        nfo_xml = build_nfo_xml(scene, settings=settings, video_path=video_path)
+        nfo_xml = build_nfo_xml(scene, settings=settings, video_path=video_path, api_key=api_key)
 
         if settings["dry_run"]:
             if os.path.exists(filepath):

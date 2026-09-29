@@ -178,9 +178,19 @@ If a block contains multiple variables, ALL must have values for the block to ap
 
 ### Plex
 
-- **Scene Posters**: `{name}-poster.jpg` files are picked up natively by Plex
-- **NFO Files**: Plex does not read `.nfo` files by default. You need a third-party NFO agent such as [XBMCnfoMoviesImporter](https://github.com/gboudreau/XBMCnfoMoviesImporter.bundle) to import NFO metadata
-- **Performer Images**: Plex manages performer images internally and does not support external People folders. The "Enable Actor Images" setting has no effect when using Plex
+Plex Media Server 1.43.1 and later reads Kodi-style NFO files with its built-in **Plex NFO** provider, so set **Media Server Type** to `plex` and no third-party agent is needed.
+
+Library setup:
+
+1. Create (or edit) a **Movies** library and, under **Advanced**, choose **Plex NFO Movie** as the metadata agent. The Plex NFO provider must be enabled for that library; enable **Use local assets** so the poster and fanart files are read.
+2. Run mcMetadata on your scenes. Each scene gets `<video>.nfo`, `<video>-poster.jpg` and, in Plex mode only, `<video>-fanart.jpg` (the scene screenshot) next to the video.
+3. Scan the library (or **Refresh Metadata**) in Plex.
+
+Plex mode notes:
+
+- **Actors**: `<actor>` entries (name, role, order) are written for every scene.
+- **Performer images**: Plex does not read local People folders, and it loads an actor `<thumb>` only from a URL, without credentials. In Plex mode the NFO therefore uses the Stash performer image URL (`/performer/<id>/image`) as the actor thumb, and only when "Enable Actor Images" is on and your Stash has no API key configured. If Stash requires authentication, the thumb is omitted (no API key is ever written to an NFO) and Plex shows the actors without pictures.
+- **Legacy agent**: on older Plex versions, the third-party [XBMCnfoMoviesImporter](https://github.com/gboudreau/XBMCnfoMoviesImporter.bundle) agent can import the same NFO files.
 
 ## Troubleshooting
 

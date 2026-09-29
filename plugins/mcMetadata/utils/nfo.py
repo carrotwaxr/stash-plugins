@@ -61,13 +61,30 @@ def _get_actor_thumb_path(performer_name, settings):
     return get_actor_image_path(performer_name, settings)
 
 
-def build_nfo_xml(scene, settings=None, video_path=None):
+def _is_plex(settings):
+    return bool(settings) and str(settings.get("media_server") or "").strip().lower() == "plex"
+
+
+def _plex_actor_thumb_url(performer, settings, api_key):
+    """Stash performer image URL for a Plex actor <thumb>, or None.
+
+    Plex's NFO provider only loads actor images from URLs, and never with
+    credentials, so the URL (with no API key) is only usable when Stash has no
+    API key configured.
+    """
+    if not settings.get("enable_actor_images", False) or api_key:
+        return None
+    return performer.get("image_path") or None
+
+
+def build_nfo_xml(scene, settings=None, video_path=None, api_key=None):
     """Build NFO XML for a scene.
 
     Args:
         scene: Scene dict from Stash API
         settings: Plugin settings dict (optional, enables artwork references and field exclusion)
         video_path: Path to the video file (optional, enables poster thumb tag)
+        api_key: Stash API key (optional; plex mode omits actor thumb URLs when set)
 
     Returns:
         str: NFO XML content
@@ -140,7 +157,10 @@ def build_nfo_xml(scene, settings=None, video_path=None):
     for i, p in enumerate([] if "actor" in exclude else scene["performers"]):
         performer_name = escape_xml(p["name"])
         actor_thumb = ""
-        actor_image_path = _get_actor_thumb_path(p["name"], settings)
+        if _is_plex(settings):
+            actor_image_path = _plex_actor_thumb_url(p, settings, api_key)
+        else:
+            actor_image_path = _get_actor_thumb_path(p["name"], settings)
         if actor_image_path:
             actor_thumb = f"\n        <thumb>{escape_xml(actor_image_path)}</thumb>"
 

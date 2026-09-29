@@ -91,7 +91,7 @@ settings:
     type: BOOLEAN
   mediaServer:
     displayName: Media Server Type
-    description: "Target media server: jellyfin, emby, or plex. Default is 'jellyfin'. Note: Plex does not support external performer images."
+    description: "Target media server: jellyfin, emby, or plex. Default is 'jellyfin'. Plex needs Plex Media Server 1.43.1+ (Plex NFO Movie agent); it also writes a fanart file and uses Stash performer image URLs as actor thumbs only when Stash has no API key."
     type: STRING
   actorMetadataPath:
     displayName: Actor Metadata Path
