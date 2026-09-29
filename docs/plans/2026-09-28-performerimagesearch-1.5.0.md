@@ -58,17 +58,22 @@ Run: `cd plugins/performerImageSearch && python -m pytest -q`, which passes.
 
 Commit: `fix(performerImageSearch): per-source errors, time limits and parallel galleries`
 
-### Task 2: FreeOnes full-size images (#165 P2)
+### Task 2: each source returns only its own full-size images (#165 P2)
 
 Depends on Task 1.
 
-Files: modify `plugins/performerImageSearch/image_search.py` (`search_freeones`, the pattern at ~344-358); test `plugins/performerImageSearch/tests/test_sources.py`
+Task 1's live look (2026-09-29) found what each page really offers:
+- FreeOnes galleries show only 4 unlocked photos as links: `<a data-id href=".../1440x0/filters:quality(85)/...jpg" data-size="1440x2160">` wrapping a `/350x350/center/middle/...` crop. A JSON-LD `ImageGallery.associatedMedia` block lists every photo, with the full `1440x0` URL, a `fit-in/0x230` thumbnail and the original width and height. Its URLs are JSON-escaped (`https:\/\/`). `tests/fixtures/freeones_gallery.html` has a trimmed copy of that block.
+- EliteBabes galleries return related-gallery previews and `/content/lists/` images, possibly of other performers, alongside the gallery's own photos. On the model page, the first gallery-link pattern no longer matches; only the fallback finds galleries.
+- JavDatabase idol pages return "similar idol" card thumbnails (`/idolimages/thumb/<other>.webp`), and every `/vertical/...jpg` image is a sponsored ad (`rel="sponsored"`). `/covers/full/` never appears on the page, so the `/covers/thumb/` to `/covers/full/` rewrite is unverified.
+
+Files: modify `plugins/performerImageSearch/image_search.py` (`search_freeones`, `search_elitebabes`, `search_javdatabase`); extend `tests/fixtures/` and `tests/test_sources.py`
 
 Test first:
-- **Live finding first:** from the live gallery page fetched in Task 1, work out how FreeOnes marks crops. The code comment says `/WxH/` segments such as `/350x350/` are crops and `/Wx0/` is a width-only resize, and that rewriting URLs returns 403. Record what you find in the commit message: which variants the page offers (e.g. in `srcset` or `data-src`) and which one is full-size.
-- **Image choice:** for each photo, `image` is the largest non-crop variant the page offers (a width-only `Wx0`, or no size segment). A photo whose only variant is a square crop is skipped, not returned as "full". `thumbnail` may stay the crop.
-- **Pattern:** the URL pattern no longer spans a `srcset` value (no spaces or commas inside a match).
-- **Dimensions:** when the URL's size segment gives a width (and a height, when not 0), the result carries it as `width`/`height`.
+- FreeOnes: a gallery page's results come from the JSON-LD block (unescaped). `image` is the full-size URL, `thumbnail` the small one, and `width`/`height` are the original size. A photo with only a square crop is skipped. The pattern never spans a `srcset` value.
+- EliteBabes: only the gallery's own photos come back (the `<a href=".../content/<id>/<file>.jpg" data-width data-height>` links, whose `<id>` is the gallery's), each with its `data-width`/`data-height`. Related-gallery previews and `/content/lists/` images are excluded. The model page's gallery links are found by the pattern that matches today's markup, which has no class attribute.
+- JavDatabase: similar-idol thumbnails (any idol slug other than the page's own) and `rel="sponsored"` or `/vertical/` images are excluded. Covers are returned only in a form the page actually links. Verify whether `/covers/full/<id>` exists with one read-only HEAD or GET; if it doesn't, return the thumb as both `thumbnail` and `image` and say so in the commit message.
+- Fixtures: extend the three sources' fixtures with the markup that must be excluded (related galleries, lists images, similar idols, a sponsored vertical ad), per the fixture rule. You may fetch each page once more, read-only, to see that markup, then delete the raw copy.
 
 Run: `cd plugins/performerImageSearch && python -m pytest -q tests/test_sources.py`, which fails.
 
@@ -76,7 +81,7 @@ Change: implement the above.
 
 Run: `cd plugins/performerImageSearch && python -m pytest -q`, which passes.
 
-Commit: `fix(performerImageSearch): FreeOnes returns full-size images, not square crops`
+Commit: `fix(performerImageSearch): full-size images, and only the performer's own, from each source`
 
 ### Task 3: DuckDuckGo off by default, retried once; dead code gone (#165 P4, P11)
 
@@ -92,6 +97,7 @@ Test first:
   - an unknown mode, or no query, gives `{"error": ...}` as today;
   - an exception gives `output.error` with `status: error`.
 - Each removed name has no references left (grep).
+- `main()` prints its reply and flushes before any abandoned gallery thread can delay exit: after writing the JSON it calls `sys.stdout.flush()` and `os._exit(0)`, so the reply is never held past the source budget by a stuck socket. Test this with a subprocess run of `image_search.py`, using a fixture-served source that never answers.
 
 Run: `cd plugins/performerImageSearch && python -m pytest -q`, which fails on the new tests.
 
