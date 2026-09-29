@@ -3,15 +3,19 @@ StashDB/Stash-Box API utilities with resilience patterns.
 
 Features:
 - Retry with exponential backoff for transient errors (504, 503, connection errors)
-- Rate limit detection and handling (429)
-- Configurable delays between paginated requests
-- Graceful degradation with partial results
+- Rate limit handling (429) that honours Retry-After within a per-request time budget
+- Typed failures (StashBoxAPIError: status_code, is_auth_error, is_rate_limited)
+  so callers can report them instead of treating them as "no results"
 
 This module is designed to be copied into each plugin that needs StashDB access,
 since Stash plugins must be self-contained (no shared imports across plugins).
 """
 
+import email.utils
+import http.client
 import json
+import math
+import re
 import ssl
 import time
 import urllib.request
@@ -53,7 +57,10 @@ DEFAULT_CONFIG = {
 
     # Rate limiting
     "request_delay": 0.5,  # seconds between requests in pagination
-    "rate_limit_pause": 60.0,  # seconds to pause on 429
+    "rate_limit_pause": 10.0,  # seconds to pause on a 429 that has no Retry-After
+    # Most seconds one request may spend waiting on retries (429 pauses, backoff).
+    # A wait that would go past it fails the request instead of sleeping.
+    "retry_budget": 60.0,
 
     # Pagination limits (reduced from original 50 to be more courteous)
     "per_page": 100,  # Results per page
@@ -71,54 +78,106 @@ RETRYABLE_STATUS_CODES = {
     504,  # Gateway Timeout
 }
 
+# A rejected or missing API key, or an account without the needed role
+AUTH_STATUS_CODES = {401, 403}
+
+# GraphQL error messages that mean the key or account was refused (stash-box: "not authorized")
+_AUTH_MESSAGE = re.compile(r"unauthori[sz]ed|not authori[sz]ed|forbidden|unauthenticated|invalid api ?key",
+                           re.IGNORECASE)
+
 
 class StashBoxAPIError(Exception):
-    """Exception for StashDB API errors with context."""
+    """A stash-box request that failed, with what the caller needs to report it.
 
-    def __init__(self, message, status_code=None, retryable=False):
+    status_code: the HTTP status, or None for connection, GraphQL and response errors.
+    retry_after: seconds the server asked us to wait (429), when known.
+    is_auth_error: the key or account was refused (401/403, or a GraphQL
+        "not authorized" error with no data).
+    is_rate_limited: the server answered 429.
+    """
+
+    def __init__(self, message, status_code=None, retryable=False, retry_after=None, auth=False):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.retry_after = retry_after
+        self._auth = auth
+
+    @property
+    def is_auth_error(self):
+        return self._auth or self.status_code in AUTH_STATUS_CODES
+
+    @property
+    def is_rate_limited(self):
+        return self.status_code == 429
 
 
 def get_config(plugin_settings, key):
     """Get a config value, preferring plugin settings over defaults.
 
-    Validates and coerces types to ensure safe values:
+    The plugin setting for `key` is `stashbox_<key>` (e.g. `stashbox_request_delay`).
+    An unset, empty or unparseable setting falls back to DEFAULT_CONFIG.
     - Integer settings: clamped to minimum of 1
-    - Float settings: clamped to minimum of 0.0
+    - Float settings: clamped to minimum of 0.0; inf and NaN use the default
     """
-    # Check plugin settings first (with stashbox_ prefix)
     setting_key = f"stashbox_{key}"
-    if plugin_settings and setting_key in plugin_settings:
+    default = DEFAULT_CONFIG.get(key)
+    value = default
+    if plugin_settings and plugin_settings.get(setting_key) not in (None, ""):
         value = plugin_settings[setting_key]
-    else:
-        value = DEFAULT_CONFIG.get(key)
 
-    # Validate and coerce numeric settings
     integer_keys = {"max_retries", "per_page"}
     float_keys = {"initial_retry_delay", "max_retry_delay", "retry_backoff_multiplier",
-                  "request_delay", "rate_limit_pause", "request_timeout"}
+                  "request_delay", "rate_limit_pause", "request_timeout", "retry_budget"}
 
     if key in integer_keys:
         try:
             return max(1, int(value))
-        except (TypeError, ValueError):
-            return DEFAULT_CONFIG.get(key, 1)
+        except (TypeError, ValueError, OverflowError):
+            return default if default is not None else 1
 
     if key in float_keys:
         try:
-            return max(0.0, float(value))
+            number = float(value)
         except (TypeError, ValueError):
-            return DEFAULT_CONFIG.get(key, 0.0)
+            number = None
+        if number is None or not math.isfinite(number):
+            return float(default) if default is not None else 0.0
+        return max(0.0, number)
 
     return value
+
+
+def parse_retry_after(value, now=None):
+    """Seconds to wait from a Retry-After header (delta-seconds or an HTTP date), or None."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when is None:
+            return None
+        seconds = when.timestamp() - (time.time() if now is None else now)
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
 
 
 def graphql_request_with_retry(url, query, variables=None, api_key=None,
                                 plugin_settings=None, operation_name=None):
     """
-    Make a GraphQL request with retry logic for transient failures.
+    Make a GraphQL request, retrying transient failures within a time budget.
+
+    Retries 429 (waiting Retry-After, else rate_limit_pause), 5xx and connection
+    errors (exponential backoff). The waits for one request never add up to more
+    than retry_budget seconds: a wait that would exceed it raises instead.
 
     Args:
         url: GraphQL endpoint URL
@@ -129,10 +188,11 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
         operation_name: Human-readable name for logging
 
     Returns:
-        Response data dict, or None on failure
+        The response's `data` dict (GraphQL errors alongside data are logged).
 
     Raises:
-        StashBoxAPIError: On non-retryable errors or after max retries
+        StashBoxAPIError: on HTTP, connection, auth or rate-limit failures, a
+            response that isn't JSON, no data, or GraphQL errors with no data.
     """
     max_retries = get_config(plugin_settings, "max_retries")
     initial_delay = get_config(plugin_settings, "initial_retry_delay")
@@ -140,6 +200,8 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
     backoff_multiplier = get_config(plugin_settings, "retry_backoff_multiplier")
     timeout = get_config(plugin_settings, "request_timeout")
     rate_limit_pause = get_config(plugin_settings, "rate_limit_pause")
+    budget = get_config(plugin_settings, "retry_budget")
+    name = operation_name or "request"
 
     headers = {
         "Content-Type": "application/json",
@@ -156,96 +218,117 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
 
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
-    last_error = None
     delay = initial_delay
+    waited = 0.0
+
+    def can_wait(seconds):
+        return waited + seconds <= budget
 
     for attempt in range(max_retries + 1):
+        last_attempt = attempt >= max_retries
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
-                result = json.loads(response.read().decode("utf-8"))
-
-                if "errors" in result:
-                    # GraphQL errors (not HTTP errors) - log but return data if present
-                    error_messages = [e.get("message", str(e)) for e in result["errors"]]
-                    log.LogWarning(f"GraphQL errors: {error_messages}")
-
-                return result.get("data")
+                body = response.read()
 
         except urllib.error.HTTPError as e:
             status_code = e.code
-            last_error = e
 
-            # Handle rate limiting specially
             if status_code == 429:
-                if attempt < max_retries:
-                    log.LogWarning(
-                        f"Rate limited (429) on {operation_name or 'request'}. "
-                        f"Pausing {rate_limit_pause}s before retry {attempt + 1}/{max_retries}"
-                    )
-                    time.sleep(rate_limit_pause)
-                    continue
-                else:
-                    log.LogError(f"Rate limited (429) - max retries exceeded")
-                    raise StashBoxAPIError(
-                        f"Rate limited by StashDB after {max_retries} retries",
-                        status_code=429,
-                        retryable=False
-                    )
+                retry_after = parse_retry_after(e.headers.get("Retry-After") if e.headers else None)
+                wait = retry_after if retry_after is not None else rate_limit_pause
+                if last_attempt or not can_wait(wait):
+                    why = (f"asked to wait {wait:.0f}s more, past the {budget:.0f}s retry budget"
+                           if not can_wait(wait) else f"still limited after {max_retries} retries")
+                    log.LogError(f"Rate limited (429) on {name}: {why}")
+                    raise StashBoxAPIError(f"HTTP 429 Too Many Requests: {why}",
+                                           status_code=429, retryable=True, retry_after=retry_after)
+                log.LogWarning(f"Rate limited (429) on {name}. Waiting {wait:.1f}s "
+                               f"before retry {attempt + 1}/{max_retries}")
+                time.sleep(wait)
+                waited += wait
+                continue
 
-            # Check if this is a retryable error
-            if status_code in RETRYABLE_STATUS_CODES and attempt < max_retries:
-                log.LogWarning(
-                    f"HTTP {status_code} on {operation_name or 'request'}. "
-                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
-                )
+            if status_code in AUTH_STATUS_CODES:
+                log.LogError(f"HTTP {status_code} on {name}: the API key or account was refused")
+                raise StashBoxAPIError(f"HTTP {status_code}: {e.reason}", status_code=status_code)
+
+            retryable = status_code in RETRYABLE_STATUS_CODES
+            if retryable and not last_attempt and can_wait(delay):
+                log.LogWarning(f"HTTP {status_code} on {name}. "
+                               f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
+                waited += delay
                 delay = min(delay * backoff_multiplier, max_delay)
                 continue
 
-            # Non-retryable or max retries exceeded
-            log.LogError(f"HTTP error {status_code}: {e.reason}")
-            raise StashBoxAPIError(
-                f"HTTP {status_code}: {e.reason}",
-                status_code=status_code,
-                retryable=status_code in RETRYABLE_STATUS_CODES
-            )
+            log.LogError(f"HTTP error {status_code} on {name}: {e.reason}")
+            raise StashBoxAPIError(f"HTTP {status_code}: {e.reason}",
+                                   status_code=status_code, retryable=retryable)
 
         except urllib.error.URLError as e:
-            last_error = e
-
             # A bad certificate won't fix itself on retry
             if isinstance(e.reason, ssl.SSLCertVerificationError):
                 log.LogError(f"TLS certificate verification failed for {url}: {e.reason}")
-                raise StashBoxAPIError(
-                    f"TLS certificate verification failed for {url}: {e.reason}",
-                    retryable=False
-                )
+                raise StashBoxAPIError(f"TLS certificate verification failed for {url}: {e.reason}")
 
-            # Connection errors are often transient
-            if attempt < max_retries:
-                log.LogWarning(
-                    f"Connection error on {operation_name or 'request'}: {e.reason}. "
-                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
-                )
+            if not last_attempt and can_wait(delay):
+                log.LogWarning(f"Connection error on {name}: {e.reason}. "
+                               f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
+                waited += delay
                 delay = min(delay * backoff_multiplier, max_delay)
                 continue
 
-            log.LogError(f"URL error after {max_retries} retries: {e.reason}")
-            raise StashBoxAPIError(
-                f"Connection failed: {e.reason}",
-                retryable=True
-            )
+            log.LogError(f"Connection failed on {name}: {e.reason}")
+            raise StashBoxAPIError(f"Connection failed: {e.reason}", retryable=True)
+
+        except (OSError, http.client.HTTPException) as e:
+            # Timeouts, resets and truncated responses while reading
+            if not last_attempt and can_wait(delay):
+                log.LogWarning(f"Network error on {name}: {e}. "
+                               f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+                waited += delay
+                delay = min(delay * backoff_multiplier, max_delay)
+                continue
+
+            log.LogError(f"Network error on {name}: {e}")
+            raise StashBoxAPIError(f"Network error: {e}", retryable=True)
 
         except Exception as e:
-            log.LogError(f"Unexpected error: {e}")
+            log.LogError(f"Unexpected error on {name}: {e}")
             raise StashBoxAPIError(f"Unexpected error: {e}")
 
-    # Should not reach here, but just in case
-    raise StashBoxAPIError(
-        f"Failed after {max_retries} retries: {last_error}",
-        retryable=True
-    )
+        return _graphql_data(body, name)
+
+    # The loop always returns or raises; this is a guard
+    raise StashBoxAPIError(f"Failed after {max_retries} retries", retryable=True)
+
+
+def _graphql_data(body, name):
+    """The `data` of a GraphQL response body, or StashBoxAPIError."""
+    try:
+        result = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        log.LogError(f"Response to {name} is not JSON: {body[:200]!r}")
+        raise StashBoxAPIError("The server's response is not JSON (a proxy or login page?)")
+    if not isinstance(result, dict):
+        raise StashBoxAPIError("The server's response is not a GraphQL response")
+
+    data = result.get("data")
+    errors = result.get("errors") or []
+    if errors:
+        messages = [e.get("message", str(e)) if isinstance(e, dict) else str(e) for e in errors]
+        no_data = not isinstance(data, dict) or all(v is None for v in data.values())
+        if no_data:
+            text = "; ".join(messages)
+            log.LogError(f"GraphQL errors on {name}: {messages}")
+            raise StashBoxAPIError(f"GraphQL error: {text}", auth=bool(_AUTH_MESSAGE.search(text)))
+        log.LogWarning(f"GraphQL errors on {name}: {messages}")
+
+    if not isinstance(data, dict):
+        raise StashBoxAPIError("The response has no data")
+    return data
 
 
 # ============================================================================
@@ -319,7 +402,10 @@ def query_scenes_page(url, api_key, entity_type, entity_stash_id, page=1,
             - count: total scene count on StashDB
             - page: current page number
             - has_more: whether more pages exist
-        Returns None on error.
+
+    Raises:
+        StashBoxAPIError: the request failed or the response has no queryScenes result.
+        ValueError: an unknown entity_type.
     """
     # Validate sort field
     valid_sorts = {"DATE", "TITLE", "CREATED_AT", "UPDATED_AT"}
@@ -355,8 +441,7 @@ def query_scenes_page(url, api_key, entity_type, entity_stash_id, page=1,
             }
         }
     else:
-        log.LogError(f"Unknown entity type: {entity_type}")
-        return None
+        raise ValueError(f"Unknown entity type: {entity_type}")
 
     query = f"""
     query QueryScenes($input: SceneQueryInput!) {{
@@ -379,30 +464,32 @@ def query_scenes_page(url, api_key, entity_type, entity_stash_id, page=1,
         }
     }
 
-    try:
-        data = graphql_request_with_retry(
-            url, query, variables, api_key,
-            plugin_settings=plugin_settings,
-            operation_name=f"scenes page {page} for {entity_type}"
-        )
+    data = graphql_request_with_retry(
+        url, query, variables, api_key,
+        plugin_settings=plugin_settings,
+        operation_name=f"scenes page {page} for {entity_type}"
+    )
+    return _scenes_page(data, page, per_page)
 
-        if not data:
-            return None
 
-        query_data = data.get("queryScenes", {})
-        scenes = query_data.get("scenes", [])
-        count = query_data.get("count", 0)
+def _scenes_page(data, page, per_page):
+    """The page dict for a queryScenes response; StashBoxAPIError when it has no result."""
+    query_data = data.get("queryScenes") if isinstance(data, dict) else None
+    if not isinstance(query_data, dict):
+        raise StashBoxAPIError("The response has no queryScenes result")
+    scenes = query_data.get("scenes")
+    if not isinstance(scenes, list):
+        raise StashBoxAPIError("The response's queryScenes has no scenes list")
+    count = query_data.get("count")
+    if not isinstance(count, int) or isinstance(count, bool):
+        count = 0
 
-        return {
-            "scenes": scenes,
-            "count": count,
-            "page": page,
-            "has_more": page * per_page < count
-        }
-
-    except StashBoxAPIError as e:
-        log.LogError(f"Error fetching scenes page {page}: {e}")
-        return None
+    return {
+        "scenes": [s for s in scenes if isinstance(s, dict)],
+        "count": count,
+        "page": page,
+        "has_more": page * per_page < count
+    }
 
 
 def query_scenes_browse(url, api_key, page=1, per_page=100, sort="DATE", direction="DESC",
@@ -429,6 +516,9 @@ def query_scenes_browse(url, api_key, page=1, per_page=100, sort="DATE", directi
 
     Returns:
         dict with scenes, count, page, has_more
+
+    Raises:
+        StashBoxAPIError: the request failed or the response has no queryScenes result.
     """
     valid_sorts = {"DATE", "TITLE", "CREATED_AT", "UPDATED_AT", "TRENDING"}
     if sort not in valid_sorts:
@@ -486,27 +576,9 @@ def query_scenes_browse(url, api_key, page=1, per_page=100, sort="DATE", directi
     }}
     """
 
-    try:
-        data = graphql_request_with_retry(
-            url, query, {"input": filter_input}, api_key,
-            plugin_settings=plugin_settings,
-            operation_name=f"browse scenes page {page}"
-        )
-
-        if not data:
-            return None
-
-        query_data = data.get("queryScenes", {})
-        scenes = query_data.get("scenes", [])
-        count = query_data.get("count", 0)
-
-        return {
-            "scenes": scenes,
-            "count": count,
-            "page": page,
-            "has_more": page * per_page < count
-        }
-
-    except StashBoxAPIError as e:
-        log.LogError(f"Error browsing scenes page {page}: {e}")
-        return None
+    data = graphql_request_with_retry(
+        url, query, {"input": filter_input}, api_key,
+        plugin_settings=plugin_settings,
+        operation_name=f"browse scenes page {page}"
+    )
+    return _scenes_page(data, page, per_page)

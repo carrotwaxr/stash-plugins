@@ -165,6 +165,53 @@ def decode_cursor(cursor: str) -> dict | None:
         return None
 
 
+class CursorError(ValueError):
+    """A pagination cursor that can't be used for this request (message is for the UI)."""
+
+
+_CURSOR_FIELD_LABELS = {
+    "entity_type": "entity type",
+    "entity_stash_id": "performer, studio or tag",
+    "endpoint": "stash-box endpoint",
+    "sort": "sort order",
+    "direction": "sort direction",
+}
+
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def parse_cursor(cursor, expected: dict) -> dict:
+    """Decode a pagination cursor and check that it belongs to this request.
+
+    Args:
+        cursor: the cursor string the UI sent back
+        expected: {field: value} the cursor must carry (entity, endpoint, ...)
+
+    Returns:
+        The cursor state, with int `stashdb_page` >= 1 and int `offset` >= 0.
+
+    Raises:
+        CursorError: unreadable, a bad page or offset, or made for another request.
+    """
+    state = decode_cursor(cursor)
+    if not isinstance(state, dict):
+        raise CursorError("Invalid pagination cursor (unreadable). Start a new search.")
+    page, offset = state.get("stashdb_page"), state.get("offset")
+    if not (_is_int(page) and page >= 1 and _is_int(offset) and offset >= 0):
+        raise CursorError("Invalid pagination cursor (page and offset must be whole numbers). "
+                          "Start a new search.")
+    for key in ("sort", "direction"):
+        if key in state and not isinstance(state[key], str):
+            raise CursorError(f"Invalid pagination cursor (bad {key}). Start a new search.")
+    for key, want in expected.items():
+        if state.get(key) != want:
+            label = _CURSOR_FIELD_LABELS.get(key, key)
+            raise CursorError(f"This pagination cursor is for a different {label}. Start a new search.")
+    return state
+
+
 # ============================================================================
 # Local Stash API
 # ============================================================================
@@ -1211,11 +1258,139 @@ def scene_has_excluded_tags(scene, excluded_tag_ids):
     return bool(scene_tag_ids & excluded_tag_ids)
 
 
+# Keys a fill result carries after a stash-box failure; the responses pass them through.
+FETCH_FAILURE_KEYS = ("error", "partial", "auth_error", "rate_limited", "retry_after")
+
+
+def _fetch_error_message(error, box_name, page):
+    """A message for the UI naming the box and saying what to do."""
+    if error.is_auth_error:
+        return (f"{box_name} refused the request ({error}). Check the {box_name} API key in "
+                f"Settings > Metadata Providers > Stash-box Endpoints.")
+    if error.is_rate_limited:
+        return (f"{box_name} is rate limiting requests ({error}). Retry later, "
+                f"or raise the Request Delay plugin setting.")
+    return f"{box_name} request for page {page} failed: {error}"
+
+
+def _fill_page(fetch_page, qualifies, page_size, start_page, start_offset,
+               plugin_settings, cursor_state, box_name):
+    """Fetch stash-box pages from (start_page, start_offset) until page_size scenes qualify.
+
+    Shared by the missing-scenes and browse views.
+
+    Args:
+        fetch_page: fetch_page(page) -> {"scenes", "count", "has_more"}. It raises
+            StashBoxAPIError on a failure; a None result (ThePornDB's functions) is a
+            failed page too.
+        qualifies: qualifies(scene) -> True when the scene belongs in the results.
+        page_size: how many qualifying scenes fill the page.
+        start_page, start_offset: where to start (from the cursor).
+        plugin_settings: for `stashbox_request_delay`, slept between pages.
+        cursor_state: the fields every cursor from this request carries (sort, endpoint...).
+        box_name: the stash-box's name, for error messages.
+
+    Stops at a full page, the last stash-box page, MAX_PAGES_PER_REQUEST pages
+    (with a cursor to carry on), or a failed page.
+
+    Returns:
+        dict with scenes, total_on_stashdb (None when no page was fetched), next_cursor
+        (None when nothing is left to fetch), is_complete and stashdb_pages_fetched.
+        After a failure it also has error, partial, auth_error, rate_limited and, when
+        known, retry_after. partial is True when pages were fetched before the failure;
+        next_cursor then resumes at the failed page. A failed first page gives no cursor.
+    """
+    request_delay = stashbox_api.get_config(plugin_settings, "request_delay")
+    collected = []
+    total_on_stashdb = None
+    pages_fetched = 0
+    page, offset = start_page, start_offset
+    is_complete = False
+    resume = None  # (page, offset) the next request starts from
+    failure = None
+
+    while True:
+        if pages_fetched >= MAX_PAGES_PER_REQUEST:
+            log.LogInfo(f"Checked {pages_fetched} {box_name} pages without filling the page; "
+                        f"the cursor continues from page {page}")
+            resume = (page, offset)
+            break
+        if page > MAX_STASHDB_PAGE:
+            log.LogWarning(f"Reached the stash-box page limit ({MAX_STASHDB_PAGE}); stopping")
+            break
+        if pages_fetched and request_delay > 0:
+            time.sleep(request_delay)
+
+        try:
+            result = fetch_page(page)
+            if result is None:
+                raise stashbox_api.StashBoxAPIError("no response (see the Stash log for the cause)")
+        except stashbox_api.StashBoxAPIError as e:
+            log.LogWarning(f"{box_name} page {page} failed: {e}")
+            failure = e
+            if pages_fetched:
+                resume = (page, offset)
+            break
+
+        pages_fetched += 1
+        total_on_stashdb = result.get("count") or 0
+        scenes = result.get("scenes") or []
+        if not scenes:
+            is_complete = True
+            break
+
+        filled_at = None
+        for i in range(offset, len(scenes)):
+            if qualifies(scenes[i]):
+                collected.append(scenes[i])
+                if len(collected) >= page_size:
+                    filled_at = i
+                    break
+
+        if filled_at is not None:
+            # Resume after the last scene taken, unless nothing after it can qualify:
+            # then a "Load more" would only come back empty.
+            if any(qualifies(scene) for scene in scenes[filled_at + 1:]):
+                resume = (page, filled_at + 1)
+            elif result.get("has_more"):
+                resume = (page + 1, 0)
+            else:
+                is_complete = True
+            break
+
+        if not result.get("has_more"):
+            is_complete = True
+            break
+        page += 1
+        offset = 0
+
+    next_cursor = None
+    if resume is not None:
+        next_cursor = encode_cursor({"stashdb_page": resume[0], "offset": resume[1], **cursor_state})
+
+    out = {
+        "scenes": collected,
+        "total_on_stashdb": total_on_stashdb,
+        "next_cursor": next_cursor,
+        "is_complete": is_complete,
+        "stashdb_pages_fetched": pages_fetched,
+    }
+    if failure is not None:
+        out["error"] = _fetch_error_message(failure, box_name, page)
+        out["partial"] = pages_fetched > 0
+        out["auth_error"] = failure.is_auth_error
+        out["rate_limited"] = failure.is_rate_limited
+        if failure.retry_after is not None:
+            out["retry_after"] = failure.retry_after
+    return out
+
+
 def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
                      page_size=PAGE_SIZE_DEFAULT, stashdb_page=1, offset=0,
                      sort="DATE", direction="DESC", plugin_settings=None,
                      favorite_performer_ids=None, favorite_studio_ids=None,
-                     favorite_tag_ids=None, excluded_tag_ids=None):
+                     favorite_tag_ids=None, excluded_tag_ids=None,
+                     box_name="The stash-box"):
     """
     Fetch scenes from StashDB until we have page_size missing scenes.
 
@@ -1239,118 +1414,46 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
         favorite_studio_ids: Set of favorite studio stash_ids to filter by, or None
         favorite_tag_ids: Set of favorite tag stash_ids to filter by, or None
         excluded_tag_ids: Set of tag stash_ids to exclude, or None
+        box_name: stash-box name for error messages
 
     Returns:
-        dict with:
-            - scenes: list of missing scene objects (up to page_size)
-            - total_on_stashdb: total scene count on StashDB
-            - next_cursor: cursor for fetching next page (None if complete)
-            - is_complete: True if we've checked all StashDB scenes
-            - stashdb_pages_fetched: number of pages fetched
+        dict from _fill_page: scenes, total_on_stashdb, next_cursor, is_complete,
+        stashdb_pages_fetched, plus error/partial/auth_error/rate_limited/retry_after
+        after a failure.
     """
     page_size = min(page_size, PAGE_SIZE_MAX)
-    collected = []
-    total_on_stashdb = 0
-    pages_fetched = 0
-    current_page = stashdb_page
-    current_offset = offset
-    is_complete = False
-    # Track cursor position for continuation
-    resume_page = stashdb_page
-    resume_offset = offset
+    is_tpdb = theporndb_api.is_theporndb(url)
 
-    while len(collected) < page_size and pages_fetched < MAX_PAGES_PER_REQUEST:
-        if current_page > MAX_STASHDB_PAGE:
-            log.LogWarning(f"Reached max StashDB page limit ({MAX_STASHDB_PAGE})")
-            is_complete = True
-            break
-
-        if theporndb_api.is_theporndb(url):
-            result = theporndb_api.query_scenes_page(
+    def fetch_page(page):
+        if is_tpdb:
+            return theporndb_api.query_scenes_page(
                 api_key, entity_type, entity_stash_id,
-                page=current_page,
-                per_page=100,
-                sort=sort,
-                direction=direction,
+                page=page, per_page=100, sort=sort, direction=direction,
                 plugin_settings=plugin_settings
             )
-        else:
-            result = stashbox_api.query_scenes_page(
-                url, api_key, entity_type, entity_stash_id,
-                page=current_page,
-                per_page=100,
-                sort=sort,
-                direction=direction,
-                plugin_settings=plugin_settings
-            )
+        return stashbox_api.query_scenes_page(
+            url, api_key, entity_type, entity_stash_id,
+            page=page, per_page=100, sort=sort, direction=direction,
+            plugin_settings=plugin_settings
+        )
 
-        if not result:
-            log.LogWarning(f"Failed to fetch StashDB page {current_page}")
-            break
-
-        pages_fetched += 1
-        total_on_stashdb = result["count"]
-        scenes = result["scenes"]
-
-        if not scenes:
-            is_complete = True
-            break
-
-        # Process scenes starting from offset
-        filled = False
-        for i, scene in enumerate(scenes):
-            if i < current_offset:
-                continue
-
-            scene_id = scene.get("id")
-            # Check if scene is missing locally, passes favorite filters, and has no excluded tags
-            if scene_id and scene_id not in local_ids:
-                if (scene_passes_favorite_filters(scene, favorite_performer_ids,
+    def qualifies(scene):
+        # Missing locally, passes the favorite filters, and has no excluded tags
+        scene_id = scene.get("id")
+        return (bool(scene_id) and scene_id not in local_ids
+                and scene_passes_favorite_filters(scene, favorite_performer_ids,
                                                   favorite_studio_ids, favorite_tag_ids)
-                        and not scene_has_excluded_tags(scene, excluded_tag_ids)):
-                    collected.append(scene)
-                if len(collected) >= page_size:
-                    # Save position for next request
-                    # We've processed up to index i (inclusive), so next starts at i+1
-                    resume_offset = i + 1
-                    if resume_offset >= len(scenes):
-                        # Move to next page
-                        resume_page = current_page + 1
-                        resume_offset = 0
-                    else:
-                        resume_page = current_page
-                    filled = True
-                    break
+                and not scene_has_excluded_tags(scene, excluded_tag_ids))
 
-        # If we didn't fill up, move to next page
-        if not filled:
-            if not result["has_more"]:
-                is_complete = True
-                break
-            current_page += 1
-            current_offset = 0
-
-    # Build cursor for continuation
-    next_cursor = None
-    if not is_complete and len(collected) >= page_size:
-        cursor_state = {
-            "stashdb_page": resume_page,
-            "offset": resume_offset,
-            "sort": sort,
-            "direction": direction,
-            "entity_type": entity_type,
-            "entity_stash_id": entity_stash_id,
-            "endpoint": url
-        }
-        next_cursor = encode_cursor(cursor_state)
-
-    return {
-        "scenes": collected,
-        "total_on_stashdb": total_on_stashdb,
-        "next_cursor": next_cursor,
-        "is_complete": is_complete,
-        "stashdb_pages_fetched": pages_fetched
+    cursor_state = {
+        "sort": sort,
+        "direction": direction,
+        "entity_type": entity_type,
+        "entity_stash_id": entity_stash_id,
+        "endpoint": url,
     }
+    return _fill_page(fetch_page, qualifies, page_size, stashdb_page, offset,
+                      plugin_settings, cursor_state, box_name)
 
 
 # ============================================================================
@@ -1385,15 +1488,23 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
     Returns:
         Dict with:
             - entity_name, entity_type, stashdb_name, stashdb_url
-            - total_on_stashdb: total scenes on StashDB
+            - total_on_stashdb: total scenes on StashDB (None when the first page failed)
             - total_local: scenes you own (from cache)
-            - missing_count_estimate: estimated missing (null until complete)
+            - missing_count_estimate: estimated missing, never negative (null when complete
+              or filtered; absent when the first page failed)
             - missing_count_loaded: how many missing we've found so far
             - cursor: cursor for next page
             - has_more: whether more results available
             - is_complete: true if we've checked all StashDB scenes
             - missing_scenes: array of scene objects
             - whisparr_configured: boolean
+            After a stash-box failure, also:
+            - error: what failed, naming the stash-box
+            - partial: true when missing_scenes holds the scenes found before the failure
+              and cursor retries from the failed page; false when the first page failed
+            - auth_error: the stash-box refused the API key or account
+            - rate_limited (and retry_after, seconds, when the server sent it)
+        A bad cursor, or a missing entity or endpoint, gives just {"error"}.
     """
     page_size = min(max(1, page_size), PAGE_SIZE_MAX)
 
@@ -1421,17 +1532,6 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
     stashdb_api_key = stashbox.get("api_key", "")
     stashdb_name = stashbox.get("name", "StashDB")
 
-    # Decode cursor if provided
-    cursor_state = None
-    if cursor:
-        cursor_state = decode_cursor(cursor)
-        if cursor_state:
-            # Validate cursor matches request
-            if (cursor_state.get("entity_type") != entity_type or
-                cursor_state.get("endpoint") != stashdb_url):
-                log.LogWarning("Cursor mismatch, starting fresh")
-                cursor_state = None
-
     # Get entity stash_id
     if entity_type == "performer":
         entity = get_local_performer(entity_id)
@@ -1458,6 +1558,19 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
                      f"Please use the Tagger to link this {entity_type} first."
         }
 
+    # A cursor must come from this search: same entity, same endpoint, a sane position
+    cursor_state = None
+    if cursor:
+        try:
+            cursor_state = parse_cursor(cursor, {
+                "entity_type": entity_type,
+                "entity_stash_id": entity_stash_id,
+                "endpoint": stashdb_url,
+            })
+        except CursorError as e:
+            log.LogWarning(f"Rejected cursor: {e}")
+            return {"error": str(e)}
+
     # Get or build local stash_id cache (for filtering)
     local_ids = get_or_build_cache(stashdb_url)
 
@@ -1472,8 +1585,8 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
 
     # Determine starting position
     if cursor_state:
-        stashdb_page = cursor_state.get("stashdb_page", 1)
-        offset = cursor_state.get("offset", 0)
+        stashdb_page = cursor_state["stashdb_page"]
+        offset = cursor_state["offset"]
         sort = cursor_state.get("sort", sort)
         direction = cursor_state.get("direction", direction)
     else:
@@ -1541,8 +1654,10 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         favorite_performer_ids=favorite_performer_ids,
         favorite_studio_ids=favorite_studio_ids,
         favorite_tag_ids=favorite_tag_ids,
-        excluded_tag_ids=excluded_tag_ids
+        excluded_tag_ids=excluded_tag_ids,
+        box_name=stashdb_name
     )
+    first_page_failed = "error" in result and not result.get("partial")
 
     # Format scenes
     formatted_scenes = []
@@ -1554,7 +1669,8 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
     whisparr_error = None
     if whisparr_url and whisparr_api_key:
         whisparr_configured = True
-        whisparr_status_map, whisparr_error = _whisparr_status_for_response(whisparr_url, whisparr_api_key)
+        if not first_page_failed:
+            whisparr_status_map, whisparr_error = _whisparr_status_for_response(whisparr_url, whisparr_api_key)
 
     for scene in result["scenes"]:
         scene_stash_id = scene.get("id")
@@ -1579,11 +1695,15 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         active_filters.append("tags")
 
     # When filters are active, the estimate is not meaningful
-    # (we'd have to scan all pages to know the filtered count)
+    # (we'd have to scan all pages to know the filtered count).
+    # Local scenes can outnumber the stash-box's (deleted or merged scenes), so clamp at 0.
+    # With no page fetched there is nothing to estimate from, so the key is left out.
     filters_active = len(active_filters) > 0
-    missing_count_estimate = None
-    if not filters_active and not is_complete:
-        missing_count_estimate = total_on_stashdb - total_local
+    estimate = {}
+    if not first_page_failed:
+        estimate["missing_count_estimate"] = None
+        if not filters_active and not is_complete:
+            estimate["missing_count_estimate"] = max(0, total_on_stashdb - total_local)
 
     return {
         "entity_name": entity.get("name"),
@@ -1592,7 +1712,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "stashdb_url": stashdb_url.replace("/graphql", ""),
         "total_on_stashdb": total_on_stashdb,
         "total_local": total_local,
-        "missing_count_estimate": missing_count_estimate,
+        **estimate,
         "missing_count_loaded": len(formatted_scenes),
         "cursor": result["next_cursor"],
         "has_more": result["next_cursor"] is not None,
@@ -1605,6 +1725,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "active_filter_tag_ids": list(favorite_tag_ids) if favorite_tag_ids else [],
         "excluded_tags_applied": len(excluded_tag_ids) > 0,
         "cache_info": _get_cache_info(stashdb_url),
+        **{key: result[key] for key in FETCH_FAILURE_KEYS if key in result},
     }
 
 
@@ -1689,7 +1810,10 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         filter_favorite_tags: Filter by favorite tags
 
     Returns:
-        Dict with missing scenes and metadata
+        Dict with missing scenes and metadata. After a stash-box failure it also has
+        error, partial, auth_error, rate_limited (and retry_after), as in
+        find_missing_scenes_paginated; total_on_stashdb is None when the first page failed.
+        A bad cursor gives just {"error"}.
     """
     page_size = min(max(1, page_size), PAGE_SIZE_MAX)
 
@@ -1724,19 +1848,17 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
     stashdb_api_key = stashbox.get("api_key", "")
     stashdb_name = stashbox.get("name", "StashDB")
 
-    # Decode cursor if provided
-    cursor_state = decode_cursor(cursor) if cursor else None
-    if cursor_state:
-        stashdb_page = cursor_state.get("stashdb_page", 1)
-        offset = cursor_state.get("offset", 0)
-        # Validate cursor values
-        if not isinstance(stashdb_page, int) or stashdb_page < 1:
-            stashdb_page = 1
-        if not isinstance(offset, int) or offset < 0:
-            offset = 0
+    # A cursor must come from this browse: same endpoint and sort, a sane position
+    if cursor:
+        try:
+            cursor_state = parse_cursor(cursor, {"endpoint": stashdb_url, "sort": sort,
+                                                 "direction": direction})
+        except CursorError as e:
+            log.LogWarning(f"Rejected cursor: {e}")
+            return {"error": str(e)}
+        stashdb_page, offset = cursor_state["stashdb_page"], cursor_state["offset"]
     else:
-        stashdb_page = 1
-        offset = 0
+        stashdb_page, offset = 1, 0
 
     # Get local stash_id cache
     local_ids = get_or_build_cache(stashdb_url)
@@ -1771,96 +1893,34 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
             return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["tags"])
 
     # Fetch scenes using browse query
-    collected = []
-    pages_fetched = 0
-    total_on_stashdb = 0
-    is_complete = False
-    current_page = stashdb_page
-    current_offset = offset
-    resume_page = current_page
-    resume_offset = current_offset
+    is_tpdb = theporndb_api.is_theporndb(stashdb_url)
+    query_args = {
+        "per_page": 100,
+        "sort": sort,
+        "direction": direction,
+        "performer_ids": list(performer_ids) if performer_ids else None,
+        "studio_ids": list(studio_ids) if studio_ids else None,
+        "tag_ids": list(tag_ids) if tag_ids else None,
+        "excluded_tag_ids": excluded_tag_ids if excluded_tag_ids else None,
+        "plugin_settings": plugin_settings,
+    }
 
-    while len(collected) < page_size and pages_fetched < MAX_PAGES_PER_REQUEST:
-        if theporndb_api.is_theporndb(stashdb_url):
-            result = theporndb_api.query_scenes_browse(
-                stashdb_api_key,
-                page=current_page,
-                per_page=100,
-                sort=sort,
-                direction=direction,
-                performer_ids=list(performer_ids) if performer_ids else None,
-                studio_ids=list(studio_ids) if studio_ids else None,
-                tag_ids=list(tag_ids) if tag_ids else None,
-                excluded_tag_ids=excluded_tag_ids if excluded_tag_ids else None,
-                plugin_settings=plugin_settings
-            )
-        else:
-            result = stashbox_api.query_scenes_browse(
-                stashdb_url, stashdb_api_key,
-                page=current_page,
-                per_page=100,
-                sort=sort,
-                direction=direction,
-                performer_ids=list(performer_ids) if performer_ids else None,
-                studio_ids=list(studio_ids) if studio_ids else None,
-                tag_ids=list(tag_ids) if tag_ids else None,
-                excluded_tag_ids=excluded_tag_ids if excluded_tag_ids else None,
-                plugin_settings=plugin_settings
-            )
+    def fetch_page(page):
+        if is_tpdb:
+            return theporndb_api.query_scenes_browse(stashdb_api_key, page=page, **query_args)
+        return stashbox_api.query_scenes_browse(stashdb_url, stashdb_api_key, page=page, **query_args)
 
-        if not result:
-            log.LogWarning(f"Failed to fetch browse page {current_page}")
-            break
+    def qualifies(scene):
+        # Not owned, and passes the favorite filters client-side (the query only handles excludes)
+        scene_id = scene.get("id")
+        return (bool(scene_id) and scene_id not in local_ids
+                and scene_passes_favorite_filters(scene, performer_ids, studio_ids, tag_ids))
 
-        pages_fetched += 1
-        total_on_stashdb = result["count"]
-        scenes = result["scenes"]
-
-        if not scenes:
-            is_complete = True
-            break
-
-        # Filter out owned scenes and apply favorite filters
-        for i, scene in enumerate(scenes):
-            if i < current_offset:
-                continue
-
-            scene_id = scene.get("id")
-            if scene_id and scene_id not in local_ids:
-                # Apply favorite filters client-side (StashDB query only handles excludes)
-                if scene_passes_favorite_filters(scene, performer_ids, studio_ids, tag_ids):
-                    collected.append(scene)
-
-            if len(collected) >= page_size:
-                # Save position for next request
-                resume_offset = i + 1
-                if resume_offset >= len(scenes):
-                    resume_page = current_page + 1
-                    resume_offset = 0
-                else:
-                    resume_page = current_page
-                break
-
-        if len(collected) >= page_size:
-            break
-
-        if not result["has_more"]:
-            is_complete = True
-            break
-
-        current_page += 1
-        current_offset = 0
-
-    # Build cursor for continuation
-    next_cursor = None
-    if not is_complete and len(collected) >= page_size:
-        cursor_state = {
-            "stashdb_page": resume_page,
-            "offset": resume_offset,
-            "sort": sort,
-            "direction": direction
-        }
-        next_cursor = encode_cursor(cursor_state)
+    result = _fill_page(fetch_page, qualifies, page_size, stashdb_page, offset, plugin_settings,
+                        {"sort": sort, "direction": direction, "endpoint": stashdb_url},
+                        stashdb_name)
+    collected = result["scenes"]
+    first_page_failed = "error" in result and not result.get("partial")
 
     # Format scenes and add Whisparr status
     formatted_scenes = []
@@ -1872,7 +1932,8 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
     whisparr_error = None
     if whisparr_url and whisparr_api_key:
         whisparr_configured = True
-        whisparr_status_map, whisparr_error = _whisparr_status_for_response(whisparr_url, whisparr_api_key)
+        if not first_page_failed:
+            whisparr_status_map, whisparr_error = _whisparr_status_for_response(whisparr_url, whisparr_api_key)
 
     for scene in collected:
         scene_stash_id = scene.get("id")
@@ -1886,11 +1947,11 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
     return {
         "stashdb_name": stashdb_name,
         "stashdb_url": stashdb_url.replace("/graphql", ""),
-        "total_on_stashdb": total_on_stashdb,
+        "total_on_stashdb": result["total_on_stashdb"],
         "missing_count_loaded": len(formatted_scenes),
-        "cursor": next_cursor,
-        "has_more": next_cursor is not None,
-        "is_complete": is_complete,
+        "cursor": result["next_cursor"],
+        "has_more": result["next_cursor"] is not None,
+        "is_complete": result["is_complete"],
         "missing_scenes": formatted_scenes,
         "whisparr_configured": whisparr_configured,
         **({"whisparr_error": whisparr_error} if whisparr_error else {}),
@@ -1898,6 +1959,7 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         "active_filter_tag_ids": list(tag_ids) if tag_ids else [],
         "excluded_tags_applied": len(excluded_tag_ids) > 0,
         "cache_info": _get_cache_info(stashdb_url),
+        **{key: result[key] for key in FETCH_FAILURE_KEYS if key in result},
     }
 
 
@@ -2666,8 +2728,10 @@ def main():
         log.LogError(f"Operation failed: {e}")
         output = {"error": str(e)}
 
-    # Wrap output in PluginOutput structure expected by Stash
-    if "error" in output:
+    # Wrap output in PluginOutput structure expected by Stash. Stash drops `output`
+    # when `error` is set, so a failure that carries results or details the UI renders
+    # (partial scenes, a retry cursor, auth_error) goes out as output with its error field.
+    if "error" in output and "missing_scenes" not in output:
         plugin_output = {"error": output["error"]}
     else:
         plugin_output = {"output": output}

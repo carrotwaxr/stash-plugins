@@ -326,14 +326,14 @@ class TestQueryScenesPage(unittest.TestCase):
         self.assertEqual(variables["input"]["sort"], "DATE")
 
     def test_query_scenes_page_unknown_entity_type(self):
-        """Test that unknown entity type returns None."""
-        result = stashbox_api.query_scenes_page(
-            "https://stashdb.org/graphql",
-            "api-key",
-            "unknown_type",
-            "id"
-        )
-        self.assertIsNone(result)
+        """Test that unknown entity type raises (data functions raise, never return None)."""
+        with self.assertRaises(ValueError):
+            stashbox_api.query_scenes_page(
+                "https://stashdb.org/graphql",
+                "api-key",
+                "unknown_type",
+                "id"
+            )
 
 
 class TestCacheBuildingFunction(unittest.TestCase):
