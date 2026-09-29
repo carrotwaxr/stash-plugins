@@ -5,6 +5,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -153,6 +154,42 @@ def test_empty_results_are_not_errors(monkeypatch):
     assert ms.whisparr_get_all_scenes(URL, KEY) == []
     install(monkeypatch, lambda r: {"records": []})
     assert ms.whisparr_get_queue(URL, KEY) == []
+
+
+@pytest.mark.parametrize("reply", [[], b"", {}, {"records": None}, {"records": "x"},
+                                   {"records": [{"movieId": 1}, 5]},
+                                   {"totalRecords": 3, "records": []}])
+def test_queue_raises_on_an_unexpected_reply(monkeypatch, reply):
+    install(monkeypatch, lambda r: reply)
+    with pytest.raises(ms.WhisparrError) as ei:
+        ms.whisparr_get_queue(URL, KEY)
+    assert "queue" in str(ei.value).lower()
+
+
+def test_queue_pages_until_total_records(monkeypatch):
+    first = [{"movieId": i} for i in range(1000)]
+
+    def handler(req):
+        page = int(urllib.parse.parse_qs(req.full_url.split("?", 1)[1])["page"][0])
+        return {"page": page, "totalRecords": 1001, "records": first if page == 1 else [{"movieId": 5000}]}
+    seen = install(monkeypatch, handler)
+    records = ms.whisparr_get_queue(URL, KEY)
+    assert len(records) == 1001 and records[-1] == {"movieId": 5000}
+    pages = [urllib.parse.parse_qs(r.full_url.split("?", 1)[1])["page"] for r in seen]
+    assert pages == [["1"], ["2"]]
+
+
+def test_queue_without_total_stops_at_a_short_page(monkeypatch):
+    seen = install(monkeypatch, lambda r: {"records": [{"movieId": 1}]})
+    assert ms.whisparr_get_queue(URL, KEY) == [{"movieId": 1}]
+    assert len(seen) == 1
+
+
+def test_queue_that_never_ends_raises(monkeypatch):
+    full = [{"movieId": i} for i in range(1000)]
+    install(monkeypatch, lambda r: {"totalRecords": 10 ** 9, "records": full})
+    with pytest.raises(ms.WhisparrError):
+        ms.whisparr_get_queue(URL, KEY)
 
 
 def test_get_by_stash_id_checks_the_id(monkeypatch):

@@ -865,10 +865,41 @@ def whisparr_get_all_scenes(whisparr_url, api_key):
     return scenes
 
 
+WHISPARR_QUEUE_PAGE_SIZE = 1000
+WHISPARR_QUEUE_MAX_PAGES = 20
+
+
 def whisparr_get_queue(whisparr_url, api_key):
-    """Get the current download queue from Whisparr. Raises WhisparrError."""
-    result = whisparr_request(whisparr_url, api_key, "queue?pageSize=1000")
-    records = result.get("records") or [] if isinstance(result, dict) else []
+    """Get Whisparr's whole download queue (every page). Raises WhisparrError.
+
+    The queue decides what cleanup leaves alone, so it fails closed: a reply that isn't
+    Whisparr's paging object with a list of item dicts, a totalRecords that the pages
+    never reach, or more than WHISPARR_QUEUE_MAX_PAGES pages raises instead of giving
+    a shorter queue.
+    """
+    base = normalize_whisparr_url(whisparr_url)
+    records = []
+    for page in range(1, WHISPARR_QUEUE_MAX_PAGES + 1):
+        result = whisparr_request(whisparr_url, api_key,
+                                  f"queue?page={page}&pageSize={WHISPARR_QUEUE_PAGE_SIZE}")
+        batch = result.get("records") if isinstance(result, dict) else None
+        if not isinstance(batch, list) or not all(isinstance(item, dict) for item in batch):
+            raise WhisparrError("Whisparr returned an unexpected reply for the download queue "
+                                "(no list of queue items), so nothing was changed.", url=base)
+        records.extend(batch)
+        total = result.get("totalRecords")
+        if _is_int(total):
+            if len(records) >= total:
+                break
+            if not batch:
+                raise WhisparrError(f"Whisparr's download queue reports {total} items but returned "
+                                    f"{len(records)}, so nothing was changed.", url=base)
+        elif len(batch) < WHISPARR_QUEUE_PAGE_SIZE:
+            break
+    else:
+        raise WhisparrError(f"Whisparr's download queue has more than "
+                            f"{WHISPARR_QUEUE_MAX_PAGES * WHISPARR_QUEUE_PAGE_SIZE} items; "
+                            "nothing was changed.", url=base)
     log.LogInfo(f"Found {len(records)} items in Whisparr queue")
     return records
 

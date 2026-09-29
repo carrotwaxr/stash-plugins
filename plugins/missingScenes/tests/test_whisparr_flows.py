@@ -25,9 +25,13 @@ BOXES = [{"endpoint": TPDB, "name": "ThePornDB", "api_key": "t"},
          {"endpoint": STASHDB, "name": "StashDB", "api_key": "s"}]
 
 
-def whisparr(movies=(), lookup=(), queue=(), fail=None):
+_QUEUE = object()
+
+
+def whisparr(movies=(), lookup=(), queue=(), fail=None, queue_reply=_QUEUE):
     """A fake Whisparr v3. `movie?stashId=` returns `movies` unfiltered (a Whisparr that
-    ignores the filter, the worst case). `fail(method, path)` may return an exception."""
+    ignores the filter, the worst case). `fail(method, path)` may return an exception.
+    `queue_reply` replaces the queue reply: a value, or a function of the request path."""
     by_id = {m.get("id"): m for m in movies}
 
     def handler(req):
@@ -44,6 +48,9 @@ def whisparr(movies=(), lookup=(), queue=(), fail=None):
         if method == "GET" and path.startswith("lookup/scene"):
             return list(lookup)
         if method == "GET" and path.startswith("queue"):
+            if queue_reply is not _QUEUE:
+                reply = queue_reply(path) if callable(queue_reply) else queue_reply
+                return b"" if reply is None else reply
             return {"records": list(queue)}
         if method == "POST" and path == "movie":
             body = json.loads(req.data)
@@ -428,4 +435,71 @@ def test_cleanup_fails_when_the_local_index_cannot_be_built(monkeypatch):
     seen = install(monkeypatch, whisparr(movies=MOVIES))
     res = ms.task_cleanup_whisparr({"whisparrUrl": URL, "whisparrApiKey": KEY})
     assert res["success"] is False and "Could not read scenes" in res["error"]
+    assert writes(seen) == []
+
+
+# ---- reading the download queue fails closed ---------------------------------------
+
+# Replies that don't show the whole queue: nothing may be deleted on the strength of them
+BAD_QUEUE_REPLIES = [
+    pytest.param([], id="a list"),
+    pytest.param(None, id="an empty body"),
+    pytest.param({}, id="no records"),
+    pytest.param({"records": None}, id="records null"),
+    pytest.param({"records": "x"}, id="records a string"),
+    pytest.param({"records": [{"movieId": 9}, "junk"]}, id="an unreadable item"),
+    pytest.param({"page": 1, "pageSize": 1000, "totalRecords": 5, "records": []}, id="total without records"),
+]
+
+
+def paged_queue(pages, total=None):
+    """A queue reply per requested page, like Whisparr's paging resource."""
+    def reply(path):
+        query = urllib.parse.parse_qs(path.split("?", 1)[1]) if "?" in path else {}
+        page = int(query.get("page", ["1"])[0])
+        size = int(query.get("pageSize", ["10"])[0])
+        records = pages[page - 1] if page <= len(pages) else []
+        assert len(records) <= size
+        return {"page": page, "pageSize": size, "records": records,
+                "totalRecords": sum(map(len, pages)) if total is None else total}
+    return reply
+
+
+# 1000 other downloads on page 1; movie 9 is downloading on page 2
+BIG_QUEUE = [[{"movieId": 1000 + i, "status": "downloading"} for i in range(1000)],
+             [{"movieId": 9, "status": "downloading"}]]
+
+
+@pytest.mark.parametrize("reply", BAD_QUEUE_REPLIES)
+def test_hook_deletes_nothing_when_the_queue_reply_is_unexpected(monkeypatch, reply):
+    stash(monkeypatch)
+    seen = install(monkeypatch, whisparr(movies=[{"id": 9, "stashId": SID}], queue_reply=reply))
+    res = ms.handle_scene_update_hook(hook_ctx(), HOOK_SETTINGS)
+    assert res["success"] is False and "queue" in res["error"].lower()
+    assert writes(seen) == []
+
+
+@pytest.mark.parametrize("reply", BAD_QUEUE_REPLIES)
+def test_cleanup_deletes_nothing_when_the_queue_reply_is_unexpected(monkeypatch, reply):
+    local_index(monkeypatch, {SID})
+    seen = install(monkeypatch, whisparr(movies=MOVIES, queue_reply=reply))
+    res = ms.task_cleanup_whisparr({"whisparrUrl": URL, "whisparrApiKey": KEY})
+    assert res["success"] is False and "queue" in res["error"].lower()
+    assert writes(seen) == []
+
+
+def test_hook_sees_a_download_past_the_first_queue_page(monkeypatch):
+    stash(monkeypatch)
+    seen = install(monkeypatch, whisparr(movies=[{"id": 9, "stashId": SID}], queue_reply=paged_queue(BIG_QUEUE)))
+    res = ms.handle_scene_update_hook(hook_ctx(), HOOK_SETTINGS)
+    assert res["success"] is True and "queue" in res["message"].lower()
+    assert writes(seen) == []
+
+
+def test_cleanup_sees_a_download_past_the_first_queue_page(monkeypatch):
+    local_index(monkeypatch, {SID})
+    seen = install(monkeypatch, whisparr(movies=MOVIES, queue_reply=paged_queue(BIG_QUEUE)))
+    res = ms.task_cleanup_whisparr({"whisparrUrl": URL, "whisparrApiKey": KEY})
+    assert res["success"] is True
+    assert res["cleaned"] == 0 and res["skipped_in_queue"] == 1
     assert writes(seen) == []
