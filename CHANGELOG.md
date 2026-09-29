@@ -12,7 +12,7 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ### 1.2.0
 - Searches the stash-box selected in the Tagger, then the `stashBoxEndpoint` setting, then the first configured box. The Match button names the box, shows only for scenes not linked to it, and is hidden when the Tagger's source is a scraper.
-- Two phases: a quick text search on the cleaned title, then a deep search by linked performers (all of them first, then any) and studio.
+- Two phases: quick text searches (the cleaned title, then the studio and performer names), then a deep search by linked performers (all of them first, then any) and studio.
 - Scoring uses the cleaned title, a date bonus (the scene's date, then a date in the filename) and the duration. The new `maxResults` setting (default 50) and page caps limit the deep search, and a cut list is reported.
 - Bad API keys name the box and point to Settings > Metadata Providers. Rate limits honour `Retry-After`, partial results are shown, and a 120 second timeout offers Retry.
 - Every setting the plugin reads is now declared in the manifest. Local scene IDs are cached for 5 minutes in `<Stash config dir>/plugin_data/sceneMatcher/`.

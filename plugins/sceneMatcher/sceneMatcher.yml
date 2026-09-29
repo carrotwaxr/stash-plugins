@@ -44,7 +44,7 @@ settings:
     type: NUMBER
   stashbox_request_timeout:
     displayName: Request Timeout (seconds)
-    description: How long to wait for one stash-box response. Default is 30.
+    description: How long to wait for one stash-box response. Default is 30. It is cut to what is left of the search's 100 second budget.
     type: NUMBER
   stashbox_rate_limit_pause:
     displayName: Rate Limit Pause (seconds)
