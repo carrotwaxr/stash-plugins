@@ -29,6 +29,10 @@ BATCH_SIZE = stashbox_api.FINGERPRINT_BATCH_SIZE
 # Stash's fingerprint types and the stash-box FingerprintAlgorithm for each
 ALGORITHMS = {"md5": "MD5", "oshash": "OSHASH", "phash": "PHASH"}
 
+# A scene whose last lookup found nothing is looked up again after this long even if
+# unchanged, so matches the stash-box gained since are picked up
+RECHECK_UNMATCHED_DAYS = 30
+
 # A match whose stash-box duration is further than this from every local file's duration
 # is another scene (a trailer, a compilation), so it isn't counted
 DURATION_TOLERANCE_SECONDS = 60
@@ -292,8 +296,11 @@ def _build(path, endpoint, scenes, lookup, request_delay, box_name, progress):
                                 _digest(fingerprints), _durations(scene))
 
     with _open(path, create=True) as conn:
-        stored = {row[0]: (row[1], row[2]) for row in
-                  conn.execute("SELECT scene_id, updated_at, fingerprints FROM scenes")}
+        stored_rows = {row[0]: row[1:] for row in
+                       conn.execute("SELECT scene_id, updated_at, fingerprints, checked_at FROM scenes")}
+        stored = {scene_id: row[:2] for scene_id, row in stored_rows.items()}
+        matched_ids = {row[0] for row in conn.execute("SELECT DISTINCT scene_id FROM matches")}
+        recheck_before = time.time() - RECHECK_UNMATCHED_DAYS * 86400
 
         with _transaction(conn):
             # Tagged for this endpoint since, or deleted: their stash_ids speak for them now
@@ -309,7 +316,8 @@ def _build(path, endpoint, scenes, lookup, request_delay, box_name, progress):
         for scene_id, (updated_at, fingerprints, digest, durations) in listed.items():
             if not fingerprints:
                 no_fingerprints.append((scene_id, updated_at, digest))
-            elif stored.get(scene_id) == (updated_at, digest):
+            elif stored.get(scene_id) == (updated_at, digest) and (
+                    scene_id in matched_ids or stored_rows[scene_id][2] >= recheck_before):
                 skipped += 1
             else:
                 to_query.append((scene_id, updated_at, digest, fingerprints, durations))

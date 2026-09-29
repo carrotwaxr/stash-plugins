@@ -698,6 +698,16 @@ def normalize_whisparr_url(raw):
     return url.rstrip("/")
 
 
+def whisparr_url_setting(settings):
+    """The Whisparr URL setting, stripped and normalized ('' when unset)."""
+    return normalize_whisparr_url(str((settings or {}).get("whisparrUrl") or "").strip())
+
+
+def whisparr_root_folder_setting(settings):
+    """The Whisparr root folder setting, stripped ('' when unset)."""
+    return str((settings or {}).get("whisparrRootFolder") or "").strip()
+
+
 def _whisparr_detail(body):
     """Pull Whisparr's validation messages out of an error body; else a raw snippet."""
     snippet = (body or "")[:300]
@@ -1848,7 +1858,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
             "has_more": False,
             "is_complete": True,
             "missing_scenes": [],
-            "whisparr_configured": bool(plugin_settings.get("whisparrUrl") and
+            "whisparr_configured": bool(whisparr_url_setting(plugin_settings) and
                                         plugin_settings.get("whisparrApiKey")),
             "empty_filter_types": empty_filters  # Frontend can use this for messaging
         }
@@ -1879,7 +1889,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
     formatted_scenes = []
     whisparr_status_map = {}
     whisparr_configured = False
-    whisparr_url = plugin_settings.get("whisparrUrl", "")
+    whisparr_url = whisparr_url_setting(plugin_settings)
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
 
     whisparr_error = None
@@ -2164,7 +2174,7 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
     formatted_scenes = []
     whisparr_status_map = {}
     whisparr_configured = False
-    whisparr_url = plugin_settings.get("whisparrUrl", "")
+    whisparr_url = whisparr_url_setting(plugin_settings)
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
 
     whisparr_error = None
@@ -2216,7 +2226,7 @@ def _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, empty_filte
         "has_more": False,
         "is_complete": True,
         "missing_scenes": [],
-        "whisparr_configured": bool(plugin_settings.get("whisparrUrl") and
+        "whisparr_configured": bool(whisparr_url_setting(plugin_settings) and
                                     plugin_settings.get("whisparrApiKey")),
         "filters_active": True,
         "excluded_tags_applied": False,
@@ -2252,10 +2262,10 @@ def add_to_whisparr(stash_id, title, plugin_settings, endpoint=None):
         log.LogWarning(msg)
         return {"success": False, "error": msg}
 
-    whisparr_url = plugin_settings.get("whisparrUrl", "")
+    whisparr_url = whisparr_url_setting(plugin_settings)
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
     quality_profile = int(plugin_settings.get("whisparrQualityProfile") or 1)  # Default to first profile
-    root_folder = plugin_settings.get("whisparrRootFolder", "")
+    root_folder = whisparr_root_folder_setting(plugin_settings)
     search_on_add = bool(plugin_settings.get("whisparrSearchOnAdd", False))  # Default to False for manual control
 
     if not whisparr_url or not whisparr_api_key:
@@ -2428,7 +2438,7 @@ def handle_scene_update_hook(hook_context, plugin_settings):
         log.LogDebug("Auto-cleanup is disabled, skipping")
         return {"success": True, "message": "Auto-cleanup disabled"}
 
-    whisparr_url = plugin_settings.get("whisparrUrl", "")
+    whisparr_url = whisparr_url_setting(plugin_settings)
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
     if not whisparr_url or not whisparr_api_key:
         log.LogDebug("Whisparr not configured, skipping auto-cleanup")
@@ -2497,54 +2507,81 @@ def handle_scene_update_hook(hook_context, plugin_settings):
         return {"success": False, "message": str(e), "error": str(e)}
 
 
+def _split_scan_paths(value):
+    """The ;-separated paths of the scanPath setting; empty segments are ignored."""
+    return [part.strip() for part in str(value or "").split(";") if part.strip()]
+
+
+def _inside(path, root):
+    """True when `path` is `root` or below it (a path-boundary check: /data2 is not in /data)."""
+    path, root = os.path.abspath(path), os.path.abspath(root)
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # different drives
+        return False
+
+
 def task_scan_for_new_scenes(plugin_settings):
-    """Task: Trigger a Stash scan on the configured scan path.
+    """Task: Trigger a Stash scan on the configured scan path(s).
 
-    Uses the user's default scan settings from Stash configuration.
+    scanPath holds one path or several separated by ;. Every path must be inside a Stash
+    library (Settings > Library), or the scan is refused. Uses the user's default scan
+    settings from Stash configuration, and drops the stash-box caches once the scan starts.
     """
-    scan_path = plugin_settings.get("scanPath", "").strip()
+    scan_paths = _split_scan_paths(plugin_settings.get("scanPath"))
 
-    if not scan_path:
+    if not scan_paths:
         log.LogWarning("Scan path not configured")
         return {"success": False, "message": "Scan path not configured. Set it in plugin settings."}
 
-    log.LogInfo(f"Triggering scan on path: {scan_path}")
+    log.LogInfo(f"Triggering scan on path: {'; '.join(scan_paths)}")
 
     try:
-        # First, get the user's scan settings from UI taskDefaults
-        # Note: configuration.defaults.scan is different from the UI settings
-        # The actual user-configured scan defaults are in configuration.ui.taskDefaults.scan
+        # The user-configured scan defaults are in configuration.ui.taskDefaults.scan
+        # (configuration.defaults.scan is something else). Library roots: general.stashes.
         config_result = stash_graphql("""
             query Configuration {
                 configuration {
                     ui
+                    general {
+                        stashes {
+                            path
+                        }
+                    }
                 }
             }
         """)
+        configuration = (config_result or {}).get("configuration") or {}
 
-        # Build scan input with user's defaults
-        scan_input = {"paths": [scan_path]}
+        roots = [str(s["path"]) for s in (configuration.get("general") or {}).get("stashes") or []
+                 if isinstance(s, dict) and s.get("path")]
+        outside = [p for p in scan_paths if not any(_inside(p, r) for r in roots)]
+        if outside:
+            listed = ", ".join(roots) if roots else "none configured"
+            message = (f"Scan path {', '.join(outside)} is not inside a Stash library. "
+                       f"Library paths: {listed}. Fix the Scan Path setting or add the folder "
+                       f"under Settings > Library.")
+            log.LogWarning(message)
+            return {"success": False, "message": message}
 
-        if config_result and "configuration" in config_result:
-            ui_config = config_result["configuration"].get("ui", {})
-            # ui is a JSON Map, parse it if it's a string
-            if isinstance(ui_config, str):
-                import json as json_module
-                ui_config = json_module.loads(ui_config)
+        scan_input = {"paths": scan_paths}
 
-            task_defaults = ui_config.get("taskDefaults", {})
-            scan_defaults = task_defaults.get("scan", {})
+        ui_config = configuration.get("ui") or {}
+        # ui is a JSON Map, parse it if it's a string
+        if isinstance(ui_config, str):
+            ui_config = json.loads(ui_config)
 
-            if scan_defaults:
-                # Map the UI task defaults to scan input fields
-                scan_input["scanGenerateCovers"] = scan_defaults.get("scanGenerateCovers", True)
-                scan_input["scanGeneratePreviews"] = scan_defaults.get("scanGeneratePreviews", False)
-                scan_input["scanGenerateImagePreviews"] = scan_defaults.get("scanGenerateImagePreviews", False)
-                scan_input["scanGenerateSprites"] = scan_defaults.get("scanGenerateSprites", True)
-                scan_input["scanGeneratePhashes"] = scan_defaults.get("scanGeneratePhashes", True)
-                scan_input["scanGenerateThumbnails"] = scan_defaults.get("scanGenerateThumbnails", False)
-                scan_input["scanGenerateClipPreviews"] = scan_defaults.get("scanGenerateClipPreviews", False)
-                log.LogInfo(f"Using user's scan defaults: covers={scan_input['scanGenerateCovers']}, previews={scan_input['scanGeneratePreviews']}, sprites={scan_input['scanGenerateSprites']}")
+        scan_defaults = (ui_config.get("taskDefaults") or {}).get("scan") or {}
+        if scan_defaults:
+            # Map the UI task defaults to scan input fields
+            scan_input["scanGenerateCovers"] = scan_defaults.get("scanGenerateCovers", True)
+            scan_input["scanGeneratePreviews"] = scan_defaults.get("scanGeneratePreviews", False)
+            scan_input["scanGenerateImagePreviews"] = scan_defaults.get("scanGenerateImagePreviews", False)
+            scan_input["scanGenerateSprites"] = scan_defaults.get("scanGenerateSprites", True)
+            scan_input["scanGeneratePhashes"] = scan_defaults.get("scanGeneratePhashes", True)
+            scan_input["scanGenerateThumbnails"] = scan_defaults.get("scanGenerateThumbnails", False)
+            scan_input["scanGenerateClipPreviews"] = scan_defaults.get("scanGenerateClipPreviews", False)
+            log.LogInfo(f"Using user's scan defaults: covers={scan_input['scanGenerateCovers']}, previews={scan_input['scanGeneratePreviews']}, sprites={scan_input['scanGenerateSprites']}")
 
         result = stash_graphql("""
             mutation MetadataScan($input: ScanMetadataInput!) {
@@ -2552,11 +2589,20 @@ def task_scan_for_new_scenes(plugin_settings):
             }
         """, {"input": scan_input})
 
-        if result:
-            log.LogInfo(f"Scan started for {scan_path}")
-            return {"success": True, "message": f"Scan started for {scan_path}"}
-        else:
+        if not result or not result.get("metadataScan"):  # metadataScan is the job id
             return {"success": False, "message": "Failed to start scan"}
+
+        # The scan adds scenes, so any box's local index is stale (best effort: the scan is running)
+        try:
+            for box in get_stashbox_config() or []:
+                if isinstance(box, dict) and box.get("endpoint"):
+                    invalidate_cache(box["endpoint"])
+        except Exception as e:
+            log.LogWarning(f"Scan started, but the stash-box caches could not be cleared: {e}")
+
+        shown = "; ".join(scan_paths)
+        log.LogInfo(f"Scan started for {shown}")
+        return {"success": True, "message": f"Scan started for {shown}"}
     except Exception as e:
         log.LogError(f"Failed to trigger scan: {e}")
         return {"success": False, "message": str(e)}
@@ -2622,7 +2668,7 @@ def test_whisparr_connection(settings):
     result["quality_profiles"] = [{"id": q.get("id"), "name": q.get("name")}
                                   for q in profiles or [] if isinstance(q, dict)]
 
-    root = str(settings.get("whisparrRootFolder") or "").strip()
+    root = whisparr_root_folder_setting(settings)
     if root and root not in result["root_folders"]:
         problems.append(f"Root folder '{root}' is not in Whisparr. Valid: "
                         f"{', '.join(result['root_folders']) or 'none configured'}.")
@@ -2663,7 +2709,7 @@ def task_cleanup_whisparr(plugin_settings):
     Returns {success: True, message, cleaned, skipped_in_queue, errors}, or
     {success: False, message, error} when Whisparr, its queue or Stash can't be read.
     """
-    whisparr_url = plugin_settings.get("whisparrUrl", "")
+    whisparr_url = whisparr_url_setting(plugin_settings)
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
 
     if not whisparr_url or not whisparr_api_key:

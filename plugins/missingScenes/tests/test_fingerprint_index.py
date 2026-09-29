@@ -530,3 +530,33 @@ def test_the_manifest_has_the_task_and_the_setting():
     tasks = {t["name"]: t for t in manifest["tasks"]}
     assert tasks["Build Fingerprint Index"]["defaultArgs"] == {"mode": "build_fingerprint_index"}
     assert manifest["settings"]["ignoreFingerprintMatches"]["type"] == "BOOLEAN"
+
+
+def test_unmatched_scene_is_rechecked_after_30_days_matched_is_not(monkeypatch):
+    assert fingerprint_index.RECHECK_UNMATCHED_DAYS == 30
+    scenes = [local_scene(1), local_scene(2)]
+    box = FakeBox({"ph1": ["sdb-1"]})
+    install(monkeypatch, scenes, box)
+    ms.build_fingerprint_index({})
+    assert len(box.calls) == 1
+
+    def age(days):
+        conn = sqlite3.connect(fingerprint_index.index_path(ms.CACHE_DIR, EP))
+        conn.execute("UPDATE scenes SET checked_at = ?", (time.time() - days * 86400,))
+        conn.commit()
+        conn.close()
+
+    age(29)
+    res = ms.build_fingerprint_index({})
+    assert len(box.calls) == 1 and res["queried"] == 0, "29 days old: not looked up"
+
+    age(31)
+    box.matches = {"ph1": ["sdb-1"], "ph2": ["sdb-2"]}
+    res = ms.build_fingerprint_index({})
+    assert res["queried"] == 1 and res["skipped"] == 1
+    assert box.queried_ids(box.calls[-1]) == ["2"], "only the unmatched scene is looked up again"
+    assert owned() == {"sdb-1", "sdb-2"}, "the match the box gained is picked up"
+
+    age(31)
+    res = ms.build_fingerprint_index({})
+    assert res["queried"] == 0, "both have matches now; matched scenes are not re-queried"

@@ -44,7 +44,7 @@ settings:
     type: BOOLEAN
   whisparrSearchOnAdd:
     displayName: Search on Add
-    description: Automatically search for scenes when adding to Whisparr. Enabled by default.
+    description: Automatically search for scenes when adding to Whisparr. Off by default, so adding a scene doesn't start a download.
     type: BOOLEAN
 
   # Automation settings
@@ -58,7 +58,7 @@ settings:
     type: BOOLEAN
   scanPath:
     displayName: Scan Path for New Scenes
-    description: Path to scan for new downloaded scenes (e.g., /data/unsorted). Used by the "Scan for New Scenes" task.
+    description: Path to scan for new downloaded scenes (e.g., /data/unsorted). Must be inside a Stash library. Separate several paths with ;. Used by the "Scan for New Scenes" task.
     type: STRING
 
   # StashDB API settings (advanced - for rate limiting and error handling)
