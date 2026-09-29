@@ -1,4 +1,5 @@
 """Tests for typed stash-box errors, User-Agent and paging (all mocked)."""
+import http.client
 import io
 import json
 import os
@@ -47,6 +48,25 @@ class TestErrors(unittest.TestCase):
         stashdb_api.graphql_request(URL, "q", api_key="k")
         req = urlopen.call_args[0][0]
         self.assertEqual(req.get_header("User-agent"), f"stash-plugins-tagManager/{plugin_version()}")
+
+    def test_timeout_is_retried(self, urlopen, _sleep):
+        urlopen.side_effect = [TimeoutError("timed out"), ok({"data": {"x": 1}})]
+        self.assertEqual(stashdb_api.graphql_request(URL, "q"), {"x": 1})
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_connection_reset_becomes_retryable_api_error(self, urlopen, _sleep):
+        urlopen.side_effect = ConnectionResetError("reset")
+        with self.assertRaises(StashDBAPIError) as ctx:
+            stashdb_api.graphql_request(URL, "q")
+        self.assertTrue(ctx.exception.retryable)
+
+    def test_dropped_connection_becomes_api_error(self, urlopen, _sleep):
+        urlopen.side_effect = http.client.RemoteDisconnected("gone")
+        with self.assertRaises(StashDBAPIError):
+            stashdb_api.graphql_request(URL, "q")
+        urlopen.side_effect = http.client.IncompleteRead(b"ab")
+        with self.assertRaises(StashDBAPIError):
+            stashdb_api.graphql_request(URL, "q")
 
     def test_401_is_auth_error(self, urlopen, _sleep):
         urlopen.side_effect = http_error(401)

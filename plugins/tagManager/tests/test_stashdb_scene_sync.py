@@ -6,6 +6,7 @@ lookups, so these run offline. Other test modules import both.
 Run with: python -m pytest tests/test_stashdb_scene_sync.py -v
 """
 import copy
+import http.client
 import io
 import json
 import os
@@ -20,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from blacklist import Blacklist
 from stash_client import StashError
+import stashdb_api
 from stashdb_api import StashDBAPIError
 from tag_cache import TagCache
 
@@ -308,6 +310,28 @@ class TestSyncSceneTags(unittest.TestCase):
         for i in range(50):
             remote.add(STASHDB, f"sd-{i}", [remote_tag("b", "Blonde")])
         remote.fingerprint_errors[STASHDB] = [StashDBAPIError("HTTP 502: Bad Gateway", status_code=502)]
+
+        stats = run_sync(client, remote, [STASHDB_BOX], LIVE)
+
+        self.assertEqual(len(remote.fingerprint_calls), 2)
+        self.assertEqual(stats.errors, 40)
+        self.assertEqual(stats.updated, 10)
+        self.assertIsNone(stats.error)
+
+    def test_dropped_connection_batch_counts_scenes_and_continues(self):
+        scenes = [scene(f"s{i}", [(STASHDB, f"sd-{i}")]) for i in range(50)]
+        client = FakeStash(tags=LOCAL_TAGS, scenes=scenes)
+        remote = FakeRemote()
+        for i in range(50):
+            remote.add(STASHDB, f"sd-{i}", [remote_tag("b", "Blonde")])
+        try:
+            with patch("stashdb_api.urllib.request.urlopen",
+                       side_effect=http.client.RemoteDisconnected("gone")), \
+                    patch("stashdb_api.time.sleep"):
+                stashdb_api.graphql_request("https://x/graphql", "q")
+        except StashDBAPIError as e:
+            error = e
+        remote.fingerprint_errors[STASHDB] = [error]
 
         stats = run_sync(client, remote, [STASHDB_BOX], LIVE)
 

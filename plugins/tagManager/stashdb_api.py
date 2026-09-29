@@ -7,6 +7,7 @@ Features:
 - Retry with exponential backoff for transient errors
 """
 
+import http.client
 import json
 import os
 import re
@@ -206,6 +207,19 @@ def graphql_request(url, query, variables=None, api_key=None, timeout=30):
                 continue
 
             raise StashDBAPIError(f"Connection failed: {e.reason}")
+
+        except (OSError, http.client.HTTPException) as e:
+            # Socket timeouts, resets and dropped/truncated responses (URLError and
+            # HTTPError are handled above)
+            reason = str(e) or type(e).__name__
+            log.LogDebug(f"Connection error: {type(e).__name__}: {reason}")
+            if attempt < max_retries:
+                log.LogWarning(f"Connection error: {reason}, retrying in {delay:.1f}s")
+                time.sleep(delay)
+                delay = min(delay * DEFAULT_CONFIG["retry_backoff_multiplier"], DEFAULT_CONFIG["max_retry_delay"])
+                continue
+
+            raise StashDBAPIError(f"Connection failed: {reason}", retryable=True)
 
         except json.JSONDecodeError as e:
             log.LogError(f"Failed to parse JSON response: {e}")
