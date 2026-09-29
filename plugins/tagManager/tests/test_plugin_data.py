@@ -30,6 +30,43 @@ class TestPluginData(unittest.TestCase):
         plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.assertEqual(plugin_data.data_dir({}), os.path.join(plugin_dir, "data"))
 
+    def test_configure_falls_back_when_dir_not_creatable(self):
+        blocker = os.path.join(self.tmp, "afile")
+        open(blocker, "w").close()
+
+        plugin_data.configure({"Dir": blocker})  # a file used as a dir: makedirs fails
+
+        self.assertTrue(os.path.isdir(plugin_data.current_dir()))
+        self.assertNotIn(blocker, plugin_data.current_dir())
+
+    def test_configure_falls_back_to_temp_when_plugin_dir_also_fails(self):
+        blocker = os.path.join(self.tmp, "afile")
+        open(blocker, "w").close()
+        real_makedirs = os.makedirs
+
+        def picky(path, *a, **kw):
+            if path.startswith(self.tmp) or os.path.basename(path) == "data":
+                raise PermissionError("read-only")
+            return real_makedirs(path, *a, **kw)
+
+        with patch("plugin_data.os.makedirs", side_effect=picky):
+            plugin_data.configure({"Dir": blocker})
+
+        self.assertTrue(plugin_data.current_dir().startswith(tempfile.gettempdir()))
+
+    def test_main_search_still_replies_when_data_dir_not_creatable(self):
+        import io
+        import json
+        blocker = os.path.join(self.tmp, "afile")
+        open(blocker, "w").close()
+        stdin = io.StringIO(json.dumps({"args": {"mode": "search", "tag_name": "x"},
+                                        "server_connection": {"Dir": blocker}}))
+        out = io.StringIO()
+        with patch("sys.stdin", stdin), patch("sys.stdout", out):
+            tag_manager.main()
+
+        self.assertIsInstance(json.loads(out.getvalue().strip().splitlines()[-1]), dict)
+
     def test_cache_filename_windows_safe(self):
         name = os.path.basename(tag_manager.get_cache_file_path("https://stashdb.org:443/graphql"))
         for ch in (":", "\\", "/"):

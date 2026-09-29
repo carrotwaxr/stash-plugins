@@ -5,6 +5,9 @@ updates (which replace the plugin dir) don't wipe it.
 """
 
 import os
+import tempfile
+
+import log
 
 PLUGIN_ID = "tagManager"
 
@@ -23,9 +26,28 @@ def data_dir(server_connection=None):
 
 
 def configure(server_connection):
-    """Remember the data dir for this process."""
+    """Remember the data dir for this process. Never raises.
+
+    If <Stash config dir>/plugin_data can't be created (read-only mount,
+    permissions), falls back to the plugin dir's data folder, then to a temp dir.
+    """
     global _current_dir
-    _current_dir = data_dir(server_connection)
+    try:
+        _current_dir = data_dir(server_connection)
+        return
+    except OSError as e:
+        log.LogWarning(f"Could not create the plugin data folder ({e}); using the plugin folder instead")
+    try:
+        _current_dir = data_dir(None)
+        return
+    except OSError as e:
+        log.LogWarning(f"Could not create the plugin folder's data folder ({e}); using a temp folder")
+    path = os.path.join(tempfile.gettempdir(), PLUGIN_ID)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        path = tempfile.gettempdir()
+    _current_dir = path
 
 
 def current_dir():
