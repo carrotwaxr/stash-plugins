@@ -185,22 +185,52 @@
   /**
    * Format date for display
    */
+  const PARTIAL_DATE = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/;
+
+  /**
+   * Parse a stash-box date ("YYYY", "YYYY-MM" or "YYYY-MM-DD") into
+   * { year, month, day } (month/day null when absent), or null when missing,
+   * malformed or impossible. Built from the parts, never via Date(string).
+   */
+  function parsePartialDate(value) {
+    if (typeof value !== "string") return null;
+    const m = PARTIAL_DATE.exec(value.trim().slice(0, 10));
+    if (!m) return null;
+    const year = Number(m[1]);
+    const month = m[2] ? Number(m[2]) : null;
+    const day = m[3] ? Number(m[3]) : null;
+    if (month !== null && (month < 1 || month > 12)) return null;
+    if (day !== null && (day < 1 || day > new Date(year, month, 0).getDate())) return null;
+    return { year, month, day };
+  }
+
+  /**
+   * Format a stash-box date for display: "2024", "May 2024" or "May 3, 2024".
+   * A malformed date is shown as-is.
+   */
   function formatDate(dateStr) {
     if (!dateStr) return "";
-    try {
-      // Parse as local date components to avoid timezone shift
-      // new Date("2025-12-07") is interpreted as UTC midnight, which displays
-      // as the previous day for users west of UTC
-      const [year, month, day] = dateStr.split("-").map(Number);
-      const date = new Date(year, month - 1, day);
-      return date.toLocaleDateString(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      });
-    } catch {
-      return dateStr;
+    const p = parsePartialDate(dateStr);
+    if (!p) return String(dateStr);
+    if (p.month === null) return String(p.year);
+    const date = new Date(p.year, p.month - 1, p.day || 1);
+    if (p.day === null) {
+      return date.toLocaleDateString(undefined, { year: "numeric", month: "long" });
     }
+    return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+
+  /**
+   * Sort date for a result, as Python's _sort_date: [end-of-period day number, precision].
+   * A partial date counts as the last day of its period; missing or malformed is [0, 0].
+   */
+  function sortDate(value) {
+    const p = parsePartialDate(value);
+    if (!p) return [0, 0];
+    const month = p.month === null ? 12 : p.month;
+    const day = p.day === null ? new Date(p.year, month, 0).getDate() : p.day;
+    const precision = 1 + (p.month !== null) + (p.day !== null);
+    return [Date.UTC(p.year, month - 1, day) / 86400000, precision];
   }
 
   /**
@@ -371,6 +401,10 @@
 
     if (scene.matches_studio) {
       parts.push("Studio");
+    }
+
+    if (scene.matches_date) {
+      parts.push("Date");
     }
 
     if (scene.matching_performers > 0) {
@@ -639,7 +673,7 @@
 
     // Click card to view on the stash-box (not select)
     card.onclick = () => {
-      window.open(`${stashdbUrl}/scenes/${scene.stash_id}`, "_blank");
+      window.open(`${stashdbUrl}/scenes/${scene.stash_id}`, "_blank", "noopener,noreferrer");
     };
 
     return card;
@@ -772,27 +806,20 @@
     // Convert back to array and sort
     const merged = Array.from(resultMap.values());
 
-    // Sort: not in local stash first, then by score desc, then by duration_score desc, then by date
-    merged.sort((a, b) => {
-      // In stash last
-      if (a.in_local_stash !== b.in_local_stash) {
-        return a.in_local_stash ? 1 : -1;
+    // Same key as Python's result_sort_key: not in local stash first, then score,
+    // duration score and end-of-period date (more precise first), all descending.
+    const key = (r) => {
+      const [ordinal, precision] = sortDate(r.release_date);
+      return [r.in_local_stash ? 1 : 0, -r.score, -(r.duration_score ?? 0.5), -ordinal, -precision];
+    };
+    const keyed = merged.map((r) => [key(r), r]);
+    keyed.sort((a, b) => {
+      for (let i = 0; i < a[0].length; i++) {
+        if (a[0][i] !== b[0][i]) return a[0][i] < b[0][i] ? -1 : 1;
       }
-      // Higher score first
-      if (a.score !== b.score) {
-        return b.score - a.score;
-      }
-      // Higher duration score first
-      const aDur = a.duration_score || 0.5;
-      const bDur = b.duration_score || 0.5;
-      if (aDur !== bDur) {
-        return bDur - aDur;
-      }
-      // Newer date first
-      const aDate = a.release_date || "";
-      const bDate = b.release_date || "";
-      return bDate.localeCompare(aDate);
+      return 0;
     });
+    merged.splice(0, merged.length, ...keyed.map((k) => k[1]));
 
     return merged;
   }
