@@ -19,7 +19,7 @@ For detailed usage instructions, see the [User Guide](USERGUIDE.md).
 
 - Stash v0.28+ (v0.30+ recommended for full `stash_ids` support)
 - At least one stash-box endpoint configured in Stash (Settings → Metadata Providers → Stash-Box Endpoints)
-- Python 3.8+ with required packages (see Installation)
+- Python 3.9+ (no packages required; `thefuzz` and `python-Levenshtein` are optional, see Installation)
 
 ## Installation
 
@@ -39,9 +39,9 @@ For detailed usage instructions, see the [User Guide](USERGUIDE.md).
    - **macOS**: `~/.stash/plugins/`
    - **Linux**: `~/.stash/plugins/`
 
-### Step 2: Install Python Dependencies
+### Step 2: Install Optional Python Packages
 
-Tag Manager requires Python packages for fuzzy string matching. Open a terminal/command prompt and run:
+Tag Manager needs no Python packages to run, and Scene Tag Sync needs nothing extra. `thefuzz` and `python-Levenshtein` are optional: they only improve fuzzy tag matching. Without them Tag Manager falls back to basic matching. To install them, open a terminal/command prompt and run:
 
 **Windows (Command Prompt or PowerShell):**
 ```cmd
