@@ -15,6 +15,8 @@
   let phase1SearchAttrs = null;
   let currentEndpoint = null; // endpoint the open modal was searched against
   let requestToken = 0; // bumped by every Match click; late responses from older searches are dropped
+  let currentBoxName = null; // display name of the stash-box the open modal searched
+  const boxLabel = () => currentBoxName || "StashDB"; // fallback only until a response names the box
   let searchInfo = null; // notices from the search responses: warnings, partial, truncated, error
   const REQUEST_TIMEOUT_MS = 120000;
 
@@ -394,7 +396,7 @@
     const performers = attrs.performers || [];
     const studio = attrs.studio;
 
-    let searchDesc = "Search StashDB for all scenes";
+    let searchDesc = `Search ${escapeHtml(boxLabel())} for all scenes`;
     if (performers.length > 0 && studio) {
       searchDesc += ` from <strong>${escapeHtml(studio)}</strong> featuring <strong>${escapeHtml(performers.slice(0, 2).join(", "))}${performers.length > 2 ? "..." : ""}</strong>`;
     } else if (studio) {
@@ -493,9 +495,9 @@
       const placeholder = document.createElement("div");
       placeholder.className = "sm-placeholder";
       placeholder.innerHTML = `
-        <div>No matching scenes found on StashDB.</div>
+        <div>No matching scenes found on ${escapeHtml(boxLabel())}.</div>
         <div style="font-size: 14px; color: #666; margin-top: 8px;">
-          Try linking more performers or the studio to StashDB first.
+          Try linking more performers or the studio to ${escapeHtml(boxLabel())} first.
         </div>
       `;
       container.appendChild(placeholder);
@@ -627,7 +629,7 @@
     selectBtn.textContent = "Select This Match";
     selectBtn.onclick = (e) => {
       e.stopPropagation();
-      handleSelectMatch(scene);
+      handleSelectMatch(currentSceneId, scene.stash_id);
     };
     actions.appendChild(selectBtn);
 
@@ -635,7 +637,7 @@
     card.appendChild(info);
     card.appendChild(actions);
 
-    // Click card to view on StashDB (not select)
+    // Click card to view on the stash-box (not select)
     card.onclick = () => {
       window.open(`${stashdbUrl}/scenes/${scene.stash_id}`, "_blank");
     };
@@ -644,71 +646,56 @@
   }
 
   /**
-   * Handle selecting a match - inject into Tagger search and trigger
+   * Show a short-lived message over the page (the modal is already closed by then).
    */
-  function handleSelectMatch(scene) {
+  function showToast(message) {
+    const el = document.createElement("div");
+    el.className = "sm-toast";
+    el.setAttribute("role", "alert");
+    el.style.cssText = "position:fixed;bottom:24px;right:24px;z-index:10001;background:#7a1f1f;color:#fff;padding:12px 16px;border-radius:6px;max-width:360px;";
+    el.textContent = message;
+    document.body.appendChild(el);
+    setTimeout(() => { if (el.remove) el.remove(); }, 6000);
+    return el;
+  }
+
+  /**
+   * Hand the chosen match to the Tagger: put its UUID in the row's search box and run the search.
+   * The row is looked up again by scene link, since React may have replaced it since the click.
+   */
+  function handleSelectMatch(sceneId, stashId) {
     removeModal();
 
-    if (!currentSceneElement) {
-      console.error("[SceneMatcher] No scene element reference");
+    const link = document.querySelector(`a[href*="/scenes/${sceneId}"]`);
+    const row = link && link.closest(".search-item");
+    if (!row) {
+      console.error("[SceneMatcher] Could not find the Tagger row for scene", sceneId);
+      showToast("Could not find this scene in the Tagger. Copy the ID and paste it into the search box: " + stashId);
       return;
     }
-
-    // Find the search input in the scene's row
-    const searchInput = currentSceneElement.querySelector('input.text-input, input[type="text"]');
-
+    const searchInput = row.querySelector("input.text-input");
     if (!searchInput) {
       console.error("[SceneMatcher] Could not find search input");
-      alert("Could not find the search input field. Please try again.");
+      showToast("Could not find the Tagger's search box for this scene. Search for this ID instead: " + stashId);
       return;
     }
 
-    // Set the value using React-compatible method
-    // React tracks input values via the native value setter, so we need to
-    // use Object.getOwnPropertyDescriptor to get the native setter
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype,
-      "value"
-    ).set;
+    // React tracks controlled inputs through the native value setter.
+    const proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+    const desc = proto && Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && desc.set) desc.set.call(searchInput, stashId);
+    else searchInput.value = stashId;
+    searchInput.dispatchEvent(new Event("input", { bubbles: true }));
 
-    // Call the native setter with the input element as context
-    nativeInputValueSetter.call(searchInput, scene.stash_id);
-
-    // Dispatch input event - this is what React listens to for controlled inputs
-    const inputEvent = new Event("input", { bubbles: true });
-    searchInput.dispatchEvent(inputEvent);
-
-    console.log("[SceneMatcher] Set search value to:", scene.stash_id);
-
-    // Find and click the Search button
-    // Look for button with "Search" text or the OperationButton
-    const buttons = currentSceneElement.querySelectorAll("button");
-    let foundSearchBtn = false;
-
-    for (const btn of buttons) {
-      const text = btn.textContent.trim().toLowerCase();
-      if (text === "search" || text.includes("search")) {
-        // Don't click our own button or the fragment button
-        if (!btn.classList.contains("sm-match-button") && !text.includes("fragment")) {
-          btn.click();
-          foundSearchBtn = true;
-          console.log("[SceneMatcher] Triggered search with UUID:", scene.stash_id);
-          break;
-        }
-      }
-    }
-
-    if (!foundSearchBtn) {
-      // Try pressing Enter on the input
-      const enterEvent = new KeyboardEvent("keydown", {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-      });
-      searchInput.dispatchEvent(enterEvent);
-      console.log("[SceneMatcher] Triggered search via Enter key");
+    // Click the row's own Search button; if it is unavailable, press Enter (Stash listens for keypress).
+    const searchBtn = Array.from(row.querySelectorAll(".input-group-append button"))
+      .find((b) => !b.classList.contains("sm-match-button"));
+    if (searchBtn && !searchBtn.disabled) {
+      searchBtn.click();
+    } else {
+      searchInput.dispatchEvent(new KeyboardEvent("keypress", {
+        key: "Enter", code: "Enter", keyCode: 13, charCode: 13, which: 13, bubbles: true,
+      }));
     }
   }
 
@@ -737,7 +724,7 @@
       container.innerHTML = `
         <div class="sm-placeholder">
           <div class="sm-spinner"></div>
-          <div>Searching StashDB for matching scenes...</div>
+          <div>Searching ${escapeHtml(boxLabel())} for matching scenes...</div>
         </div>
       `;
     }
@@ -870,11 +857,12 @@
    * Handle the match button click - Phase 1 only, Phase 2 is user-initiated.
    * Each click takes a new request token; responses from older clicks are ignored.
    */
-  async function handleMatchClick(sceneId, sceneElement, endpoint) {
+  async function handleMatchClick(sceneId, sceneElement, endpoint, boxName = null) {
     const token = ++requestToken;
     if (endpoint === undefined) endpoint = await effectiveEndpoint();
     if (token !== requestToken) return;
     currentEndpoint = endpoint || null;
+    currentBoxName = boxName || null;
 
     currentSceneId = sceneId;
     currentSceneElement = sceneElement;
@@ -888,7 +876,7 @@
     createModal();
     showLoading();
     setStatus("Searching...", "loading");
-    const retry = () => handleMatchClick(sceneId, sceneElement, endpoint);
+    const retry = () => handleMatchClick(sceneId, sceneElement, endpoint, boxName);
 
     try {
       // Phase 1: Fast text searches
@@ -911,6 +899,7 @@
       }
 
       matchResults = phase1Result.results || [];
+      if (phase1Result.endpoint_name) currentBoxName = phase1Result.endpoint_name;
       stashdbUrl = phase1Result.stashdb_url || "https://stashdb.org";
       phase1SearchAttrs = phase1Result.search_attributes;
 
@@ -1080,7 +1069,7 @@
       e.preventDefault();
       e.stopPropagation();
       // Re-read the selection at click time; fall back to what the button was built for.
-      effectiveEndpoint().then((ep) => handleMatchClick(sceneId, sceneElement, ep || endpoint || null));
+      effectiveEndpoint().then((ep) => handleMatchClick(sceneId, sceneElement, ep || endpoint || null, boxName));
     };
     return btn;
   }
@@ -1122,7 +1111,7 @@
       select.addEventListener("change", () => { syncMatchButtons(); });
     }
 
-    const rows = Array.from(document.querySelectorAll(".search-item, .tagger-scene"));
+    const rows = Array.from(document.querySelectorAll(".search-item"));
     if (isScraperSource()) {
       for (const row of rows) {
         const btn = row.querySelector(".sm-match-button");
@@ -1178,32 +1167,16 @@
     const path = window.location.pathname;
     const search = window.location.search;
 
-    // Must be on scenes page
-    if (!path.includes("/scenes")) {
+    // Must be on the scenes route
+    if (!/\/scenes(\/|$)/.test(path)) {
       return false;
     }
 
-    // Check URL for tagger display mode (disp=3)
-    if (search.includes("disp=3")) {
+    // Tagger display mode, or the Tagger's own elements once rendered
+    if (search.includes("disp=3") || search.includes("c=tagger")) {
       return true;
     }
-
-    // Legacy check: c=tagger (older Stash versions)
-    if (search.includes("c=tagger")) {
-      return true;
-    }
-
-    // Single scene tagger: /scenes/123 with tagger container
-    if (path.match(/\/scenes\/\d+/) && document.querySelector(".tagger-container")) {
-      return true;
-    }
-
-    // Fallback: check for tagger container in DOM
-    if (document.querySelector(".tagger-container")) {
-      return true;
-    }
-
-    return false;
+    return !!(document.querySelector("select#scraper") || document.querySelector(".search-item"));
   }
 
   /**
@@ -1218,7 +1191,7 @@
     function check() {
       if (mine !== pollToken || !isTaggerPage()) return;
       attempts++;
-      const sceneItems = document.querySelectorAll(".search-item, .tagger-scene");
+      const sceneItems = document.querySelectorAll(".search-item");
 
       if (sceneItems.length > 0) {
         syncMatchButtons();

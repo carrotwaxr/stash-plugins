@@ -225,7 +225,10 @@ test("Select after A-then-B uses B's row", async () => {
   await b;
   sm.gates.fastA.resolve(out({ results: [scene("a1")] }));
   await a;
-  sm.exports.handleSelectMatch(sm.getState().matchResults[0]);
+  const st = sm.getState();
+  const prevQuery = sm.document.querySelector;
+  sm.document.querySelector = (sel) => (sel.includes('/scenes/B') ? { closest: () => rowB } : prevQuery(sel));
+  sm.exports.handleSelectMatch(st.currentSceneId, st.matchResults[0].stash_id);
   assert.strictEqual(typed, "b1");
 });
 
