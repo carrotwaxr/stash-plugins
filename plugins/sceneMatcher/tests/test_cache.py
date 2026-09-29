@@ -53,9 +53,28 @@ class TestLocalIds(CacheBase):
             ids = scene_matcher.local_stash_ids(EP)
         self.assertEqual(ids, {"a", "b"})
         query, variables = g.call_args[0]
-        self.assertEqual(variables["scene_filter"], {
-            "stash_id_endpoint": {"endpoint": EP, "modifier": "NOT_NULL"}})
+        # No endpoint in the filter: Stash would compare it exactly (SQL endpoint = '<E>')
+        self.assertEqual(variables["scene_filter"], {"stash_id_endpoint": {"modifier": "NOT_NULL"}})
         self.assertEqual(variables["filter"], {"per_page": 1000, "page": 1})
+
+    def test_ids_saved_under_a_variant_endpoint_are_found(self):
+        """Stash filters stash_id_endpoint with SQL `endpoint = '<E>'`; IDs saved under
+        "https://stashdb.org/graphql/" or another case must still count as In Stash."""
+        library = [
+            ("1", EP, "exact"),
+            ("2", EP + "/", "slash"),
+            ("3", "HTTPS://StashDB.org/graphql", "case"),
+            ("4", "https://theporndb.net/graphql", "other-box"),
+        ]
+
+        def fake_stash(query, variables):
+            crit = variables["scene_filter"]["stash_id_endpoint"]
+            want = crit.get("endpoint")
+            scenes = [{"id": sid, "stash_ids": [{"endpoint": e, "stash_id": x}]}
+                      for sid, e, x in library if want is None or e == want]
+            return {"findScenes": {"count": len(scenes), "scenes": scenes}}
+        with mock.patch.object(scene_matcher, "stash_graphql", side_effect=fake_stash):
+            self.assertEqual(scene_matcher.local_stash_ids(EP), {"exact", "slash", "case"})
 
     def test_other_endpoint_ids_excluded_and_normalized(self):
         with mock.patch.object(scene_matcher, "stash_graphql") as g:

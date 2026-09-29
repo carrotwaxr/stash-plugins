@@ -268,7 +268,7 @@ def _write_cache(path, ids):
 
 def local_stash_ids(endpoint):
     """Stash IDs of local scenes linked to `endpoint` (the box's endpoint as configured
-    in Stash). Cached in the data dir for LOCAL_IDS_TTL seconds."""
+    in Stash), compared normalized. Cached in the data dir for LOCAL_IDS_TTL seconds."""
     path = _cache_path(endpoint)
     cached = _read_cache(path)
     if cached is not None:
@@ -293,8 +293,11 @@ def local_stash_ids(endpoint):
     ids = set()
     page = 1
     while True:
+        # Every scene with any stash ID. Stash compares a filter endpoint exactly (SQL
+        # endpoint = '<E>'), which misses IDs saved under a variant ("/graphql/", other
+        # case), so the endpoint is matched here, normalized.
         data = stash_graphql(query, {
-            "scene_filter": {"stash_id_endpoint": {"endpoint": endpoint, "modifier": "NOT_NULL"}},
+            "scene_filter": {"stash_id_endpoint": {"modifier": "NOT_NULL"}},
             "filter": {"per_page": LOCAL_IDS_PAGE_SIZE, "page": page},
         })
         if not data or not data.get("findScenes"):
