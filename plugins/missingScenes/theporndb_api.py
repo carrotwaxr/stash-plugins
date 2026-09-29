@@ -28,6 +28,9 @@ SSL_CONTEXT = stashbox_api.SSL_CONTEXT
 # TPDB REST API base URL
 TPDB_API_BASE = "https://api.theporndb.net"
 
+# Browse makes one request per favorite performer/studio; this caps them per page
+MAX_BROWSE_QUERIES = 10
+
 # Cache: TPDB site UUID → numeric site_id (avoids repeated lookups)
 _site_id_cache: dict[str, int] = {}
 
@@ -40,6 +43,15 @@ def is_theporndb(endpoint_url: str) -> bool:
 # ============================================================================
 # REST Request with Retry
 # ============================================================================
+
+def _retry_after(error):
+    """Seconds from a Retry-After header, or None."""
+    try:
+        value = float(error.headers.get("Retry-After"))
+        return value if value >= 0 else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
 
 def rest_request(api_key, path, params=None, plugin_settings=None,
                  operation_name=None):
@@ -54,7 +66,11 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
         operation_name: Human-readable name for logging
 
     Returns:
-        Parsed JSON response dict, or None on failure
+        Parsed JSON response, or None on failure
+
+    Raises:
+        StashBoxAPIError: on 401/403 (auth) and on 429 after the retries, so the
+            caller can say which it was.
     """
     max_retries = stashbox_api.get_config(plugin_settings, "max_retries")
     initial_delay = stashbox_api.get_config(plugin_settings, "initial_retry_delay")
@@ -98,7 +114,9 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
                     continue
                 else:
                     log.LogError("TPDB rate limited (429) - max retries exceeded")
-                    return None
+                    raise stashbox_api.StashBoxAPIError(
+                        "HTTP 429: rate limited", status_code=429, retryable=True,
+                        retry_after=_retry_after(e))
 
             if status_code in stashbox_api.RETRYABLE_STATUS_CODES and attempt < max_retries:
                 log.LogWarning(
@@ -110,6 +128,10 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
                 continue
 
             log.LogError(f"TPDB HTTP error {status_code}: {e.reason}")
+            if status_code in stashbox_api.AUTH_STATUS_CODES:
+                raise stashbox_api.StashBoxAPIError(
+                    f"HTTP {status_code}: {e.reason} (check the ThePornDB API key)",
+                    status_code=status_code, auth=True)
             return None
 
         except urllib.error.URLError as e:
@@ -144,6 +166,47 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
 # Scene Transformer: REST → GraphQL format
 # ============================================================================
 
+def _name_of(value):
+    """A name string from a string or an object with a name, else None."""
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        name = value.get("name")
+        return name if isinstance(name, str) and name else None
+    return None
+
+
+def _image(url, poster=None):
+    poster = poster if isinstance(poster, dict) else {}
+    return {"id": poster.get("id"), "url": url,
+            "width": poster.get("width") or 0, "height": poster.get("height") or 0}
+
+
+def _transform_images(rest_scene):
+    """Images from posters: a string, a list of strings/objects, or a dict of size→url.
+    Falls back to the scalar image fields."""
+    posters = rest_scene.get("posters")
+    images = []
+    if isinstance(posters, str):
+        posters = [posters]
+    if isinstance(posters, dict):
+        # {"full": "url", "large": "url", ...}: one thumbnail is enough
+        images = [_image(u) for u in posters.values() if isinstance(u, str) and u][:1]
+    elif isinstance(posters, list):
+        for poster in posters:
+            if isinstance(poster, str) and poster:
+                images.append(_image(poster))
+            elif isinstance(poster, dict) and isinstance(poster.get("url"), str) and poster["url"]:
+                images.append(_image(poster["url"], poster))
+    if not images:
+        for key in ("poster", "image", "background", "posters_url"):
+            value = rest_scene.get(key)
+            if isinstance(value, str) and value:
+                images.append(_image(value))
+                break
+    return images
+
+
 def transform_scene(rest_scene: dict) -> dict:
     """
     Transform a TPDB REST API scene into the GraphQL-shaped dict
@@ -173,47 +236,42 @@ def transform_scene(rest_scene: dict) -> dict:
         "duration": rest_scene.get("duration"),
     }
 
-    # Director: first entry from directors array
-    directors = rest_scene.get("directors") or []
-    scene["director"] = directors[0] if directors else None
+    # Director: first entry from directors (objects, strings, or one string)
+    directors = rest_scene.get("directors")
+    if isinstance(directors, (str, dict)):
+        directors = [directors]
+    scene["director"] = None
+    for director in directors if isinstance(directors, list) else []:
+        name = _name_of(director)
+        if name:
+            scene["director"] = name
+            break
 
-    # Studio: from site object
+    # Studio: from site object (or a bare name string)
     site = rest_scene.get("site")
-    if site:
-        scene["studio"] = {
-            "id": site.get("uuid"),
-            "name": site.get("name"),
-        }
+    if isinstance(site, dict):
+        scene["studio"] = {"id": site.get("uuid"), "name": site.get("name")}
+    elif isinstance(site, str) and site:
+        scene["studio"] = {"id": None, "name": site}
     else:
         scene["studio"] = None
 
-    # Images: from posters (can be a list of objects or a dict of size→url)
-    posters = rest_scene.get("posters") or []
-    if isinstance(posters, dict):
-        # Dict format: {"full": "url", "large": "url", ...} — take the first available
-        scene["images"] = [
-            {"id": None, "url": url, "width": 0, "height": 0}
-            for url in posters.values()
-            if isinstance(url, str) and url
-        ][:1]  # Just need one thumbnail
-    else:
-        scene["images"] = [
-            {
-                "id": poster.get("id"),
-                "url": poster.get("url"),
-                "width": poster.get("width", 0),
-                "height": poster.get("height", 0),
-            }
-            for poster in posters
-            if poster.get("url")
-        ]
+    scene["images"] = _transform_images(rest_scene)
 
     # Performers: nest under performer key to match GraphQL shape
-    rest_performers = rest_scene.get("performers") or []
+    rest_performers = rest_scene.get("performers")
     scene["performers"] = []
-    for perf in rest_performers:
+    for perf in rest_performers if isinstance(rest_performers, list) else []:
+        if isinstance(perf, str):
+            perf = {"name": perf}
+        if not isinstance(perf, dict):
+            continue
         # TPDB nests the canonical performer under "parent"
-        parent = perf.get("parent") or perf
+        parent = perf.get("parent")
+        if isinstance(parent, str) and parent:
+            parent = {"name": parent}
+        if not isinstance(parent, dict) or not parent:
+            parent = perf
         scene["performers"].append({
             "performer": {
                 "id": parent.get("id"),
@@ -224,12 +282,14 @@ def transform_scene(rest_scene: dict) -> dict:
             "as": perf.get("as"),
         })
 
-    # Tags: uuid→id, name stays
-    rest_tags = rest_scene.get("tags") or []
-    scene["tags"] = [
-        {"id": tag.get("uuid") or tag.get("id"), "name": tag.get("name")}
-        for tag in rest_tags
-    ]
+    # Tags: uuid→id, name stays; bare strings are names
+    rest_tags = rest_scene.get("tags")
+    scene["tags"] = []
+    for tag in rest_tags if isinstance(rest_tags, list) else []:
+        if isinstance(tag, str) and tag:
+            scene["tags"].append({"id": None, "name": tag})
+        elif isinstance(tag, dict):
+            scene["tags"].append({"id": tag.get("uuid") or tag.get("id"), "name": tag.get("name")})
 
     # URLs: single url string → urls array
     url = rest_scene.get("url")
@@ -264,7 +324,7 @@ def resolve_site_id(api_key, site_uuid, plugin_settings=None):
         operation_name=f"resolve site {site_uuid}"
     )
 
-    if not data or "data" not in data:
+    if not isinstance(data, dict) or not isinstance(data.get("data"), dict):
         log.LogWarning(f"TPDB: Could not resolve site UUID {site_uuid}")
         return None
 
@@ -334,32 +394,71 @@ def query_scenes_browse(api_key, page=1, per_page=100, sort="DATE",
         plugin_settings: Plugin configuration
 
     Returns:
-        dict with scenes, count, page, has_more
+        dict with scenes, count, page, has_more, favorites_limited (more favorites
+        than MAX_BROWSE_QUERIES, so the extra ones were left out); None on failure.
+        Raises StashBoxAPIError on an auth or rate-limit failure.
     """
-    params = {
-        "page": page,
-        "limit": per_page,
-    }
+    # The scenes endpoint takes one performer and one site_id per request. Its
+    # performers[]/tags[] parameters are keyed by numeric TPDB ids, which Stash's
+    # UUID favorites don't have, and there is no array form of site_id. So each
+    # favorite gets its own request (sorted, so the order is stable) and the results
+    # are merged. Excluded tags are not sent: TPDB's tag taxonomy differs.
+    performers = sorted(performer_ids) if performer_ids else [None]
+    site_ids = []
+    for studio_uuid in sorted(studio_ids) if studio_ids else []:
+        site_id = resolve_site_id(api_key, studio_uuid, plugin_settings)
+        if site_id:
+            site_ids.append(site_id)
+    if studio_ids and not site_ids:
+        return {"scenes": [], "count": 0, "page": page, "has_more": False,
+                "favorites_limited": False}
+    sites = site_ids or [None]
 
-    # Map sort fields
+    combos = [(p, s) for p in performers for s in sites]
+    favorites_limited = len(combos) > MAX_BROWSE_QUERIES
+    combos = combos[:MAX_BROWSE_QUERIES]
+
     sort_field, sort_order = _map_sort(sort, direction)
-    if sort_field:
-        params["sort"] = sort_field
-        params["sort_order"] = sort_order
-
-    # Apply filters
-    if performer_ids:
-        # TPDB only supports filtering by a single performer
-        params["performer"] = performer_ids[0]
-
-    if studio_ids:
-        # Resolve first studio UUID to numeric ID
-        site_id = resolve_site_id(api_key, studio_ids[0], plugin_settings)
+    merged, seen = [], set()
+    count, has_more = 0, False
+    for performer, site_id in combos:
+        params = {"page": page, "limit": per_page}
+        if sort_field:
+            params["sort"] = sort_field
+            params["sort_order"] = sort_order
+        if performer:
+            params["performer"] = performer
         if site_id:
             params["site_id"] = site_id
+        result = _fetch_scenes(api_key, "/scenes", params, page, per_page,
+                               plugin_settings, "browse scenes")
+        if result is None:
+            return None
+        count += result["count"]
+        has_more = has_more or result["has_more"]
+        for scene in result["scenes"]:
+            if scene.get("id") in seen:
+                continue
+            seen.add(scene.get("id"))
+            merged.append(scene)
 
-    return _fetch_scenes(api_key, "/scenes", params, page, per_page,
-                         plugin_settings, "browse scenes")
+    if len(combos) > 1:
+        merged = _sort_merged(merged, sort, direction)
+        count = max(count, len(merged))
+    return {"scenes": merged, "count": count, "page": page, "has_more": has_more,
+            "favorites_limited": favorites_limited}
+
+
+def _sort_merged(scenes, sort, direction):
+    """Order merged scenes by the requested sort (stable; other sorts keep request order)."""
+    field = {"DATE": "release_date", "TITLE": "title"}.get(sort)
+    if not field:
+        return scenes
+    reverse = direction != "ASC"
+    have = [s for s in scenes if s.get(field)]
+    lack = [s for s in scenes if not s.get(field)]
+    key = (lambda s: str(s[field]).lower()) if field == "title" else (lambda s: str(s[field]))
+    return sorted(have, key=key, reverse=reverse) + lack
 
 
 # ============================================================================
@@ -442,17 +541,33 @@ def _fetch_scenes(api_key, path, params, page, per_page, plugin_settings,
         operation_name=operation_name
     )
 
-    if not data:
+    if not isinstance(data, dict):
+        if data is not None:
+            log.LogWarning(f"TPDB {operation_name}: unexpected response of type {type(data).__name__}")
         return None
 
     # TPDB wraps results in a "data" key with pagination in "meta"
-    scenes_data = data.get("data", [])
-    meta = data.get("meta", {})
+    scenes_data = data.get("data")
+    if not isinstance(scenes_data, list):
+        scenes_data = []
+    meta = data.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
 
-    total = meta.get("total", 0)
-    last_page = meta.get("last_page", 1)
+    total = meta.get("total")
+    total = total if isinstance(total, int) and not isinstance(total, bool) else 0
+    last_page = meta.get("last_page")
+    last_page = last_page if isinstance(last_page, int) and not isinstance(last_page, bool) else 1
 
-    transformed = [transform_scene(s) for s in scenes_data]
+    transformed = []
+    for s in scenes_data:
+        scene_id = s.get("id") if isinstance(s, dict) else None
+        try:
+            if not isinstance(s, dict):
+                raise TypeError(f"expected an object, got {type(s).__name__}")
+            transformed.append(transform_scene(s))
+        except Exception as e:
+            log.LogWarning(f"TPDB {operation_name}: skipping scene {scene_id or '(no id)'}: {e}")
 
     log.LogDebug(
         f"TPDB {operation_name}: page {page}/{last_page}, "

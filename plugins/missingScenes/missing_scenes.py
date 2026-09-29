@@ -1723,7 +1723,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "filters_active": filters_active,
         "active_filters": active_filters,
         "active_filter_tag_ids": list(favorite_tag_ids) if favorite_tag_ids else [],
-        "excluded_tags_applied": len(excluded_tag_ids) > 0,
+        "excluded_tags_applied": len(excluded_tag_ids) > 0 and not theporndb_api.is_theporndb(stashdb_url),
         "cache_info": _get_cache_info(stashdb_url),
         **{key: result[key] for key in FETCH_FAILURE_KEYS if key in result},
     }
@@ -1732,12 +1732,12 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
 def format_scene(scene, stash_id):
     """Format a StashDB scene for the frontend."""
     # Get the best image (prefer landscape for thumbnails)
-    images = scene.get("images", [])
+    images = [i for i in (scene.get("images") or []) if isinstance(i, dict)]
     thumbnail = None
     if images:
         # Try to find a landscape image first
         for img in images:
-            if img.get("width", 0) > img.get("height", 0):
+            if (img.get("width") or 0) > (img.get("height") or 0):
                 thumbnail = img.get("url")
                 break
         if not thumbnail:
@@ -1745,8 +1745,10 @@ def format_scene(scene, stash_id):
 
     # Format performers
     performers = []
-    for perf in scene.get("performers", []):
-        p = perf.get("performer", {})
+    for perf in scene.get("performers") or []:
+        if not isinstance(perf, dict):
+            continue
+        p = perf.get("performer") or {}
         performers.append({
             "id": p.get("id"),
             "name": p.get("name"),
@@ -1905,9 +1907,14 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         "plugin_settings": plugin_settings,
     }
 
+    favorites_limited = []
+
     def fetch_page(page):
         if is_tpdb:
-            return theporndb_api.query_scenes_browse(stashdb_api_key, page=page, **query_args)
+            result = theporndb_api.query_scenes_browse(stashdb_api_key, page=page, **query_args)
+            if result and result.get("favorites_limited"):
+                favorites_limited.append(True)
+            return result
         return stashbox_api.query_scenes_browse(stashdb_url, stashdb_api_key, page=page, **query_args)
 
     def qualifies(scene):
@@ -1957,7 +1964,9 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         **({"whisparr_error": whisparr_error} if whisparr_error else {}),
         "filters_active": filters_active,
         "active_filter_tag_ids": list(tag_ids) if tag_ids else [],
-        "excluded_tags_applied": len(excluded_tag_ids) > 0,
+        # ThePornDB's tag taxonomy differs, so excluded tags are never sent to it
+        "excluded_tags_applied": len(excluded_tag_ids) > 0 and not is_tpdb,
+        **({"favorites_limited": bool(favorites_limited)} if is_tpdb else {}),
         "cache_info": _get_cache_info(stashdb_url),
         **{key: result[key] for key in FETCH_FAILURE_KEYS if key in result},
     }
