@@ -530,6 +530,7 @@
    * Show a toast notification
    */
   function showToast(message, type = 'info', duration = 3000) {
+    if (!pageContainer()) return; // toasts belong to the hierarchy page, never another one
     let container = document.querySelector('.sh-toast-container');
     if (!container) {
       container = document.createElement('div');
@@ -861,7 +862,7 @@
       pendingChanges = pendingChanges
         .filter(c => failedById.has(c.studioId))
         .map(c => ({ ...c, error: failedById.get(c.studioId).error }));
-      const reloaded = await reloadHierarchy();
+      const reloaded = await reloadHierarchy(onPage);
       if (!reloaded) {
         // No fresh data: the successes become the server state and the baseline
         hierarchyStudios = withParents(hierarchyStudios, running);
@@ -889,19 +890,18 @@
   }
 
   /**
-   * Refetch the studios and re-snapshot the baseline from them. Returns false
-   * when the fetch fails, leaving state untouched (the caller reports it).
+   * Refetch the studios and re-snapshot the baseline from them. Returns false,
+   * leaving state untouched, when the fetch fails (the caller reports it) or
+   * when `isPresent()` says the page is gone (it loads afresh when reopened).
    */
-  async function reloadHierarchy() {
-    const token = mountToken;
+  async function reloadHierarchy(isPresent = () => !!pageContainer()) {
+    if (!isPresent()) return false;
     try {
       const studios = await fetchAllStudiosWithHierarchy();
-      if (token !== mountToken) return false; // unmounted meanwhile: touch nothing
       hierarchyStudios = studios;
       originalParentMap = parentMapOf(studios);
       return true;
     } catch (e) {
-      if (token !== mountToken) return false;
       console.error('[studioManager] Failed to reload hierarchy:', e);
       return false;
     }

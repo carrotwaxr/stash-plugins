@@ -16,8 +16,8 @@ const test = (name, fn) => tests.push([name, fn]);
 /**
  * studios: [[id, parent]]. opts: gate (promise holding FindStudios, or function(callIndex)
  * returning one or null), gateUpdate (promise holding StudioUpdate, or function(input)
- * returning one or null), fail(input) (an error message fails that update), failFetch,
- * base, pathname, confirm. The server snapshot is taken when FindStudios is called.
+ * returning one or null), fail(input) (an error message fails that update), failFetch
+ * (or function(callIndex)), base, pathname, confirm. The server snapshot is taken when FindStudios is called.
  * `env.attached` is the container in the document: mount() attaches one, its cleanup
  * detaches it (React removes the element on unmount).
  */
@@ -28,10 +28,12 @@ function setup(studios, opts = {}) {
     base: opts.base, pathname: opts.pathname, confirm: opts.confirm,
     fetchResponses: {
       FindStudios: () => {
-        const r = opts.failFetch
+        const call = findCalls++;
+        const fails = typeof opts.failFetch === "function" ? opts.failFetch(call) : opts.failFetch;
+        const r = fails
           ? { errors: [{ message: "boom" }] }
           : { data: { findStudios: { studios: [...server].map(([id, p]) => studio(id, p)) } } };
-        const g = typeof opts.gate === "function" ? opts.gate(findCalls++) : opts.gate;
+        const g = typeof opts.gate === "function" ? opts.gate(call) : opts.gate;
         return g ? g.then(() => r) : r;
       },
       StudioUpdate: (body) => {
@@ -322,6 +324,32 @@ test("unmount during a save: no toast or panel, state still consistent", async (
   assert.strictEqual(sm.getState().pendingChanges.length, 0, "saved change is no longer pending");
   x.setParent("3", "2");
   assert.strictEqual(sm.getState().pendingChanges.length, 1, "lock released");
+});
+
+test("leaving mid-save: no reload, toast or render for the page that is gone", async () => {
+  let release;
+  const gateUpdate = new Promise((r) => { release = r; });
+  const env = setup([["1"], ["2"]], { gateUpdate, failFetch: (call) => call > 0 });
+  const { sm, x, container } = env;
+  const leave = mount(env);
+  await sm.settle();
+  x.setParent("1", "2");
+  const saving = x.savePendingChanges();
+  await sm.settle();
+  leave();
+  const html = container.innerHTML;
+  const kids = sm.document.body.children.length;
+  const finds = () => sm.fetchCalls.filter((c) => c.op === "FindStudios").length;
+  const before = finds();
+  release();
+  await saving;
+  await sm.settle();
+  assert.strictEqual(sm.document.body.children.length, kids, "no toast container on the other page");
+  assert.strictEqual(container.innerHTML, html, "no render");
+  assert.strictEqual(finds(), before, "no reload for a page that is gone");
+  assert.deepStrictEqual(pendingIds(sm), []);
+  assert.strictEqual(sm.getState().hierarchyStudios.find((s) => s.id === "1").parent_studio.id, "2",
+    "the saved parent is kept for the next visit");
 });
 
 test("returning to the page while a save runs keeps its failures, panel and leave guard", async () => {
