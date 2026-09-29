@@ -194,8 +194,8 @@ Common issues:
 ## Requirements
 
 - Stash v0.24.0 or later
-- Python 3.9+ (bundled with Stash)
-- `stashapp-tools>=0.2.59` (installed automatically)
+- Python 3.9+ (included in the official Stash Docker image)
+- `stashapp-tools>=0.2.59`. Stash doesn't install it for you; see [Python prerequisites](../../README.md#python-prerequisites).
 
 ## Development
 

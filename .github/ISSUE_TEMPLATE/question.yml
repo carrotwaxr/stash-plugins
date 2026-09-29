@@ -1,0 +1,23 @@
+name: Question
+description: Ask how a plugin works or how to set it up
+labels: [question]
+body:
+  - type: dropdown
+    id: plugin
+    attributes:
+      label: Plugin
+      options:
+        - mcMetadata
+        - Missing Scenes
+        - Performer Image Search
+        - Scene Matcher
+        - Studio Manager
+        - Tag Manager
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true

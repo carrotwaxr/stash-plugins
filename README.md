@@ -12,82 +12,105 @@ Add this repository as a plugin source in Stash:
 4. Click **Reload**
 5. Browse available plugins under "Carrot Waxxer"
 
+Stash shows each plugin's current version in that list. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
+
+## Python prerequisites
+
+Most of these plugins run a Python script, using the Python that Stash finds. Stash doesn't install Python packages for you.
+
+| Plugin | Python packages |
+|---|---|
+| mcMetadata | `stashapp-tools` |
+| Tag Manager | `thefuzz` and `python-Levenshtein` for fuzzy matching; `stashapp-tools` for the Sync Scene Tags task |
+| Missing Scenes, Scene Matcher, Performer Image Search | none (standard library only) |
+| Studio Manager | none (no Python) |
+
+To keep these packages separate from your system Python, create a virtual environment and point Stash at it:
+
+```bash
+python3 -m venv ~/.stash/venv
+~/.stash/venv/bin/pip install stashapp-tools thefuzz python-Levenshtein
+```
+
+Then set **Settings → System → Application Paths → Python executable path** to the venv's Python (for example `~/.stash/venv/bin/python`, or `venv\Scripts\python.exe` on Windows). In the official Docker image, run those commands inside the container and use a path under `/root/.stash` so the venv persists.
+
 ## Available Plugins
 
-### mcMetadata (v1.2.2)
+### mcMetadata
 
-Generate NFO metadata files for Jellyfin/Emby, organize/rename video files, and export performer images.
+Generate NFO metadata files for Jellyfin, Emby and Plex, organize and rename video files, and export performer images.
 
 **Features:**
-- NFO generation with scene metadata (title, performers, studio, tags, date)
+- NFO generation with scene metadata (title, performers, studio, tags, date, rating)
 - File organization with customizable path templates
-- Performer image export to media server People folders
+- Performer image export to your media server's People folder
+- Processing conditions: limit processing to Organized scenes, StashDB-linked scenes, required tags or path globs
 - Dry run mode for previewing changes
-- Bulk operations and per-scene hooks
+- Bulk task and a per-scene update hook
 
 [Documentation](plugins/mcMetadata/README.md)
 
-### Performer Image Search (v1.2.2)
+### Performer Image Search
 
-Search multiple image sources directly from performer pages and set images with one click.
+Search multiple image sources from a performer's page and set an image with one click.
 
 **Features:**
-- Search Babepedia, PornPics, FreeOnes, EliteBabes, Boobpedia, JavDatabase, and Bing
-- Preview images before setting
+- Sources: Babepedia, PornPics, FreeOnes, EliteBabes, Boobpedia, JavDatabase and DuckDuckGo, each of which can be turned off
+- Preview images, with keyboard navigation, before setting one
 - Filter by aspect ratio (portrait, landscape, square)
 - Customizable search suffix
 
-[Documentation](plugins/performerImageSearch/README.md)
+[Source](plugins/performerImageSearch/)
 
-### Missing Scenes (v1.2.0)
+### Missing Scenes
 
-Discover scenes from StashDB that you don't have in your local library, with optional Whisparr integration for automated downloading and cleanup.
+Discover scenes on StashDB (or another stash-box) that you don't have in your library, with optional Whisparr integration.
 
 **Features:**
-- Find missing scenes for any performer or studio linked to StashDB
-- Visual grid with thumbnails, titles, dates, and performer info
-- Direct links to view scenes on StashDB
-- Multi-endpoint support (StashDB, FansDB, etc.)
-- Whisparr integration with real-time status tracking (downloading, queued, stalled, etc.)
-- Auto-cleanup: Automatically remove scenes from Whisparr when tagged in Stash
-- Scan task: Trigger Stash scans for newly downloaded scenes
+- Missing scenes for any performer, studio or tag linked to a stash-box
+- A browse page of missing scenes across your library, filterable by favorite performers, studios and tags
+- Works with StashDB, FansDB, ThePornDB and other stash-box endpoints
+- Whisparr integration with live status (downloading, queued, stalled)
+- Auto-cleanup: remove scenes from Whisparr once they're tagged in Stash
+- Scan task for newly downloaded scenes
 
 [Documentation](plugins/missingScenes/README.md)
 
-### Scene Matcher (v1.0.0)
+### Scene Matcher
 
-Find StashDB matches for untagged scenes using known performer and studio associations. Adds a "Match" button to the Tagger UI.
+Find StashDB matches for untagged scenes using their linked performers and studio. Adds a "Match" button to the Tagger.
 
 **Features:**
-- Search StashDB for scenes by linked performers and/or studio
-- Results scored by relevance (matching performers + studio)
-- Unowned scenes prioritized over scenes already in your library
-- Seamless handoff to Stash's native Tagger for saving
+- Searches StashDB by the scene's title and its linked performers and studio
+- Results scored by title similarity, matching performers and studio, and how close the duration is
+- Scenes you don't own are listed first
+- Hands the chosen match to Stash's own Tagger for saving
 
 [Documentation](plugins/sceneMatcher/README.md)
 
-### Tag Manager (v1.0.0)
+### Tag Manager
 
-Match and sync local tags with StashDB tags. Bulk cleanup your tag library with smart matching.
+Match and sync local tags with stash-box tags, and clean up your tag library.
 
 **Features:**
-- Paginated list of unmatched tags with match status
-- Layered search: exact name, alias match, fuzzy matching, synonyms
-- One-click accept for high-confidence matches
+- Layered matching: exact name, alias, fuzzy and synonyms
 - Field-by-field merge dialog (name, description, aliases)
-- Manual search for edge cases
-- Links tags to StashDB via `stash_ids`
-- Tag Hierarchy view for browsing parent/child relationships
+- Browse stash-box tags by category and bulk import them, with in-app resolution when a name or alias is already taken
+- Tag hierarchy view with drag-and-drop parent/child editing
+- Sync Scene Tags task: copy tags from StashDB to your matched scenes
+- Tag blacklist to exclude tags from matching and sync
+- "Leave parent tags alone" setting for people who keep their own hierarchy
+- Multiple stash-box endpoints
 
 [Documentation](plugins/tagManager/README.md)
 
-### Studio Manager (v0.1.0)
+### Studio Manager
 
-Manage studio hierarchy with visual tree editing. View and edit parent-child studio relationships.
+Manage studio hierarchy with visual tree editing.
 
 **Features:**
-- Visual tree view of studio parent-child relationships
-- Drag and drop to set parent relationships
+- Tree view of studio parent/child relationships
+- Drag and drop to set a parent
 - Context menu for quick actions
 - Pending changes panel for reviewing edits before saving
 
@@ -110,4 +133,4 @@ To preview a build locally: `./build_site.sh /tmp/site`.
 
 ## License
 
-MIT License
+[MIT](LICENSE)
