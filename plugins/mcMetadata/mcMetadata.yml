@@ -1,7 +1,7 @@
 name: mcMetadata
 description: Generates NFO metadata files for Jellyfin/Emby/Plex, organizes/renames video files using customizable templates, and exports performer images to media server folders.
 url: https://github.com/carrotwaxr/stash-plugins/tree/main/plugins/mcMetadata
-version: 1.5.0
+version: 1.6.0
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
@@ -43,7 +43,7 @@ settings:
     type: STRING
   hookTriggerMode:
     displayName: Hook Trigger Mode (deprecated)
-    description: "DEPRECATED — use Organized Condition instead. Still honored for back-compat when Organized Condition is unset: 'on_organized' maps to require, 'always' maps to ignore."
+    description: "DEPRECATED. Use Organized Condition instead. Still honored for back-compat when Organized Condition is unset: 'on_organized' maps to require, 'always' maps to ignore."
     type: STRING
   enableRenamer:
     displayName: Enable File Renamer
