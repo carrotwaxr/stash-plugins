@@ -468,7 +468,15 @@
     for (const w of searchInfo.warnings) lines.push(escapeHtml(String(w)));
     if (searchInfo.partial) lines.push("Some pages failed to load, so these results may be incomplete.");
     if (searchInfo.truncated) {
-      lines.push(`Showing the top ${escapeHtml(String(searchInfo.shown))} of ${escapeHtml(String(searchInfo.total))} candidates.`);
+      const shown = escapeHtml(String(searchInfo.shown));
+      if (searchInfo.pageCapped && searchInfo.searched != null) {
+        // Only the newest scenes were fetched (queries sort by date), so say what was ranked
+        const has = Number(searchInfo.total) > Number(searchInfo.searched)
+          ? `the stash-box has ${escapeHtml(String(searchInfo.total))}` : "the stash-box has more";
+        lines.push(`Showing the top ${shown} of the newest ${escapeHtml(String(searchInfo.searched))} scenes searched (${has}).`);
+      } else {
+        lines.push(`Showing the top ${shown} of ${escapeHtml(String(searchInfo.total))} candidates.`);
+      }
     }
     if (searchInfo.error) {
       lines.push(escapeHtml(String(searchInfo.error)));
@@ -486,7 +494,12 @@
    * Fold a search response's notices into searchInfo.
    */
   function absorbNotices(result) {
-    if (!searchInfo) searchInfo = { warnings: [], partial: false, truncated: false, shown: 0, total: 0, error: null, authError: false };
+    if (!searchInfo) {
+      searchInfo = {
+        warnings: [], partial: false, truncated: false, shown: 0, total: 0, searched: null, pageCapped: false,
+        error: null, authError: false,
+      };
+    }
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
     for (const w of warnings) if (!searchInfo.warnings.includes(w)) searchInfo.warnings.push(w);
     if (result.partial) searchInfo.partial = true;
@@ -494,6 +507,8 @@
       searchInfo.truncated = true;
       searchInfo.shown = (result.results || []).length;
       searchInfo.total = result.total_candidates != null ? result.total_candidates : searchInfo.shown;
+      searchInfo.searched = result.searched_candidates != null ? result.searched_candidates : null;
+      searchInfo.pageCapped = !!result.page_capped;
     }
   }
 

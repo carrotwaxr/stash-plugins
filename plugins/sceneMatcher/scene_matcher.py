@@ -1306,13 +1306,10 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
     local_ids = _local_ids_or_warn(context["endpoint"], warnings)
 
     results = format_results(all_scenes, context, local_ids)  # sorted best first
-    candidates = len(results)
+    searched = len(results)  # every scene fetched and scored
     max_results = get_max_results(plugin_settings)
     results = results[:max_results]
-    cut = len(results) < candidates
-    if capped_totals:
-        # Page cap stopped paging: the server's count is the real number of candidates
-        candidates = max(candidates, max(capped_totals))
+    cut = len(results) < searched
 
     log.LogInfo(f"Phase 2: returning {len(results)} additional scenes from performer/studio queries")
 
@@ -1332,7 +1329,12 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
     }
     if cut or capped_totals:
         response["truncated"] = True
-        response["total_candidates"] = candidates
+        response["searched_candidates"] = searched
+        # The stash-box's own count when a page cap stopped paging (only the newest
+        # `searched` were fetched, as queries sort by date), else what was scored
+        response["total_candidates"] = max(capped_totals) if capped_totals else searched
+    if capped_totals:
+        response["page_capped"] = True
     if errors:
         response["partial"] = True
     if warnings:

@@ -211,7 +211,28 @@ class TestThoroughTruncation(MatchBase):
         out = scene_matcher.find_matches_thorough("1", {})
         self.assertTrue(out["truncated"])
         self.assertEqual(out["total_candidates"], 1234)
+        self.assertEqual(out["searched_candidates"], 2)
         self.assertEqual(out["total_results"], 2)
+
+    def test_page_cap_reports_what_was_searched(self):
+        # The studio has 10000 scenes; the page cap fetched the newest 2500
+        capped = stashbox_api.ScenesList([sc(str(i)) for i in range(2500)])
+        capped.total = 10000
+        capped.truncated = True
+        self._patch([([], None)], [([], None)], [(capped, None)])
+        out = scene_matcher.find_matches_thorough("1", {})
+        self.assertEqual(out["total_results"], 50)
+        self.assertTrue(out["truncated"])
+        self.assertTrue(out["page_capped"])
+        self.assertEqual(out["searched_candidates"], 2500)
+        self.assertEqual(out["total_candidates"], 10000)
+
+    def test_max_results_cut_only_is_not_page_capped(self):
+        self._patch([([sc(str(i)) for i in range(30)], None)], [([], None)], [([], None)])
+        out = scene_matcher.find_matches_thorough("1", {"maxResults": 10})
+        self.assertNotIn("page_capped", out)
+        self.assertEqual(out["searched_candidates"], 30)
+        self.assertEqual(out["total_candidates"], 30)
 
     def test_fallback_threshold_on_raw_count(self):
         # 10 raw results, all excluded as phase-1 ids: fallbacks must NOT run.

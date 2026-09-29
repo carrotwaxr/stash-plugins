@@ -332,6 +332,26 @@ test("truncated shows 'Showing the top N of M'", async () => {
   assert.ok(/Showing the top 2 of 250/.test(t), t);
 });
 
+test("a page cap says only the newest scenes were searched, not 'top N of <box total>'", async () => {
+  const sm = load({ fetchResponses: { RunPluginOperation: (b) => (b.variables.args.operation === "find_matches_fast"
+    ? out({ phase: 1, results: [], has_more: true })
+    : out({ phase: 2, results: Array.from({ length: 50 }, (_, i) => scene("c" + i)), truncated: true,
+      page_capped: true, searched_candidates: 2500, total_candidates: 10000 })) } });
+  await sm.exports.handleMatchClick("A", createElement("div"), STASHDB);
+  await sm.exports.handleDeepSearchClick();
+  await sm.settle();
+  const t = sm.text();
+  assert.ok(/Showing the top 50 of the newest 2500 scenes searched \(the stash-box has 10000\)/.test(t), t);
+  assert.ok(!/top 50 of 10000/.test(t), t);
+});
+
+test("a page cap with more searched than the capped query's count still says there are more", async () => {
+  const sm = await runPhase1({ phase: 1, results: [scene("t1")], truncated: true, page_capped: true,
+    searched_candidates: 1800, total_candidates: 1500 });
+  const t = sm.text();
+  assert.ok(/Showing the top 1 of the newest 1800 scenes searched \(the stash-box has more\)/.test(t), t);
+});
+
 test("phase 2 error keeps phase 1 results and lets the user retry", async () => {
   let n = 0;
   const sm = load({ fetchResponses: { RunPluginOperation: (b) => {
