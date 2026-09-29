@@ -322,19 +322,32 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
             # Handle rate limiting specially
             if status_code == 429:
                 retry_after = _parse_retry_after(e.headers.get("Retry-After") if e.headers else None)
-                wait = rate_limit_pause if retry_after is None else retry_after
                 if attempt >= max_retries:
                     log.LogError("Rate limited (429) - max retries exceeded")
                     raise StashBoxAPIError(
                         f"Rate limited by the stash-box after {max_retries} retries",
                         status_code=429
                     )
-                if wait > MAX_RETRY_AFTER or waited + wait > MAX_TOTAL_WAIT:
-                    log.LogError(f"Rate limited (429) on {label}: would need to wait {wait:.0f}s")
-                    raise StashBoxAPIError(
-                        f"Rate limited by the stash-box (asked to wait {wait:.0f}s); try again later",
-                        status_code=429
-                    )
+                if retry_after is None:
+                    # Our own pause (the setting) is cut to what this request may still
+                    # wait, never skipped. The 60 s limit is for a server's Retry-After.
+                    room = MAX_TOTAL_WAIT - waited
+                    if rate_limit_pause > 0 and room <= 0:
+                        log.LogError(f"Rate limited (429) on {label}: still limited after {waited:.0f}s")
+                        raise StashBoxAPIError(
+                            f"Rate limited by the stash-box (still limited after {waited:.0f}s); "
+                            f"try again later",
+                            status_code=429
+                        )
+                    wait = min(rate_limit_pause, room)
+                else:
+                    wait = retry_after
+                    if wait > MAX_RETRY_AFTER or waited + wait > MAX_TOTAL_WAIT:
+                        log.LogError(f"Rate limited (429) on {label}: would need to wait {wait:.0f}s")
+                        raise StashBoxAPIError(
+                            f"Rate limited by the stash-box (asked to wait {wait:.0f}s); try again later",
+                            status_code=429
+                        )
                 if not deadline.fits(wait):
                     raise out_of_time(wait)
                 log.LogWarning(

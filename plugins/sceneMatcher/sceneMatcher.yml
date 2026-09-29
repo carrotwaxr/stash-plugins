@@ -48,7 +48,7 @@ settings:
     type: NUMBER
   stashbox_rate_limit_pause:
     displayName: Rate Limit Pause (seconds)
-    description: Wait after a 429 response that has no Retry-After header. Default is 60.0. A Retry-After above 60 seconds is not waited for.
+    description: Wait after a 429 response that has no Retry-After header. Default is 60.0. A longer pause is cut so one request waits at most 90 seconds in all. A pause that would run past the search's 100 second budget stops the search, which then shows what it found. A Retry-After above 60 seconds is not waited for.
     type: NUMBER
   stashbox_per_page:
     displayName: Results Per Page

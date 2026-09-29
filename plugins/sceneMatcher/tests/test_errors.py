@@ -101,6 +101,30 @@ class TestRequestErrors(unittest.TestCase):
         self.assertEqual(s.call_count, 1)
         self.assertEqual(u.call_count, 2)
 
+    def test_pause_setting_over_60_is_clamped_not_skipped(self):
+        # Our own pause is cut to what one request may wait (90 s), never skipped;
+        # the 60 s limit is for a server's Retry-After
+        for pause, slept in ((75, 75), (200, 90)):
+            with self.subTest(pause=pause):
+                data, err, u, s = call([http_error(429), ok({"data": {"x": 1}})],
+                                       {"stashbox_rate_limit_pause": pause, "stashbox_max_retries": 3})
+                self.assertIsNone(err)
+                self.assertEqual(data, {"x": 1})
+                s.assert_called_once_with(slept)
+                self.assertEqual(u.call_count, 2)
+
+    def test_pause_zero_retries_at_once(self):
+        data, err, _, s = call([http_error(429), ok({"data": {"x": 1}})],
+                               {"stashbox_rate_limit_pause": 0, "stashbox_max_retries": 3})
+        self.assertIsNone(err)
+        self.assertEqual(data, {"x": 1})
+
+    def test_pause_clamped_to_what_the_request_has_left(self):
+        _, err, _, s = call([http_error(429), http_error(429), ok({"data": {}})],
+                            {"stashbox_rate_limit_pause": 75, "stashbox_max_retries": 3})
+        self.assertIsNone(err)
+        self.assertEqual([c.args[0] for c in s.call_args_list], [75, 15])
+
     def test_timeout_retried(self):
         for exc in (TimeoutError("t"), socket.timeout("t")):
             data, err, u, s = call([exc, ok({"data": {"x": 1}})])
