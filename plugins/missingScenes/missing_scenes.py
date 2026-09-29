@@ -2172,6 +2172,9 @@ def handle_scene_update_hook(hook_context, plugin_settings):
         return {"success": False, "message": str(e), "error": str(e), "whisparr_error": str(e)}
 
     movie_id = whisparr_scene.get("id")
+    if movie_id is None:
+        log.LogWarning(f"Whisparr returned '{scene_title}' without an id; leaving it alone")
+        return {"success": False, "message": "Whisparr entry has no id", "error": "Whisparr entry has no id"}
     if movie_id in queued:
         log.LogInfo(f"'{scene_title}' is in Whisparr's download queue; leaving it in Whisparr")
         return {"success": True, "message": f"'{scene_title}' is in Whisparr's download queue; left alone"}

@@ -313,6 +313,14 @@ def test_hook_never_deletes_a_mismatched_entry(monkeypatch):
     assert writes(seen) == []
 
 
+def test_hook_never_deletes_an_entry_without_an_id(monkeypatch):
+    stash(monkeypatch)
+    seen = install(monkeypatch, whisparr(movies=[{"stashId": SID}]))
+    res = ms.handle_scene_update_hook(hook_ctx(), HOOK_SETTINGS)
+    assert res["success"] is False
+    assert writes(seen) == []
+
+
 def test_hook_unmonitor_only(monkeypatch):
     stash(monkeypatch)
     seen = install(monkeypatch, whisparr(movies=[{"id": 9, "stashId": SID, "monitored": True}]))
