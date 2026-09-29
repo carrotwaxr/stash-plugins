@@ -5109,4 +5109,30 @@
   registerRoute();
   setupNavButtonInjection();
   console.log('[tagManager] Plugin loaded');
+  // Test hook: only active when a test harness sets window.__TAG_MANAGER_TEST__.
+  // Add functions/state here as tests need them.
+  if (window.__TAG_MANAGER_TEST__) {
+    window.__TAG_MANAGER_TEST__.exports = {
+      parseBlacklist,
+      isBlacklisted,
+      callBackend,
+    };
+    window.__TAG_MANAGER_TEST__.getState = () => ({
+      localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,
+      categoryMappings, tagBlacklist, isImporting, pendingChanges, isEditMode,
+    });
+    window.__TAG_MANAGER_TEST__.setState = (patch) => {
+      if ("localTags" in patch) localTags = patch.localTags;
+      if ("settings" in patch) settings = patch.settings;
+      if ("stashBoxes" in patch) stashBoxes = patch.stashBoxes;
+      if ("selectedStashBox" in patch) selectedStashBox = patch.selectedStashBox;
+      if ("stashdbTags" in patch) stashdbTags = patch.stashdbTags;
+      if ("matchResults" in patch) matchResults = patch.matchResults;
+      if ("categoryMappings" in patch) categoryMappings = patch.categoryMappings;
+      if ("tagBlacklist" in patch) tagBlacklist = patch.tagBlacklist;
+      if ("isImporting" in patch) isImporting = patch.isImporting;
+      if ("pendingChanges" in patch) pendingChanges = patch.pendingChanges;
+      if ("isEditMode" in patch) isEditMode = patch.isEditMode;
+    };
+  }
 })();
