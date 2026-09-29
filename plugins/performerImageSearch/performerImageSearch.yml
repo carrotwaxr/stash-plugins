@@ -20,7 +20,7 @@ settings:
     type: STRING
   defaultLayout:
     displayName: Default Layout
-    description: Default aspect ratio filter: All, Portrait (ratio below 0.9), Landscape (above 1.1) or Square (0.9 to 1.1). Default is "All".
+    description: Default aspect ratio filter. All, Portrait (ratio below 0.9), Landscape (above 1.1) or Square (0.9 to 1.1). Default is "All".
     type: STRING
   # Source toggles - enabled by default, except DuckDuckGo (handled in JS code)
   enableBabepedia:
