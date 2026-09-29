@@ -140,7 +140,6 @@ class TestOps(CacheBase):
         self._patch()
         self.assertNotIn("local_stash_ids", scene_matcher.find_matches_fast("1", {}))
         self.assertNotIn("local_stash_ids", scene_matcher.find_matches_thorough("1", {}))
-        self.assertNotIn("local_stash_ids", scene_matcher.find_matching_scenes("1", {}))
 
     def test_main_ignores_old_cache_args(self):
         import io, json

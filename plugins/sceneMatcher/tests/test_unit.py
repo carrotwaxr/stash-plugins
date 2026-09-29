@@ -598,17 +598,41 @@ class TestResultSorting(unittest.TestCase):
         self.assertEqual(results[0]["duration_score"], 1.0)
 
     def test_null_dates_sort_last(self):
-        """Scenes without dates sort after scenes with dates."""
+        """Scenes without dates sort after scenes with dates (full order)."""
         results = [
-            {"in_local_stash": False, "score": 5, "release_date": None},
-            {"in_local_stash": False, "score": 5, "release_date": "2024-01-01"},
-            {"in_local_stash": False, "score": 5, "release_date": ""},
+            {"in_local_stash": False, "score": 5, "release_date": None, "id": "none"},
+            {"in_local_stash": False, "score": 5, "release_date": "2024-01-01", "id": "dated"},
+            {"in_local_stash": False, "score": 5, "release_date": "", "id": "empty"},
         ]
 
         results.sort(key=result_sort_key)
 
-        self.assertEqual(results[0]["release_date"], "2024-01-01")
-        # Null and empty both sort after
+        # Null and empty tie, so the stable sort keeps their input order
+        self.assertEqual([r["id"] for r in results], ["dated", "none", "empty"])
+
+    @staticmethod
+    def _order(dates):
+        results = [{"in_local_stash": False, "score": 5, "duration_score": 0.5,
+                    "release_date": d} for d in dates]
+        results.sort(key=result_sort_key)
+        return [r["release_date"] for r in results]
+
+    def test_partial_dates_sort_as_end_of_period(self):
+        """A partial date counts as the last day of its period: "2024" is 2024-12-31,
+        "2024-05" is 2024-05-31. Newer first; at the same end day the precise date first."""
+        dates = ["", "2023-12-31", "2024-05-03", "2024", "2024-05", "2024-12-31"]
+        self.assertEqual(
+            self._order(dates),
+            ["2024-12-31", "2024", "2024-05", "2024-05-03", "2023-12-31", ""])
+
+    def test_partial_date_never_below_older_period(self):
+        self.assertEqual(self._order(["2023-12-31", "2024"]), ["2024", "2023-12-31"])
+        self.assertEqual(self._order(["", "2024-05", "2023-12-31"]),
+                         ["2024-05", "2023-12-31", ""])
+
+    def test_malformed_date_sorts_as_no_date(self):
+        self.assertEqual(self._order(["20x4", "2023-12-31", "2024-02-30"]),
+                         ["2023-12-31", "20x4", "2024-02-30"])
 
 
 class TestEdgeCases(unittest.TestCase):

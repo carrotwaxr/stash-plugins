@@ -6,6 +6,7 @@ Searches StashDB for scenes matching a local scene's performers and/or studio.
 Uses only Python standard library - no pip dependencies.
 """
 
+import calendar
 import datetime
 import hashlib
 import json
@@ -15,7 +16,6 @@ import sys
 import tempfile
 import time
 import urllib.request
-import urllib.error
 from collections import namedtuple
 
 import log
@@ -567,7 +567,6 @@ def normalize_title(title):
         return ""
     # Lowercase; apostrophes join ("Kate's" -> "kates", as release names write it);
     # other punctuation and underscores split; collapse whitespace
-    import re
     normalized = title.lower()
     normalized = re.sub(r"['\u2019`]", '', normalized)  # ' and the typographic right quote
     normalized = re.sub(r'[\W_]+', ' ', normalized)
@@ -877,14 +876,29 @@ def score_scene(scene, performer_stash_ids, studio_stash_id, local_title=None, l
                       matches_date=bonus > 0)
 
 
+def _sort_date(value):
+    """(end-of-period ordinal, precision) for a stash-box date, or (0, 0) if missing or
+    malformed. A partial date counts as the LAST day of its period ("2024" is
+    2024-12-31, "2024-05" is 2024-05-31), so it ranks above older periods and a vague
+    date is never pushed below an earlier one; on the same end day the more precise
+    date comes first."""
+    parsed = parse_partial_date(value)
+    if not parsed:
+        return 0, 0
+    year, month, day = parsed
+    precision = 1 + (month is not None) + (day is not None)
+    if month is None:
+        month = 12
+    if day is None:
+        day = calendar.monthrange(year, month)[1]
+    return datetime.date(year, month, day).toordinal(), precision
+
+
 def result_sort_key(x):
     """Sort results: not in local stash first, then score, duration score and date, all descending."""
     in_stash = 1 if x["in_local_stash"] else 0
-    score = -x["score"]
-    duration = -x.get("duration_score", 0.5)
-    date_str = x.get("release_date") or ""
-    date_int = int(date_str[:10].replace("-", "")) if date_str else 0
-    return (in_stash, score, duration, -date_int)
+    ordinal, precision = _sort_date(x.get("release_date"))
+    return (in_stash, -x["score"], -x.get("duration_score", 0.5), -ordinal, -precision)
 
 
 def get_scene_context(scene_id, plugin_settings, endpoint=None):
@@ -1264,59 +1278,6 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
     return response
 
 
-# Legacy function for backward compatibility
-def find_matching_scenes(scene_id, plugin_settings, endpoint=None):
-    """
-    Find StashDB scenes matching a local scene.
-    This is the legacy single-call version that runs both phases.
-    """
-    # Run Phase 1
-    phase1 = find_matches_fast(scene_id, plugin_settings, endpoint=endpoint)
-    if "error" in phase1:
-        return phase1
-
-    # Run Phase 2, excluding Phase 1 results
-    phase1_ids = [r["stash_id"] for r in phase1.get("results", [])]
-    phase2 = find_matches_thorough(
-        scene_id, plugin_settings,
-        exclude_ids=phase1_ids,
-        endpoint=phase1.get("endpoint")
-    )
-
-    warnings = list(phase1.get("warnings", []))
-    if "error" in phase2:
-        warnings.append(phase2["error"])
-        phase2 = {}
-    else:
-        warnings.extend(phase2.get("warnings", []))
-
-    # Merge results
-    all_results = phase1.get("results", []) + phase2.get("results", [])
-
-    # Re-sort merged results
-    all_results.sort(key=result_sort_key)
-
-    merged = {
-        "scene_title": phase1.get("scene_title"),
-        "search_attributes": phase1.get("search_attributes"),
-        "stashdb_name": phase1.get("stashdb_name"),
-        "stashdb_url": phase1.get("stashdb_url"),
-        "endpoint": phase1.get("endpoint"),
-        "endpoint_name": phase1.get("endpoint_name"),
-        "total_results": len(all_results),
-        "results": all_results
-    }
-    if warnings:
-        merged["warnings"] = warnings
-    if warnings or phase2.get("partial"):
-        merged["partial"] = True
-    return merged
-
-
-# ============================================================================
-# Plugin Entry Point
-# ============================================================================
-
 def main():
     """Main entry point for the plugin."""
     try:
@@ -1371,17 +1332,6 @@ def main():
                 output = find_matches_thorough(
                     scene_id, plugin_settings,
                     exclude_ids=exclude_ids,
-                    endpoint=args.get("endpoint")
-                )
-
-        elif operation == "find_matches":
-            # Legacy: Run both phases in one call
-            scene_id = args.get("scene_id", "")
-            if not scene_id:
-                output = {"error": "scene_id is required"}
-            else:
-                output = find_matching_scenes(
-                    scene_id, plugin_settings,
                     endpoint=args.get("endpoint")
                 )
 
