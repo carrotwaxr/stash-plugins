@@ -382,3 +382,39 @@ def test_browse_skips_favorite_studios_that_are_not_on_tpdb(monkeypatch):
                                                   "meta": {"total": 1, "last_page": 1}}})
     res = tp.query_scenes_browse("k", studio_ids=["u1", "u2"])
     assert [s["id"] for s in res["scenes"]] == ["n1"]
+
+
+# ---- which favorites ThePornDB browse uses ----------------------------------------------
+
+def test_limited_favorites_keep_the_engagement_order(monkeypatch):
+    # Stash answers most engaged first (last_o_at / scenes_count DESC); the order is the point
+    order = ["p-zed", "p-alpha", "p-mid", "p-beta"]
+    monkeypatch.setattr(ms, "stash_graphql", lambda q, v=None: {"findPerformers": {"count": len(order), "performers": [
+        {"id": str(i), "stash_ids": [{"endpoint": TPDB, "stash_id": sid}]} for i, sid in enumerate(order)]}})
+    assert ms.get_favorite_stash_ids_limited("performer", TPDB, limit=3) == order[:3]
+
+
+def test_tpdb_browse_searches_the_most_engaged_favorites_first(monkeypatch):
+    engaged = [f"p{i:02d}" for i in range(tp.MAX_BROWSE_QUERIES + 5)][::-1]  # p14, p13, ...
+    api = Api(monkeypatch, {})
+    res = tp.query_scenes_browse("k", performer_ids=engaged)
+    assert res["favorites_limited"] is True
+    assert [c[1]["performer"] for c in api.calls] == engaged[:tp.MAX_BROWSE_QUERIES]
+
+
+def test_browse_sends_favorites_in_order_and_filters_by_membership(monkeypatch):
+    setup_browse(monkeypatch, endpoint=TPDB, name="ThePornDB")
+    monkeypatch.setattr(ms, "get_favorite_stash_ids_limited", lambda *a, **k: ["p-zed", "p-alpha"])
+    got = []
+
+    def fake(api_key, page=1, **kw):
+        got.append(kw["performer_ids"])
+        scene = lambda i, p: {"id": i, "performers": [{"performer": {"id": p}}]}
+        return {"scenes": [scene("n1", "p-alpha"), scene("n2", "other")], "count": 2, "has_more": False,
+                "favorites_limited": True}
+    monkeypatch.setattr(tp, "query_scenes_browse", fake)
+    res = browse(page_size=5, filter_favorite_performers=True)
+    assert got == [["p-zed", "p-alpha"]]
+    assert [s["stash_id"] for s in res["missing_scenes"]] == ["n1"]
+    assert res["favorites_limited"] is True
+    assert res["favorites_query_limit"] == tp.MAX_BROWSE_QUERIES

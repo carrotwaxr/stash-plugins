@@ -435,6 +435,22 @@ test("browse: complete with no scenes still says none are missing", async () => 
   assert.ok(/id="ms-load-more-btn" style="display: none;"/.test(c.innerHTML));
 });
 
+test("browse: says when ThePornDB searched only the first favorites", async () => {
+  const limited = loadMissingScenes({
+    fetchResponses: { RunPluginOperation: () => wrap(okPage({ favorites_limited: true, favorites_query_limit: 10 })) },
+  });
+  const c = browseContainer();
+  await limited.exports.browse.performSearch(c, true);
+  assert.ok(text(c).includes("Only your first 10 favorite performers/studios are searched on ThePornDB"), text(c));
+
+  const all = loadMissingScenes({
+    fetchResponses: { RunPluginOperation: () => wrap(okPage({ favorites_limited: false })) },
+  });
+  const c2 = browseContainer();
+  await all.exports.browse.performSearch(c2, true);
+  assert.ok(!text(c2).includes("searched on ThePornDB"), text(c2));
+});
+
 // ---------------- fingerprint index (#160) ----------------
 
 /** RunPluginOperation that answers per operation; records every call's args. */

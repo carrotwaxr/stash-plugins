@@ -788,6 +788,15 @@
   border-radius: 6px;
 }
 
+.ms-browse-note {
+  margin-bottom: 15px;
+  padding: 8px 15px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #bbb;
+}
+
 .ms-fingerprint-note .ms-build-fp-btn {
   flex-shrink: 0;
 }

@@ -431,8 +431,9 @@ def query_scenes_browse(api_key, page=1, per_page=100, sort="DATE",
         per_page: Results per page
         sort: Sort field
         direction: Sort direction
-        performer_ids: List of performer UUIDs to filter by
-        studio_ids: List of studio UUIDs to filter by
+        performer_ids: performer UUIDs to filter by, most wanted first (a list keeps its
+            order; a set is sorted, for a stable order)
+        studio_ids: studio UUIDs to filter by, likewise
         tag_ids: Ignored (TPDB tag taxonomy differs)
         excluded_tag_ids: Ignored (TPDB tag taxonomy differs)
         plugin_settings: Plugin configuration
@@ -448,11 +449,12 @@ def query_scenes_browse(api_key, page=1, per_page=100, sort="DATE",
     # The scenes endpoint takes one performer and one site_id per request. Its
     # performers[]/tags[] parameters are keyed by numeric TPDB ids, which Stash's
     # UUID favorites don't have, and there is no array form of site_id. So each
-    # favorite gets its own request (sorted, so the order is stable) and the results
-    # are merged. Excluded tags are not sent: TPDB's tag taxonomy differs.
-    performers = sorted(performer_ids) if performer_ids else [None]
+    # favorite gets its own request, in the order given (the caller's most engaged
+    # favorites first), and the results are merged. Excluded tags are not sent: TPDB's
+    # tag taxonomy differs.
+    performers = _in_order(performer_ids) or [None]
     site_ids = []
-    for studio_uuid in sorted(studio_ids) if studio_ids else []:
+    for studio_uuid in _in_order(studio_ids):
         try:
             site_ids.append(resolve_site_id(api_key, studio_uuid, plugin_settings))
         except SiteNotFound:
@@ -495,6 +497,14 @@ def query_scenes_browse(api_key, page=1, per_page=100, sort="DATE",
         count = max(count, len(merged))
     return {"scenes": merged, "count": count, "page": page, "has_more": has_more,
             "favorites_limited": favorites_limited}
+
+
+def _in_order(ids):
+    """ids without duplicates: a list or tuple in its order, anything else sorted."""
+    if not ids:
+        return []
+    ordered = ids if isinstance(ids, (list, tuple)) else sorted(ids)
+    return list(dict.fromkeys(ordered))
 
 
 def _sort_merged(scenes, sort, direction):

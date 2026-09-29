@@ -139,6 +139,13 @@
       }
     }
 
+    // ThePornDB takes one request per favorite, so only the first (most engaged) are searched
+    let favoritesNote = '';
+    if (stats && stats.favorites_limited) {
+      const n = Number(stats.favorites_query_limit) || 10;
+      favoritesNote = `<div class="ms-browse-note">${escapeHtml(`Only your first ${n} favorite performers/studios are searched on ThePornDB (most engaged first).`)}</div>`;
+    }
+
     // Fingerprint note: the count owned by fingerprint, or the Build button
     const fpNote = describeFingerprintIndex(fingerprintInfo, ownedByFingerprint, fingerprintBuild, stashdbName);
     let fingerprintHtml = '';
@@ -256,6 +263,7 @@
         </div>
 
         <div class="ms-browse-stats">${escapeHtml(statsText)}</div>
+        ${favoritesNote}
         ${fingerprintHtml}
         ${whisparrConfigured && whisparrError ? `<div class="ms-warning ms-whisparr-banner"><span class="ms-warning-text">${escapeHtml(describeWhisparrStatusError(whisparrError))}</span></div>` : ''}
         <div class="ms-browse-whisparr-status" id="ms-browse-status"></div>
@@ -384,6 +392,8 @@
           is_complete: result.is_complete,
           filters_active: result.filters_active,
           excluded_tags_applied: result.excluded_tags_applied,
+          favorites_limited: result.favorites_limited,
+          favorites_query_limit: result.favorites_query_limit,
           cache_info: result.cache_info || null,
         }
       });

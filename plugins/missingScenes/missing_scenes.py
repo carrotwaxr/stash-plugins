@@ -547,8 +547,10 @@ def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
     return stash_ids
 
 
-def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int = 100) -> set[str]:
-    """Get stash_ids for favorited entities, sorted by engagement with a limit.
+def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int = 100) -> list[str]:
+    """Get stash_ids for favorited entities, most engaged first, with a limit.
+
+    Performers are ordered by last_o_at, studios and tags by scene count (descending).
 
     Args:
         entity_type: "performer", "studio", or "tag"
@@ -556,7 +558,8 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
         limit: Maximum number of favorites to return
 
     Returns:
-        Set of StashDB IDs for top favorites
+        The stash_ids of the top favorites, in that order (no duplicates). Callers that
+        test membership make a set of it; ThePornDB browse uses the first few.
     """
     # Determine sort field based on entity type
     if entity_type == "performer":
@@ -627,9 +630,9 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
         items_key = "tags"
     else:
         log.LogWarning(f"Unknown entity type for favorites: {entity_type}")
-        return set()
+        return []
 
-    stash_ids = set()
+    stash_ids = []
     collected = 0
     page = 1
     per_page = min(100, limit)  # Don't fetch more than needed
@@ -658,8 +661,9 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
                 break
             for sid in item.get("stash_ids", []):
                 if sid.get("endpoint") == endpoint:
-                    stash_ids.add(sid.get("stash_id"))
-                    collected += 1
+                    if sid.get("stash_id") not in stash_ids:
+                        stash_ids.append(sid.get("stash_id"))
+                        collected += 1
                     break  # Only count once per entity
 
         total = result.get("count", 0)
@@ -2158,7 +2162,8 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
     # Get favorite limit
     favorite_limit = int(plugin_settings.get("favoriteLimit") or 100)
 
-    # Fetch favorite IDs if filters enabled
+    # Fetch favorite IDs if filters enabled: lists, most engaged first (ThePornDB uses
+    # the first few), and sets of the same ids for the filters
     performer_ids = None
     studio_ids = None
     tag_ids = None
@@ -2177,6 +2182,10 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         tag_ids = get_favorite_stash_ids_limited("tag", stashdb_url, limit=favorite_limit)
         if not tag_ids:
             return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["tags"])
+
+    performer_set = set(performer_ids) if performer_ids is not None else None
+    studio_set = set(studio_ids) if studio_ids is not None else None
+    tag_set = set(tag_ids) if tag_ids is not None else None
 
     # Fetch scenes using browse query
     is_tpdb = theporndb_api.is_theporndb(stashdb_url)
@@ -2203,7 +2212,7 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
 
     def wanted(scene):
         # Passes the favorite filters client-side (the query only handles excludes)
-        return scene_passes_favorite_filters(scene, performer_ids, studio_ids, tag_ids)
+        return scene_passes_favorite_filters(scene, performer_set, studio_set, tag_set)
 
     def qualifies(scene):
         # Not owned (by stash_id or by fingerprint), and wanted
@@ -2255,7 +2264,9 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         "active_filter_tag_ids": list(tag_ids) if tag_ids else [],
         # ThePornDB's tag taxonomy differs, so excluded tags are never sent to it
         "excluded_tags_applied": len(excluded_tag_ids) > 0 and not is_tpdb,
-        **({"favorites_limited": bool(favorites_limited)} if is_tpdb else {}),
+        # ThePornDB takes one request per favorite, so only the first (most engaged) are used
+        **({"favorites_limited": bool(favorites_limited),
+            "favorites_query_limit": theporndb_api.MAX_BROWSE_QUERIES} if is_tpdb else {}),
         "cache_info": _get_cache_info(stashdb_url),
         "owned_by_fingerprint": counter.count,
         **fingerprint_fields,
