@@ -383,7 +383,7 @@ def build_search_query(studio_name, performer_names):
 
 def query_stashdb_by_text(stashdb_url, api_key, search_term, limit=25, plugin_settings=None):
     """
-    Query StashDB using text search.
+    Query StashDB using text search. Returns a list; raises StashBoxAPIError.
     Uses stashbox_api for retry logic and rate limiting.
     """
     return stashbox_api.search_scenes_by_text(
@@ -396,6 +396,7 @@ def query_stashdb_by_text(stashdb_url, api_key, search_term, limit=25, plugin_se
 def query_stashdb_scenes_combined(stashdb_url, api_key, performer_ids, studio_id, plugin_settings=None, max_pages=10):
     """
     Query StashDB with combined performer AND studio filter.
+    Returns (scenes, error); raises StashBoxAPIError when the first page fails.
     Uses stashbox_api for retry logic and rate limiting.
     """
     return stashbox_api.query_scenes_combined(
@@ -408,6 +409,7 @@ def query_stashdb_scenes_combined(stashdb_url, api_key, performer_ids, studio_id
 def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, plugin_settings=None, max_pages=10):
     """
     Query StashDB for scenes featuring any of the given performers.
+    Returns (scenes, error); raises StashBoxAPIError when the first page fails.
     Uses stashbox_api for retry logic and rate limiting.
     """
     return stashbox_api.query_scenes_by_performers(
@@ -420,6 +422,7 @@ def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, plug
 def query_stashdb_scenes_by_studio(stashdb_url, api_key, studio_id, plugin_settings=None, max_pages=10):
     """
     Query StashDB for scenes from a studio.
+    Returns (scenes, error); raises StashBoxAPIError when the first page fails.
     Uses stashbox_api for retry logic and rate limiting.
     """
     return stashbox_api.query_scenes_by_studio(
@@ -816,6 +819,24 @@ def format_results(all_scenes, context, local_stash_ids):
     return results
 
 
+def _auth_message(name, error):
+    return (f"{name} rejected the request ({error}). Check the API key for {name} "
+            f"in Stash Settings > Metadata Providers.")
+
+
+def _failure_response(base, name, errors):
+    """Response for a phase where every stash-box request failed."""
+    auth = any(getattr(e, "is_auth_error", False) for e in errors)
+    out = dict(base)
+    if auth:
+        first = next(e for e in errors if getattr(e, "is_auth_error", False))
+        out["error"] = _auth_message(name, first)
+        out["auth_error"] = True
+    else:
+        out["error"] = f"{name} request failed: {errors[0]}"
+    return out
+
+
 def find_matches_fast(scene_id, plugin_settings, endpoint=None):
     """
     Phase 1: Fast text-based searches.
@@ -837,22 +858,41 @@ def find_matches_fast(scene_id, plugin_settings, endpoint=None):
     log.LogInfo(f"Phase 1 (fast): text searches for scene {scene_id}")
 
     all_scenes = {}
+    errors = []
+    searches = 0
+
+    def run_search(term):
+        nonlocal searches
+        searches += 1
+        try:
+            found = query_stashdb_by_text(stashdb_url, stashdb_api_key, term, plugin_settings=plugin_settings)
+        except stashbox_api.StashBoxAPIError as e:
+            log.LogWarning(f"Text search failed on {stashdb_name}: {e}")
+            errors.append(e)
+            return
+        for s in found:
+            all_scenes[s["id"]] = s
 
     # Search 1: Cleaned title
     search_title = clean_title(local_title or local_filename)
     if search_title and len(search_title) >= 3:
         log.LogDebug(f"Text search: cleaned title '{search_title}'")
-        title_scenes = query_stashdb_by_text(stashdb_url, stashdb_api_key, search_title, plugin_settings=plugin_settings)
-        for s in title_scenes:
-            all_scenes[s["id"]] = s
+        run_search(search_title)
 
     # Search 2: Constructed query (studio + performers)
     constructed_query = build_search_query(studio_name, performer_names)
     if constructed_query and len(constructed_query) >= 3:
         log.LogDebug(f"Text search: constructed query '{constructed_query}'")
-        constructed_scenes = query_stashdb_by_text(stashdb_url, stashdb_api_key, constructed_query, plugin_settings=plugin_settings)
-        for s in constructed_scenes:
-            all_scenes[s["id"]] = s
+        run_search(constructed_query)
+
+    base = {
+        "phase": 1,
+        "endpoint": stashdb_url,
+        "endpoint_name": stashdb_name,
+        "stashdb_name": stashdb_name,
+    }
+    if errors and len(errors) >= searches:
+        return _failure_response(base, stashdb_name, errors)
 
     # Get local scene stash_ids to mark which results user already has
     local_ids = local_stash_ids(context["endpoint"])
@@ -878,6 +918,8 @@ def find_matches_fast(scene_id, plugin_settings, endpoint=None):
         "results": results,
         "has_more": bool(context["performer_stash_ids"] or context["studio_stash_id"])
     }
+    if errors:
+        response["warnings"] = [f"{stashdb_name}: {e}" for e in errors]
 
     return response
 
@@ -923,42 +965,53 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
     exclude_set = set(exclude_ids or [])
 
     all_scenes = {}
+    errors = []
+    succeeded = 0
+
+    def run_query(fn, *args):
+        """Run one paginated query; keep whatever it returned and note failures."""
+        nonlocal succeeded
+        try:
+            scenes, error = fn(stashdb_url, stashdb_api_key, *args, plugin_settings=plugin_settings)
+        except stashbox_api.StashBoxAPIError as e:
+            log.LogWarning(f"Query failed on {stashdb_name}: {e}")
+            errors.append(e)
+            return
+        succeeded += 1
+        if error:
+            errors.append(error)
+        for s in scenes:
+            if s["id"] not in exclude_set:
+                all_scenes[s["id"]] = s
+
+    def auth_failed():
+        return any(getattr(e, "is_auth_error", False) for e in errors)
 
     # Strategy 1: Combined filter if we have both performer AND studio
     if performer_stash_ids and studio_stash_id:
         log.LogDebug("Trying combined performer+studio query")
-        combined_scenes = query_stashdb_scenes_combined(
-            stashdb_url, stashdb_api_key,
-            list(performer_stash_ids), studio_stash_id,
-            plugin_settings=plugin_settings
-        )
-        for s in combined_scenes:
-            if s["id"] not in exclude_set:
-                all_scenes[s["id"]] = s
+        run_query(query_stashdb_scenes_combined, list(performer_stash_ids), studio_stash_id)
 
     # Strategy 2: Individual queries (if combined didn't find enough or we don't have both)
-    if len(all_scenes) < MIN_COMBINED_RESULTS_THRESHOLD:
+    # An auth failure would repeat on every query, so stop there.
+    if len(all_scenes) < MIN_COMBINED_RESULTS_THRESHOLD and not auth_failed():
         # Query by performers
         if performer_stash_ids:
             log.LogDebug(f"Querying by {len(performer_stash_ids)} performers")
-            performer_scenes = query_stashdb_scenes_by_performers(
-                stashdb_url, stashdb_api_key, list(performer_stash_ids),
-                plugin_settings=plugin_settings
-            )
-            for s in performer_scenes:
-                if s["id"] not in exclude_set:
-                    all_scenes[s["id"]] = s
+            run_query(query_stashdb_scenes_by_performers, list(performer_stash_ids))
 
         # Query by studio
-        if studio_stash_id:
+        if studio_stash_id and not auth_failed():
             log.LogDebug(f"Querying by studio: {studio_name}")
-            studio_scenes = query_stashdb_scenes_by_studio(
-                stashdb_url, stashdb_api_key, studio_stash_id,
-                plugin_settings=plugin_settings
-            )
-            for s in studio_scenes:
-                if s["id"] not in exclude_set:
-                    all_scenes[s["id"]] = s
+            run_query(query_stashdb_scenes_by_studio, studio_stash_id)
+
+    if errors and not succeeded:
+        return _failure_response({
+            "phase": 2,
+            "endpoint": stashdb_url,
+            "endpoint_name": stashdb_name,
+            "stashdb_name": stashdb_name,
+        }, stashdb_name, errors)
 
     # Get local scene stash_ids
     local_ids = local_stash_ids(context["endpoint"])
@@ -981,6 +1034,9 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
         "total_results": len(results),
         "results": results
     }
+    if errors:
+        response["partial"] = True
+        response["warnings"] = [f"{stashdb_name}: {e}" for e in errors]
 
     return response
 
@@ -1004,13 +1060,20 @@ def find_matching_scenes(scene_id, plugin_settings, endpoint=None):
         endpoint=phase1.get("endpoint")
     )
 
+    warnings = list(phase1.get("warnings", []))
+    if "error" in phase2:
+        warnings.append(phase2["error"])
+        phase2 = {}
+    else:
+        warnings.extend(phase2.get("warnings", []))
+
     # Merge results
     all_results = phase1.get("results", []) + phase2.get("results", [])
 
     # Re-sort merged results
     all_results.sort(key=result_sort_key)
 
-    return {
+    merged = {
         "scene_title": phase1.get("scene_title"),
         "search_attributes": phase1.get("search_attributes"),
         "stashdb_name": phase1.get("stashdb_name"),
@@ -1020,6 +1083,11 @@ def find_matching_scenes(scene_id, plugin_settings, endpoint=None):
         "total_results": len(all_results),
         "results": all_results
     }
+    if warnings:
+        merged["warnings"] = warnings
+    if warnings or phase2.get("partial"):
+        merged["partial"] = True
+    return merged
 
 
 # ============================================================================
@@ -1103,8 +1171,9 @@ def main():
         log.LogError(f"Operation failed: {e}")
         output = {"error": str(e)}
 
-    # Wrap output
-    if "error" in output:
+    # Wrap output. Stash-box failures carry a "phase" and stay structured so the
+    # UI can render them; other errors (bad input, unexpected exceptions) are top-level.
+    if "error" in output and "phase" not in output:
         plugin_output = {"error": output["error"]}
     else:
         plugin_output = {"output": output}

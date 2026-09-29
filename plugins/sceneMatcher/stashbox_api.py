@@ -14,6 +14,7 @@ since Stash plugins must be self-contained (no shared imports across plugins).
 import json
 import os
 import re
+import socket
 import ssl
 import time
 import urllib.request
@@ -96,10 +97,36 @@ RETRYABLE_STATUS_CODES = {
 class StashBoxAPIError(Exception):
     """Exception for StashDB API errors with context."""
 
-    def __init__(self, message, status_code=None, retryable=False):
+    def __init__(self, message, status_code=None, retryable=False, is_auth_error=False):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.is_auth_error = is_auth_error
+
+
+# Longest Retry-After we will honour, and the most time one request may spend waiting.
+MAX_RETRY_AFTER = 60.0
+MAX_TOTAL_WAIT = 90.0
+
+_AUTH_MESSAGE_RE = re.compile(r"unauthori[sz]ed|forbidden|not authori[sz]ed", re.IGNORECASE)
+
+
+def _is_auth_message(message):
+    return bool(_AUTH_MESSAGE_RE.search(message or ""))
+
+
+def _parse_retry_after(value):
+    """Retry-After as seconds, or None when absent or not a number (HTTP-dates are ignored)."""
+    try:
+        seconds = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _snippet(text, length=200):
+    text = " ".join((text or "").split())
+    return text[:length] + ("..." if len(text) > length else "")
 
 
 def get_config(plugin_settings, key):
@@ -150,10 +177,13 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
         operation_name: Human-readable name for logging
 
     Returns:
-        Response data dict, or None on failure
+        The response "data" dict (GraphQL errors alongside non-null data are
+        logged and the data returned)
 
     Raises:
-        StashBoxAPIError: On non-retryable errors or after max retries
+        StashBoxAPIError: on HTTP/GraphQL/parse failures, auth failures
+            (is_auth_error), rate limits that are too long to wait out, or
+            after max retries.
     """
     max_retries = get_config(plugin_settings, "max_retries")
     initial_delay = get_config(plugin_settings, "initial_retry_delay")
@@ -161,6 +191,7 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
     backoff_multiplier = get_config(plugin_settings, "retry_backoff_multiplier")
     timeout = get_config(plugin_settings, "request_timeout")
     rate_limit_pause = get_config(plugin_settings, "rate_limit_pause")
+    label = operation_name or "request"
 
     headers = {
         "Content-Type": "application/json",
@@ -180,48 +211,87 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
 
     last_error = None
     delay = initial_delay
+    waited = 0.0
+
+    def backoff(reason, attempt):
+        nonlocal delay, waited
+        log.LogWarning(
+            f"{reason} on {label}. Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
+        )
+        time.sleep(delay)
+        waited += delay
+        delay = min(delay * backoff_multiplier, max_delay)
 
     for attempt in range(max_retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
-                result = json.loads(response.read().decode("utf-8"))
+                body = response.read().decode("utf-8", errors="replace")
+            try:
+                result = json.loads(body)
+            except ValueError:
+                log.LogError(f"Non-JSON response from {url}: {_snippet(body)}")
+                raise StashBoxAPIError(
+                    f"Unexpected non-JSON response from {url}: {_snippet(body)}")
+            if not isinstance(result, dict):
+                raise StashBoxAPIError(
+                    f"Unexpected response from {url}: {_snippet(body)}")
 
-                if "errors" in result:
-                    # GraphQL errors (not HTTP errors) - log but return data if present
-                    error_messages = [e.get("message", str(e)) for e in result["errors"]]
-                    log.LogWarning(f"GraphQL errors: {error_messages}")
+            errors = result.get("errors")
+            if errors:
+                messages = [e.get("message", str(e)) if isinstance(e, dict) else str(e)
+                            for e in errors]
+                if result.get("data") is None:
+                    joined = "; ".join(messages)
+                    log.LogError(f"GraphQL errors on {label}: {joined}")
+                    raise StashBoxAPIError(
+                        f"GraphQL error: {joined}",
+                        is_auth_error=_is_auth_message(joined))
+                log.LogWarning(f"GraphQL errors on {label} (data returned): {messages}")
 
-                return result.get("data")
+            return result.get("data")
+
+        except StashBoxAPIError:
+            raise
 
         except urllib.error.HTTPError as e:
             status_code = e.code
             last_error = e
 
+            if status_code in (401, 403):
+                log.LogError(f"HTTP {status_code} on {label}: authentication failed")
+                raise StashBoxAPIError(
+                    f"HTTP {status_code}: {e.reason or 'Unauthorized'}",
+                    status_code=status_code,
+                    is_auth_error=True
+                )
+
             # Handle rate limiting specially
             if status_code == 429:
-                if attempt < max_retries:
-                    log.LogWarning(
-                        f"Rate limited (429) on {operation_name or 'request'}. "
-                        f"Pausing {rate_limit_pause}s before retry {attempt + 1}/{max_retries}"
-                    )
-                    time.sleep(rate_limit_pause)
-                    continue
-                else:
-                    log.LogError(f"Rate limited (429) - max retries exceeded")
+                retry_after = _parse_retry_after(e.headers.get("Retry-After") if e.headers else None)
+                wait = rate_limit_pause if retry_after is None else retry_after
+                if attempt >= max_retries:
+                    log.LogError("Rate limited (429) - max retries exceeded")
                     raise StashBoxAPIError(
-                        f"Rate limited by StashDB after {max_retries} retries",
-                        status_code=429,
-                        retryable=False
+                        f"Rate limited by the stash-box after {max_retries} retries",
+                        status_code=429
                     )
+                if wait > MAX_RETRY_AFTER or waited + wait > MAX_TOTAL_WAIT:
+                    log.LogError(f"Rate limited (429) on {label}: would need to wait {wait:.0f}s")
+                    raise StashBoxAPIError(
+                        f"Rate limited by the stash-box (asked to wait {wait:.0f}s); try again later",
+                        status_code=429
+                    )
+                log.LogWarning(
+                    f"Rate limited (429) on {label}. "
+                    f"Pausing {wait}s before retry {attempt + 1}/{max_retries}"
+                )
+                time.sleep(wait)
+                waited += wait
+                continue
 
             # Check if this is a retryable error
             if status_code in RETRYABLE_STATUS_CODES and attempt < max_retries:
-                log.LogWarning(
-                    f"HTTP {status_code} on {operation_name or 'request'}. "
-                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
-                )
-                time.sleep(delay)
-                delay = min(delay * backoff_multiplier, max_delay)
+                backoff(f"HTTP {status_code}", attempt)
                 continue
 
             # Non-retryable or max retries exceeded
@@ -245,17 +315,23 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
 
             # Connection errors are often transient
             if attempt < max_retries:
-                log.LogWarning(
-                    f"Connection error on {operation_name or 'request'}: {e.reason}. "
-                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
-                )
-                time.sleep(delay)
-                delay = min(delay * backoff_multiplier, max_delay)
+                backoff(f"Connection error: {e.reason}", attempt)
                 continue
 
             log.LogError(f"URL error after {max_retries} retries: {e.reason}")
             raise StashBoxAPIError(
                 f"Connection failed: {e.reason}",
+                retryable=True
+            )
+
+        except (TimeoutError, socket.timeout) as e:
+            last_error = e
+            if attempt < max_retries:
+                backoff("Read timeout", attempt)
+                continue
+            log.LogError(f"Timed out after {max_retries} retries on {label}")
+            raise StashBoxAPIError(
+                f"Request timed out after {max_retries} retries",
                 retryable=True
             )
 
@@ -286,7 +362,11 @@ def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
         max_pages: Override default max pages limit
 
     Returns:
-        List of all items collected across pages
+        (items, total, error): every item collected, the server's total count,
+        and the StashBoxAPIError that stopped a later page (None when clean).
+
+    Raises:
+        StashBoxAPIError: when the first page fails (nothing to return).
     """
     request_delay = get_config(plugin_settings, "request_delay")
     per_page = get_config(plugin_settings, "per_page")
@@ -295,6 +375,8 @@ def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
         max_pages = get_config(plugin_settings, "max_pages_performer")
 
     all_items = []
+    total = 0
+    error = None
     page = 1
 
     while page <= max_pages:
@@ -307,11 +389,14 @@ def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
                 operation_name=f"{operation_name or 'query'} (page {page})"
             )
         except StashBoxAPIError as e:
-            # On error, return what we have so far (graceful degradation)
+            if page == 1:
+                raise
+            # Later page: keep what we have and report the error
             log.LogWarning(
                 f"Stopping pagination on {operation_name} at page {page} due to error: {e}. "
                 f"Returning {len(all_items)} items collected so far."
             )
+            error = e
             break
 
         if not data:
@@ -339,7 +424,7 @@ def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
         if page <= max_pages:
             time.sleep(request_delay)
 
-    return all_items
+    return all_items, total, error
 
 
 # ============================================================================
@@ -407,6 +492,8 @@ def query_performer_name(url, api_key, performer_id, plugin_settings=None):
 def query_scenes_by_performer(url, api_key, performer_id, plugin_settings=None):
     """Query StashDB for all scenes featuring a performer.
 
+    Returns (scenes, error); raises StashBoxAPIError if the first page fails.
+
     Performance optimization: Combines performer name lookup with first page query
     to eliminate an extra API round-trip.
     """
@@ -443,6 +530,7 @@ def query_scenes_by_performer(url, api_key, performer_id, plugin_settings=None):
 
     all_scenes = []
     performer_name = "Unknown"
+    error = None
     page = 1
 
     while page <= max_pages:
@@ -473,7 +561,10 @@ def query_scenes_by_performer(url, api_key, performer_id, plugin_settings=None):
                 operation_name=f"scenes for performer (page {page})"
             )
         except StashBoxAPIError as e:
+            if page == 1:
+                raise
             log.LogWarning(f"Stopping at page {page} due to error: {e}. Returning {len(all_scenes)} scenes.")
+            error = e
             break
 
         if not data:
@@ -507,11 +598,11 @@ def query_scenes_by_performer(url, api_key, performer_id, plugin_settings=None):
             time.sleep(request_delay)
 
     log.LogInfo(f"StashDB: Found {len(all_scenes)} scenes for {performer_name}")
-    return all_scenes
+    return all_scenes, error
 
 
 def query_scenes_by_studio(url, api_key, studio_id, plugin_settings=None):
-    """Query StashDB for all scenes from a studio."""
+    """Query StashDB for all scenes from a studio. Returns (scenes, error); raises if page 1 fails."""
     query = f"""
     query QueryScenes($input: SceneQueryInput!) {{
         queryScenes(input: $input) {{
@@ -542,7 +633,7 @@ def query_scenes_by_studio(url, api_key, studio_id, plugin_settings=None):
         return query_data.get("scenes", []), query_data.get("count", 0)
 
     max_pages = get_config(plugin_settings, "max_pages_studio")
-    scenes = paginated_query(
+    scenes, _total, error = paginated_query(
         url, api_key, query, build_variables, extract,
         plugin_settings=plugin_settings,
         operation_name="scenes for studio",
@@ -550,11 +641,11 @@ def query_scenes_by_studio(url, api_key, studio_id, plugin_settings=None):
     )
 
     log.LogInfo(f"StashDB: Found {len(scenes)} scenes for studio")
-    return scenes
+    return scenes, error
 
 
 def search_scenes_by_text(url, api_key, search_term, limit=25, plugin_settings=None):
-    """Search StashDB scenes by text query."""
+    """Search StashDB scenes by text query. Raises StashBoxAPIError on failure."""
     if not search_term or len(search_term) < 3:
         return []
 
@@ -566,26 +657,20 @@ def search_scenes_by_text(url, api_key, search_term, limit=25, plugin_settings=N
     }}
     """
 
-    try:
-        data = graphql_request_with_retry(
-            url, query, {"term": search_term, "limit": limit}, api_key,
-            plugin_settings=plugin_settings,
-            operation_name=f"text search '{search_term[:30]}...'"
-        )
-        if data and "searchScene" in data:
-            scenes = data["searchScene"] or []
-            log.LogInfo(f"StashDB text search '{search_term[:30]}...': found {len(scenes)} scenes")
-            return scenes
-    except StashBoxAPIError as e:
-        log.LogWarning(f"Text search failed: {e}")
-
-    return []
+    data = graphql_request_with_retry(
+        url, query, {"term": search_term, "limit": limit}, api_key,
+        plugin_settings=plugin_settings,
+        operation_name=f"text search '{search_term[:30]}...'"
+    )
+    scenes = ((data or {}).get("searchScene")) or []
+    log.LogInfo(f"StashDB text search '{search_term[:30]}...': found {len(scenes)} scenes")
+    return scenes
 
 
 def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_settings=None, max_pages=10):
-    """Query StashDB with combined performer AND studio filter."""
+    """Query StashDB with combined performer AND studio filter. Returns (scenes, error); raises if page 1 fails."""
     if not performer_ids or not studio_id:
-        return []
+        return [], None
 
     query = f"""
     query QueryScenes($input: SceneQueryInput!) {{
@@ -620,7 +705,7 @@ def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_setting
         query_data = data.get("queryScenes", {})
         return query_data.get("scenes", []), query_data.get("count", 0)
 
-    scenes = paginated_query(
+    scenes, _total, error = paginated_query(
         url, api_key, query, build_variables, extract,
         plugin_settings=plugin_settings,
         operation_name="combined performer+studio query",
@@ -628,13 +713,13 @@ def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_setting
     )
 
     log.LogInfo(f"StashDB combined (performer+studio): found {len(scenes)} scenes")
-    return scenes
+    return scenes, error
 
 
 def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None, max_pages=10):
-    """Query StashDB for scenes featuring any of the given performers."""
+    """Query StashDB for scenes featuring any of the given performers. Returns (scenes, error); raises if page 1 fails."""
     if not performer_ids:
-        return []
+        return [], None
 
     query = f"""
     query QueryScenes($input: SceneQueryInput!) {{
@@ -665,7 +750,7 @@ def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None
         query_data = data.get("queryScenes", {})
         return query_data.get("scenes", []), query_data.get("count", 0)
 
-    scenes = paginated_query(
+    scenes, _total, error = paginated_query(
         url, api_key, query, build_variables, extract,
         plugin_settings=plugin_settings,
         operation_name=f"scenes for {len(performer_ids)} performers",
@@ -673,4 +758,4 @@ def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None
     )
 
     log.LogInfo(f"StashDB: Found {len(scenes)} scenes for {len(performer_ids)} performers")
-    return scenes
+    return scenes, error
