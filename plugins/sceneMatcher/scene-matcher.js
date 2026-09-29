@@ -443,10 +443,8 @@
         lines.push(`Showing the top ${shown} of ${escapeHtml(String(searchInfo.total))} candidates.`);
       }
     }
-    if (searchInfo.error) {
-      lines.push(escapeHtml(String(searchInfo.error)));
-      if (searchInfo.authError) lines.push(AUTH_HINT);
-    }
+    // An auth error's message already names the box and points to its API key setting
+    if (searchInfo.error) lines.push(escapeHtml(String(searchInfo.error)));
     if (!lines.length) return;
     const notice = document.createElement("div");
     notice.className = "sm-notice" + (searchInfo.error ? " sm-error" : "");
@@ -462,7 +460,7 @@
     if (!searchInfo) {
       searchInfo = {
         warnings: [], partial: false, truncated: false, shown: 0, total: 0, searched: null, pageCapped: false,
-        error: null, authError: false,
+        error: null,
       };
     }
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
@@ -732,8 +730,6 @@
   /**
    * Show loading state
    */
-  const AUTH_HINT = "Check the API key for this stash-box under Settings > Metadata Providers.";
-
   function showLoading() {
     const container = document.getElementById("sm-results");
     if (container) {
@@ -747,16 +743,15 @@
   }
 
   /**
-   * Show error state
+   * Show error state. An auth error's message comes from the server with the API-key hint.
    */
-  function showError(message, { onRetry = null, authError = false } = {}) {
+  function showError(message, { onRetry = null } = {}) {
     const container = document.getElementById("sm-results");
     if (!container) return;
     container.innerHTML = `
       <div class="sm-placeholder sm-error">
         <div class="sm-error-icon">!</div>
         <div>${escapeHtml(message)}</div>
-        ${authError ? `<div style="font-size: 14px; margin-top: 8px;">${AUTH_HINT}</div>` : ""}
       </div>
     `;
     if (onRetry) {
@@ -834,7 +829,6 @@
 
       if (phase2Result.error) {
         searchInfo.error = phase2Result.error;
-        searchInfo.authError = !!phase2Result.auth_error;
         canSearchDeep = true; // the button doubles as retry
         setStatus("Deep search failed: " + phase2Result.error, "error");
         updateResultCount(matchResults.length, false);
@@ -896,13 +890,12 @@
       if (phase1Result.error) {
         const partialResults = phase1Result.results || [];
         if (partialResults.length === 0) {
-          showError(phase1Result.error, { onRetry: retry, authError: !!phase1Result.auth_error });
+          showError(phase1Result.error, { onRetry: retry });
           setStatus(phase1Result.error, "error");
           return;
         }
         absorbNotices(phase1Result);
         searchInfo.error = phase1Result.error;
-        searchInfo.authError = !!phase1Result.auth_error;
       } else {
         absorbNotices(phase1Result);
       }

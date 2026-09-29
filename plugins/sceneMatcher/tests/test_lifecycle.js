@@ -305,12 +305,28 @@ test("partial renders results plus 'Some pages failed'", async () => {
   assert.ok(t.includes("Some pages failed") && t.includes("Tp1"), t);
 });
 
-test("auth_error renders the API-key hint with the message", async () => {
-  const sm = await runPhase1({ phase: 1, error: "Unauthorized <img>", auth_error: true, results: [] });
+// What scene_matcher._auth_message returns: the server already names the box and the fix.
+const AUTH_ERROR = "StashDB rejected the request (HTTP 401: Unauthorized <img>). Check the API key for StashDB in Stash Settings > Metadata Providers.";
+const hints = (t) => (t.match(/Check the API key/gi) || []).length;
+
+test("auth_error renders the server's message, with the API-key hint once", async () => {
+  const sm = await runPhase1({ phase: 1, error: AUTH_ERROR, auth_error: true, results: [] });
   const t = sm.text();
-  assert.ok(/API key/i.test(t), t);
+  assert.strictEqual(hints(t), 1, t);
   assert.ok(t.includes("Unauthorized &lt;img&gt;"), t);
   assert.ok(!t.includes("<img>"));
+});
+
+test("a phase 2 auth error above phase 1 results shows the hint once", async () => {
+  const sm = load({ fetchResponses: { RunPluginOperation: (b) => (b.variables.args.operation === "find_matches_fast"
+    ? out({ phase: 1, results: [scene("k1")], has_more: true })
+    : out({ phase: 2, error: AUTH_ERROR, auth_error: true })) } });
+  await sm.exports.handleMatchClick("A", createElement("div"), STASHDB);
+  await sm.exports.handleDeepSearchClick();
+  await sm.settle();
+  const t = sm.text();
+  assert.ok(t.includes("Tk1"), t);
+  assert.strictEqual(hints(t), 1, t);
 });
 
 test("error renders message with Retry, not 'No matching scenes found'", async () => {
