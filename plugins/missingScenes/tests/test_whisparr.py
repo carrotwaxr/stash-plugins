@@ -479,3 +479,32 @@ def test_task_test_whisparr_logs_and_returns(monkeypatch):
     install(monkeypatch, conn_handler())
     r = ms.task_test_whisparr(settings(whisparrRootFolder="/nope"))
     assert r["ok"] is False and r["problems"]
+
+
+# ---- the status map is StashDB-only ----------------------------------------------------
+
+FANSDB = "https://fansdb.cc/graphql"
+
+
+@pytest.mark.parametrize("view", ["find", "browse"])
+@pytest.mark.parametrize("endpoint,name", [(FANSDB, "FansDB"), ("https://theporndb.net/graphql", "ThePornDB")])
+def test_no_whisparr_status_for_other_stash_boxes(monkeypatch, view, endpoint, name):
+    # Whisparr keys on StashDB ids: another box's ids can't match, so don't ask (or warn)
+    monkeypatch.setattr(ms, "get_stashbox_config", lambda: [{"endpoint": endpoint, "api_key": "k", "name": name}])
+    monkeypatch.setattr(ms, "get_or_build_cache", lambda *a, **k: set())
+    monkeypatch.setattr(ms, "get_local_performer",
+                        lambda pid: {"name": "A", "stash_ids": [{"endpoint": endpoint, "stash_id": "p1"}]})
+    monkeypatch.setattr(ms, "count_local_scenes_for_entity", lambda *a: 0)
+    page = {"scenes": [{"id": "s1"}], "count": 1, "page": 1, "has_more": False}
+    for module in (ms.stashbox_api, ms.theporndb_api):
+        monkeypatch.setattr(module, "query_scenes_browse", lambda *a, **k: page)
+        monkeypatch.setattr(module, "query_scenes_page", lambda *a, **k: page)
+    seen = install(monkeypatch, lambda r: http_error(500, b"boom"))
+    settings = {"whisparrUrl": URL, "whisparrApiKey": KEY}
+    res = (ms.find_missing_scenes_paginated("performer", "1", settings) if view == "find"
+           else ms.browse_stashdb(plugin_settings=settings, page_size=50))
+    assert [s["stash_id"] for s in res["missing_scenes"]] == ["s1"]
+    assert seen == []
+    assert "whisparr_error" not in res
+    assert res["missing_scenes"][0]["in_whisparr"] is False
+    assert res["whisparr_configured"] is True

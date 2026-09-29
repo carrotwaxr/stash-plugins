@@ -1972,7 +1972,8 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
     whisparr_error = None
     if whisparr_url and whisparr_api_key:
         whisparr_configured = True
-        if not first_page_failed:
+        # Whisparr keys on StashDB ids, so another box's scenes can't be in it
+        if not first_page_failed and is_stashdb_endpoint(stashdb_url):
             whisparr_status_map, whisparr_error = _whisparr_status_for_response(whisparr_url, whisparr_api_key)
 
     for scene in result["scenes"]:
@@ -2262,7 +2263,8 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
     whisparr_error = None
     if whisparr_url and whisparr_api_key:
         whisparr_configured = True
-        if not first_page_failed:
+        # Whisparr keys on StashDB ids, so another box's scenes can't be in it
+        if not first_page_failed and is_stashdb_endpoint(stashdb_url):
             whisparr_status_map, whisparr_error = _whisparr_status_for_response(whisparr_url, whisparr_api_key)
 
     for scene in collected:
