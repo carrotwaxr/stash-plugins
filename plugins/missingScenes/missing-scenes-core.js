@@ -70,11 +70,32 @@
       throw new Error("Invalid response from plugin");
     }
 
-    if (output.error) {
+    // A response that carries scenes plus an error is a (partial) result the UI
+    // must render; only a plain error (no scenes key) is thrown.
+    if (output.error && !("missing_scenes" in output)) {
       throw new Error(output.error);
     }
 
     return output;
+  }
+
+  /**
+   * Human-readable text for a failed find_missing / browse_stashdb response.
+   * Returns "" when the response carries no error. Plain text (escape before HTML).
+   */
+  function describeFailure(output) {
+    if (!output || !output.error) return "";
+    let msg = String(output.error);
+    if (output.auth_error && !/api key/i.test(msg)) {
+      msg += " Check the stash-box API key in Settings > Metadata Providers.";
+    }
+    if (output.rate_limited) {
+      const wait = output.retry_after;
+      msg += wait !== undefined && wait !== null
+        ? ` The stash-box is rate-limited, try again in ${wait} s.`
+        : " The stash-box is rate-limited, try again shortly.";
+    }
+    return msg;
   }
 
   /**
@@ -368,6 +389,7 @@
     getGraphQLUrl,
     graphqlRequest,
     runPluginOperation,
+    describeFailure,
     escapeHtml,
     formatDate,
     formatDuration,
@@ -386,6 +408,7 @@
       getGraphQLUrl,
       graphqlRequest,
       runPluginOperation,
+      describeFailure,
       escapeHtml,
       formatDate,
       formatDuration,

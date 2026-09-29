@@ -7,6 +7,7 @@
   const Core = window.MissingScenesCore;
   const {
     runPluginOperation,
+    describeFailure,
     escapeHtml,
     createSceneCard,
   } = Core;
@@ -41,6 +42,7 @@
   // Page state (module-scoped for persistence)
   let missingScenes = [];
   let isLoading = false;
+  let requestToken = 0; // bumped by every new request and when the page is left
   let currentCursor = null;
   let hasMore = true;
   let sortField = "DATE";
@@ -70,7 +72,7 @@
    * Render the browse page content into the container
    */
   function renderPage(container, state) {
-    const { loading, error, scenes, stats } = state;
+    const { loading, error, warning, scenes, stats } = state;
 
     // Build filter checkboxes
     const filterPerformersChecked = filterFavoritePerformers ? 'checked' : '';
@@ -98,11 +100,16 @@
     // Build stats text
     let statsText = '';
     if (stats) {
+      // "missing" refers only to the missing estimate; the stash-box total is a different number
+      const estimate = stats.missing_count_estimate;
       statsText = `Showing ${scenes.length}`;
-      if (!stats.is_complete) {
-        statsText += ` of ~${stats.total_on_stashdb.toLocaleString()}`;
+      if (!stats.is_complete && typeof estimate === "number" && estimate >= scenes.length) {
+        statsText += ` of ~${estimate.toLocaleString()}`;
       }
       statsText += " missing scenes";
+      if (typeof stats.total_on_stashdb === "number") {
+        statsText += ` (${stats.total_on_stashdb.toLocaleString()} scenes on ${stats.stashdb_name || "StashDB"})`;
+      }
       if (stats.filters_active) statsText += " (filtered)";
       if (stats.excluded_tags_applied) statsText += " (content filtered)";
       if (stats.cache_info) {
@@ -133,6 +140,7 @@
         <div class="ms-placeholder ms-error">
           <div class="ms-error-icon">!</div>
           <div>${escapeHtml(error)}</div>
+          <button class="ms-btn ms-retry-btn" id="ms-retry-btn">Retry</button>
         </div>
       `;
     } else if (scenes.length === 0) {
@@ -150,8 +158,8 @@
     const showLoadMore = hasMore && scenes.length > 0;
 
     let loadMoreText = 'Load More';
-    if (stats && hasMore) {
-      const estimatedRemaining = stats.total_on_stashdb - scenes.length;
+    if (stats && hasMore && typeof stats.missing_count_estimate === "number") {
+      const estimatedRemaining = stats.missing_count_estimate - scenes.length;
       if (estimatedRemaining > 0) {
         const nextBatch = Math.min(pageSize, estimatedRemaining);
         loadMoreText = `Load More (${nextBatch})`;
@@ -211,7 +219,8 @@
           </div>
         </div>
 
-        <div class="ms-browse-stats">${statsText}</div>
+        <div class="ms-browse-stats">${escapeHtml(statsText)}</div>
+        ${warning ? `<div class="ms-warning"><span class="ms-warning-text">${escapeHtml(warning)}</span> <button class="ms-btn ms-btn-secondary ms-retry-btn" id="ms-retry-btn">Retry from here</button></div>` : ''}
 
         <div class="ms-browse-results">
           ${resultsPlaceholder}
@@ -245,13 +254,17 @@
         resultsDiv.appendChild(grid);
       }
     }
+
+    // Controls are rebuilt on every render; always re-attach so they work during a load
+    setupControlHandlers(container);
   }
 
   /**
    * Perform search/browse and update state
    */
   async function performSearch(container, reset = true) {
-    if (isLoading) return;
+    // Load More while another request is in flight would double-append
+    if (!reset && isLoading) return;
 
     if (reset) {
       currentCursor = null;
@@ -259,6 +272,8 @@
       hasMore = true;
     }
 
+    // A newer request (sort/filter/endpoint change) or leaving the page supersedes this one
+    const token = ++requestToken;
     isLoading = true;
     renderPage(container, { loading: true, error: null, scenes: missingScenes, stats: null });
 
@@ -272,8 +287,25 @@
         filterFavoriteStudios,
         filterFavoriteTags,
       });
+      if (token !== requestToken) return;
 
-      missingScenes = reset ? result.missing_scenes : [...missingScenes, ...result.missing_scenes];
+      const failureText = describeFailure(result);
+      if (failureText && !result.partial) {
+        // Nothing new loaded: keep the scenes we have; cursor and has_more stay as they were
+        isLoading = false;
+        hasMore = missingScenes.length > 0 && currentCursor !== null;
+        renderPage(container, {
+          loading: false,
+          error: missingScenes.length === 0 ? failureText : null,
+          warning: missingScenes.length > 0 ? failureText : null,
+          scenes: missingScenes,
+          stats: null,
+        });
+        return;
+      }
+
+      const newScenes = result.missing_scenes || [];
+      missingScenes = reset ? newScenes : [...missingScenes, ...newScenes];
       currentCursor = result.cursor;
       hasMore = result.has_more;
       whisparrConfigured = result.whisparr_configured;
@@ -284,23 +316,30 @@
       renderPage(container, {
         loading: false,
         error: null,
+        warning: failureText || null,
         scenes: missingScenes,
         stats: {
           total_on_stashdb: result.total_on_stashdb,
+          missing_count_estimate: result.missing_count_estimate,
+          stashdb_name: result.stashdb_name,
           is_complete: result.is_complete,
           filters_active: result.filters_active,
           excluded_tags_applied: result.excluded_tags_applied,
           cache_info: result.cache_info || null,
         }
       });
-
-      // Re-attach filter/sort handlers after render
-      setupControlHandlers(container);
     } catch (error) {
+      if (token !== requestToken) return;
       console.error("[MissingScenes] Browse failed:", error);
       isLoading = false;
-      renderPage(container, { loading: false, error: error.message, scenes: [], stats: null });
-      setupControlHandlers(container);
+      const msg = error.message || "Failed to load missing scenes";
+      renderPage(container, {
+        loading: false,
+        error: missingScenes.length === 0 ? msg : null,
+        warning: missingScenes.length > 0 ? msg : null,
+        scenes: missingScenes,
+        stats: null,
+      });
     }
   }
 
@@ -350,6 +389,11 @@
     container.querySelector('#ms-load-more-btn')?.addEventListener('click', () => {
       performSearch(container, false);
     });
+
+    // Retry: from the returned cursor when scenes are already shown, else from scratch
+    container.querySelector('#ms-retry-btn')?.addEventListener('click', () => {
+      performSearch(container, missingScenes.length === 0);
+    });
   }
 
   /**
@@ -367,6 +411,7 @@
         setPageTitle("Missing Scenes | Stash");
 
         // Reset state for fresh page load
+        requestToken++;
         missingScenes = [];
         currentCursor = null;
         hasMore = true;
@@ -383,11 +428,13 @@
 
         // Initial render and load
         renderPage(containerRef.current, { loading: true, error: null, scenes: [], stats: null });
-        setupControlHandlers(containerRef.current);
         performSearch(containerRef.current, true);
       }
 
       init();
+
+      // Leaving the page: ignore any response still in flight
+      return () => { requestToken++; };
     }, []);
 
     return React.createElement('div', {

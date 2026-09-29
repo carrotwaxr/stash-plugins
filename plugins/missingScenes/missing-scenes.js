@@ -5,6 +5,7 @@
   const Core = window.MissingScenesCore;
   const {
     runPluginOperation,
+    describeFailure,
     escapeHtml,
     addToWhisparr,
     createSceneCard: coreCreateSceneCard,
@@ -17,6 +18,8 @@
   let currentEntityName = null;
   let missingScenes = [];
   let isLoading = false;
+  let requestToken = 0; // bumped by every new search and when the modal closes
+  let currentWarning = null; // {message, retryLabel} shown above partial results
   let whisparrConfigured = false;
   let stashdbUrl = "";
 
@@ -330,6 +333,9 @@
       modalRoot.remove();
       modalRoot = null;
     }
+    // Invalidate any in-flight request so a late response cannot touch a closed modal
+    requestToken++;
+    isLoading = false;
   }
 
   /**
@@ -363,8 +369,8 @@
     const loaded = missingScenes.length;
     if (data.is_complete) {
       missingDisplay = `${loaded}`;
-    } else if (estimate !== null && estimate !== undefined) {
-      missingDisplay = `~${estimate} (${loaded} loaded)`;
+    } else if (estimate !== null && estimate !== undefined && Number(estimate) >= 0) {
+      missingDisplay = `~${Math.max(0, Number(estimate))} (${loaded} loaded)`;
     } else {
       // When filters are active or no estimate, just show loaded count
       missingDisplay = `${loaded} loaded`;
@@ -373,7 +379,7 @@
     // Build stats HTML - when filters are active, indicate filtered results
     const stashdbName = escapeHtml(data.stashdb_name || "StashDB");
     let stashdbLabel = `On ${stashdbName}:`;
-    let stashdbValue = escapeHtml(data.total_on_stashdb || 0);
+    let stashdbValue = escapeHtml(data.total_on_stashdb === null || data.total_on_stashdb === undefined ? "?" : data.total_on_stashdb);
     if (filtersActive) {
       stashdbLabel = `Total on ${stashdbName}:`;
     }
@@ -400,6 +406,24 @@
     // Update pagination state
     totalOnStashdb = data.total_on_stashdb || 0;
     totalLocal = data.total_local || 0;
+  }
+
+  /**
+   * Warning banner (partial results) with a retry button
+   */
+  function buildWarningBanner(message, retryLabel, onRetry) {
+    const banner = document.createElement("div");
+    banner.className = "ms-warning";
+    const msg = document.createElement("span");
+    msg.className = "ms-warning-text";
+    msg.innerHTML = escapeHtml(message);
+    banner.appendChild(msg);
+    const btn = document.createElement("button");
+    btn.className = "ms-btn ms-btn-secondary ms-retry-btn";
+    btn.textContent = retryLabel;
+    btn.onclick = onRetry;
+    banner.appendChild(btn);
+    return banner;
   }
 
   /**
@@ -441,6 +465,9 @@
     }
 
     container.innerHTML = "";
+    if (currentWarning) {
+      container.appendChild(buildWarningBanner(currentWarning.message, currentWarning.retryLabel, currentWarning.onRetry));
+    }
     container.appendChild(grid);
 
     // Show "Add All" button if Whisparr is configured
@@ -466,8 +493,10 @@
 
     if (hasMore && !isComplete && missingScenes.length > 0) {
       loadMoreBtn.style.display = "inline-block";
-      const estimate = totalOnStashdb - totalLocal;
-      loadMoreBtn.textContent = `Load More (${missingScenes.length} of ~${estimate})`;
+      const estimate = Math.max(0, totalOnStashdb - totalLocal);
+      loadMoreBtn.textContent = estimate > missingScenes.length
+        ? `Load More (${missingScenes.length} of ~${estimate})`
+        : `Load More (${missingScenes.length} loaded)`;
       loadMoreBtn.onclick = handleLoadMore;
       loadMoreBtn.disabled = isLoading;
     } else {
@@ -579,7 +608,7 @@
   /**
    * Show error state
    */
-  function showError(message) {
+  function showError(message, onRetry = null) {
     const container = document.getElementById("ms-results");
     if (container) {
       container.innerHTML = `
@@ -588,6 +617,13 @@
           <div>${escapeHtml(message)}</div>
         </div>
       `;
+      if (onRetry) {
+        const btn = document.createElement("button");
+        btn.className = "ms-btn ms-retry-btn";
+        btn.textContent = "Retry";
+        btn.onclick = onRetry;
+        container.appendChild(btn);
+      }
     }
   }
 
@@ -602,13 +638,15 @@
     }
 
     isLoading = true;
-    createModal();
+    createModal(); // closes any previous modal, which invalidates its requests
+    const token = ++requestToken;
     showLoading();
     setStatus("Checking endpoints...", "loading");
 
     try {
       // Check available endpoints for this entity
       const endpointInfo = await getEndpoints(currentEntityType, currentEntityId);
+      if (token !== requestToken) return;
       availableEndpoints = endpointInfo.available_endpoints || [];
       selectedEndpoint = endpointInfo.default_endpoint;
 
@@ -641,7 +679,8 @@
       await performSearch(true);
     } catch (error) {
       console.error("[MissingScenes] Search failed:", error);
-      showError(error.message || "Failed to search for missing scenes");
+      if (token !== requestToken) return;
+      showError(error.message || "Failed to search for missing scenes", handleSearch);
       setStatus(error.message || "Search failed", "error");
       isLoading = false;
     }
@@ -658,11 +697,16 @@
       hasMore = true;
       isComplete = false;
       missingScenes = [];
+      currentWarning = null;
       showLoading();
     }
 
+    // Each call owns a token; a newer call (or closing the modal) supersedes it
+    const token = ++requestToken;
     isLoading = true;
     setStatus(reset ? "Searching..." : "Loading more...", "loading");
+    const retryFromHere = () => performSearch(false);
+    const retryAll = () => performSearch(true);
 
     try {
       const result = await findMissingScenes(currentEntityType, currentEntityId, selectedEndpoint, {
@@ -674,6 +718,21 @@
         filterFavoriteStudios: filterFavoriteStudios,
         filterFavoriteTags: filterFavoriteTags,
       });
+      if (token !== requestToken) return;
+
+      const failureText = describeFailure(result);
+      if (failureText && !result.partial) {
+        // Nothing new loaded: keep what we have and offer a retry
+        if (missingScenes.length === 0) {
+          showError(failureText, retryAll);
+          updateLoadMoreButton();
+        } else {
+          currentWarning = { message: failureText, retryLabel: "Retry from here", onRetry: retryFromHere };
+          renderResults();
+        }
+        setStatus(failureText, "error");
+        return;
+      }
 
       // Append new scenes to existing list
       const newScenes = result.missing_scenes || [];
@@ -688,10 +747,16 @@
       hasMore = result.has_more || false;
       isComplete = result.is_complete || false;
 
+      currentWarning = failureText
+        ? { message: failureText, retryLabel: "Retry from here", onRetry: retryFromHere }
+        : null;
+
       updateStats(result);
       renderResults();
 
-      if (missingScenes.length > 0) {
+      if (failureText) {
+        setStatus(`Loaded ${missingScenes.length} missing scenes, then failed: ${failureText}`, "error");
+      } else if (missingScenes.length > 0) {
         const statusText = isComplete
           ? `Found ${missingScenes.length} missing scenes`
           : `Loaded ${missingScenes.length} missing scenes`;
@@ -700,12 +765,21 @@
         setStatus("You have all available scenes!", "success");
       }
     } catch (error) {
+      if (token !== requestToken) return;
       console.error("[MissingScenes] Search failed:", error);
-      showError(error.message || "Failed to search for missing scenes");
-      setStatus(error.message || "Search failed", "error");
+      const msg = error.message || "Failed to search for missing scenes";
+      if (missingScenes.length === 0) {
+        showError(msg, retryAll);
+      } else {
+        currentWarning = { message: msg, retryLabel: "Retry from here", onRetry: retryFromHere };
+        renderResults();
+      }
+      setStatus(msg, "error");
     } finally {
-      isLoading = false;
-      updateLoadMoreButton();
+      if (token === requestToken) {
+        isLoading = false;
+        updateLoadMoreButton();
+      }
     }
   }
 
