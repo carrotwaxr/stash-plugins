@@ -305,6 +305,18 @@ class TestThorough(MatchBase):
         self.assertNotIn("warnings", out)
 
 
+class TestYearZeroDate(MatchBase):
+    def test_a_year_zero_release_date_does_not_fail_the_phase(self):
+        dated = [dict(sc("a"), release_date="0000"), dict(sc("b"), release_date="0000-05"),
+                 dict(sc("c"), release_date="2024-01-02")]
+        with mock.patch.object(scene_matcher, "query_stashdb_scenes_combined", return_value=(dated, None)), \
+             mock.patch.object(scene_matcher, "query_stashdb_scenes_by_performers", return_value=([], None)), \
+             mock.patch.object(scene_matcher, "query_stashdb_scenes_by_studio", return_value=([], None)):
+            out = scene_matcher.find_matches_thorough("1", {})
+        self.assertNotIn("error", out)
+        self.assertEqual([r["stash_id"] for r in out["results"]], ["c", "a", "b"])
+
+
 class TestLocalIdsFailure(MatchBase):
     """Failing to list the library's stash IDs costs the In Stash badges, not the results."""
 

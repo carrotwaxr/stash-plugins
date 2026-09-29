@@ -39,6 +39,17 @@ test("formatDate never says Invalid Date", () => {
   assert.strictEqual(x.formatDate(""), "");
 });
 
+test("a year-0 placeholder date is no date: not shown, sorted with the undated", () => {
+  const { x } = load();
+  for (const d of ["0000", "0000-05", "0000-05-03"]) assert.strictEqual(x.formatDate(d), "", d);
+  assert.deepStrictEqual(order(x, ["0000-05", "2020-01-01", "0000", "0000-05-03"]),
+    ["2020-01-01", "0000-05", "0000", "0000-05-03"]);
+  // The card's meta line leaves it out rather than showing an empty part
+  const card = x.createSceneCard(scene({ release_date: "0000-05", duration: 90, studio: { name: "S" } }));
+  const meta = card.children[1].children.find((c) => c.className === "sm-scene-meta");
+  assert.strictEqual(meta.textContent, "S \u2022 1:30");
+});
+
 test("formatDate does not drift with the time zone", () => {
   const { x } = load();
   assert.ok(/1/.test(x.formatDate("2024-01-01")) && /2024/.test(x.formatDate("2024-01-01")));

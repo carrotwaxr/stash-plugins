@@ -804,13 +804,16 @@ _PARTIAL_DATE = re.compile(r'^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$')
 
 def parse_partial_date(value):
     """(year, month, day) for "YYYY", "YYYY-MM" or "YYYY-MM-DD" (month and day may be
-    None), or None when the value is missing, malformed or impossible."""
+    None), or None when the value is missing, malformed or impossible. Year 0 ("0000",
+    a placeholder some stash-box entries hold) is no date: datetime has no year 0."""
     if not isinstance(value, str):
         return None
     m = _PARTIAL_DATE.match(value.strip()[:10])
     if not m:
         return None
     year, month, day = (int(g) if g else None for g in m.groups())
+    if year < datetime.MINYEAR:
+        return None
     if month is not None and not 1 <= month <= 12:
         return None
     if day is not None and not _valid_dates(year, month, day):

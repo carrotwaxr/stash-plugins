@@ -634,6 +634,15 @@ class TestResultSorting(unittest.TestCase):
         self.assertEqual(self._order(["20x4", "2023-12-31", "2024-02-30"]),
                          ["2023-12-31", "20x4", "2024-02-30"])
 
+    def test_year_zero_is_no_date(self):
+        # Stash-boxes hold placeholder dates like "0000" and "0000-05"; datetime has no year 0
+        self.assertEqual(self._order(["0000-05", "2020-01-01", "0000", "0000-05-03"]),
+                         ["2020-01-01", "0000-05", "0000", "0000-05-03"])
+        from scene_matcher import date_bonus, parse_partial_date
+        for value in ("0000", "0000-05", "0000-05-03"):
+            self.assertIsNone(parse_partial_date(value), value)
+            self.assertEqual(date_bonus("2024-05-03", value), 0)
+
 
 class TestEdgeCases(unittest.TestCase):
     """Tests for edge cases and error conditions."""

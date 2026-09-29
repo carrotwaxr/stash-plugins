@@ -156,12 +156,14 @@
    * Parse a stash-box date ("YYYY", "YYYY-MM" or "YYYY-MM-DD") into
    * { year, month, day } (month/day null when absent), or null when missing,
    * malformed or impossible. Built from the parts, never via Date(string).
+   * Year 0 ("0000", a placeholder) is no date, as in Python.
    */
   function parsePartialDate(value) {
     if (typeof value !== "string") return null;
     const m = PARTIAL_DATE.exec(value.trim().slice(0, 10));
     if (!m) return null;
     const year = Number(m[1]);
+    if (year < 1) return null;
     const month = m[2] ? Number(m[2]) : null;
     const day = m[3] ? Number(m[3]) : null;
     if (month !== null && (month < 1 || month > 12)) return null;
@@ -171,12 +173,12 @@
 
   /**
    * Format a stash-box date for display: "2024", "May 2024" or "May 3, 2024".
-   * A malformed date is shown as-is.
+   * A year-0 placeholder shows nothing; any other malformed date is shown as-is.
    */
   function formatDate(dateStr) {
     if (!dateStr) return "";
     const p = parsePartialDate(dateStr);
-    if (!p) return String(dateStr);
+    if (!p) return /^\s*0000(?:-|\s*$)/.test(String(dateStr)) ? "" : String(dateStr);
     if (p.month === null) return String(p.year);
     const date = new Date(p.year, p.month - 1, p.day || 1);
     if (p.day === null) {
@@ -608,8 +610,9 @@
     if (scene.studio?.name) {
       metaParts.push(scene.studio.name);
     }
-    if (scene.release_date) {
-      metaParts.push(formatDate(scene.release_date));
+    const shownDate = formatDate(scene.release_date);
+    if (shownDate) {
+      metaParts.push(shownDate);
     }
     if (scene.duration) {
       metaParts.push(formatDuration(scene.duration));
