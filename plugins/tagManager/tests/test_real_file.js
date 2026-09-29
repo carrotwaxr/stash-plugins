@@ -10,7 +10,7 @@ const { loadTagManager } = require("./harness");
 const SRC_PATH = path.join(__dirname, "..", "tag-manager.js");
 
 // Names called but never defined. Every entry must still be found (keeps the list honest).
-const KNOWN_UNDEFINED = ["loadStashdbTags"]; // removed by Task 10
+const KNOWN_UNDEFINED = [];
 
 const KEYWORDS = new Set(
   ("if for while switch catch return typeof void delete throw await yield new function class " +

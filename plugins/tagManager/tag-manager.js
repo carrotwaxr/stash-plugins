@@ -563,10 +563,28 @@
 
     const output = data?.runPluginOperation;
     if (output?.error) {
-      throw new Error(output.error);
+      const err = new Error(output.error);
+      err.output = output; // keep auth_error etc. for formatBackendError
+      throw err;
     }
 
     return output;
+  }
+
+  /**
+   * Human-readable text for a backend error output ({error, auth_error}).
+   */
+  function formatBackendError(output, boxName) {
+    if (!output || typeof output !== 'object' || !output.error) return 'Unknown error';
+    if (output.auth_error) {
+      const name = boxName || selectedStashBox?.name || 'The stash-box';
+      return `${name} rejected the API key (${output.error}). Check the API key in Settings → Metadata Providers.`;
+    }
+    return String(output.error);
+  }
+
+  function backendErrorText(e) {
+    return formatBackendError(e?.output || { error: e?.message });
   }
 
   /**
@@ -688,7 +706,7 @@
       showStatus(msg, 'success');
     } catch (e) {
       console.error("[tagManager] Cache refresh failed:", e);
-      showStatus(`Cache refresh failed: ${e.message}`, 'error');
+      showStatus(`Cache refresh failed: ${backendErrorText(e)}`, 'error');
     } finally {
       isCacheLoading = false;
       renderPage(container);
@@ -722,7 +740,7 @@
     } catch (e) {
       console.error("[tagManager] Failed to load tags:", e);
       stashdbTags = null;
-      cacheStatus = { exists: false, error: e.message };
+      cacheStatus = { exists: false, error: backendErrorText(e) };
     }
   }
 
@@ -2599,15 +2617,17 @@
         stashdbTags = null;
         matchResults = {};
         cacheStatus = null;
+        selectedForImport = new Set();
         // Load cache status for new endpoint
         await loadCacheStatus();
 
         // If on browse tab and cache exists, load it automatically
         if (activeTab === 'browse' && cacheStatus?.exists && !cacheStatus?.expired) {
-          await loadStashdbTags(container);
+          await loadTagsFromCache(container);
         }
 
         renderPage(container);
+        if (cacheStatus?.error) showStatus(cacheStatus.error, 'error');
       }
     });
 
@@ -2697,6 +2717,7 @@
     isLoading = true;
     renderPage(container);
 
+    let searchError = null;
     for (const tag of tagsToSearch) {
       try {
         const result = await callBackend('search', {
@@ -2707,11 +2728,15 @@
       } catch (e) {
         console.error(`[tagManager] Error searching for ${tag.name}:`, e);
         matchResults[tag.id] = [];
+        if (!searchError) {
+          searchError = backendErrorText(e);
+        }
       }
     }
 
     isLoading = false;
     renderPage(container);
+    if (searchError) showStatus(`Error: ${searchError}`, 'error');
   }
 
   /**
@@ -2730,7 +2755,7 @@
       renderPage(container);
     } catch (e) {
       console.error(`[tagManager] Error searching for ${tag.name}:`, e);
-      showStatus(`Error: ${e.message}`, 'error');
+      showStatus(`Error: ${backendErrorText(e)}`, 'error');
     }
   }
 
@@ -3627,7 +3652,7 @@
         // Re-attach select handlers
         attachSelectHandlers();
       } catch (e) {
-        showStatus(`Search error: ${e.message}`, 'error');
+        showStatus(`Search error: ${backendErrorText(e)}`, 'error');
       } finally {
         searchBtn.disabled = false;
         searchBtn.textContent = 'Search';
@@ -3715,16 +3740,15 @@
         // Load cache status for selected endpoint
         await loadCacheStatus();
 
-        // If fuzzy search enabled, load tags from cache (or fetch if no cache)
-        if (settings.enableFuzzySearch) {
-          containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading tag cache...</div></div>';
-          await loadTagsFromCache(containerRef.current);
-        }
+        // Load tags from cache (or fetch if no cache); Browse needs them even without fuzzy search
+        containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading tag cache...</div></div>';
+        await loadTagsFromCache(containerRef.current);
 
         setInitialized(true);
         console.debug("[tagManager] Initialization complete");
         _activeContainer = containerRef.current;
         renderPage(containerRef.current);
+        if (cacheStatus?.error) showStatus(cacheStatus.error, 'error');
       }
 
       init();
@@ -5116,10 +5140,12 @@
       parseBlacklist,
       isBlacklisted,
       callBackend,
+      formatBackendError,
+      loadTagsFromCache,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,
-      categoryMappings, tagBlacklist, isImporting, pendingChanges, isEditMode,
+      categoryMappings, tagBlacklist, isImporting, pendingChanges, isEditMode, cacheStatus,
     });
     window.__TAG_MANAGER_TEST__.setState = (patch) => {
       if ("localTags" in patch) localTags = patch.localTags;
