@@ -6,13 +6,18 @@ Searches StashDB for scenes matching a local scene's performers and/or studio.
 Uses only Python standard library - no pip dependencies.
 """
 
+import hashlib
 import json
+import os
 import re
 import sys
+import tempfile
+import time
 import urllib.request
 import urllib.error
 
 import log
+import plugin_data
 
 # Import resilient StashDB API utilities
 import stashbox_api
@@ -209,11 +214,64 @@ def get_local_scene(scene_id):
     return None
 
 
-def get_local_scene_stash_ids(endpoint):
-    """Get all stash_ids for scenes that are linked to a specific stash-box endpoint."""
+LOCAL_IDS_TTL = 300  # seconds
+LOCAL_IDS_PAGE_SIZE = 1000
+
+
+def _cache_path(endpoint):
+    key = normalize_endpoint(endpoint).encode("utf-8")
+    try:
+        digest = hashlib.md5(key, usedforsecurity=False).hexdigest()
+    except TypeError:  # Python < 3.9
+        digest = hashlib.md5(key).hexdigest()
+    return os.path.join(plugin_data.current_dir(), f"local_ids_{digest}.json")
+
+
+def _read_cache(path):
+    """Return the cached set of IDs, or None on a miss (absent, stale or corrupt)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        ids = data["ids"]
+        fresh = 0 <= time.time() - float(data["ts"]) < LOCAL_IDS_TTL
+        if not fresh or not isinstance(ids, list):
+            return None
+        return set(ids)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _write_cache(path, ids):
+    """Write atomically via a unique temp file. Failure to cache is not an error."""
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="local_ids_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "ids": sorted(ids)}, f)
+        os.replace(tmp, path)
+        tmp = None
+    except OSError as e:
+        log.LogWarning(f"Could not write the local ID cache: {e}")
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def local_stash_ids(endpoint):
+    """Stash IDs of local scenes linked to `endpoint` (the box's endpoint as configured
+    in Stash). Cached in the data dir for LOCAL_IDS_TTL seconds."""
+    path = _cache_path(endpoint)
+    cached = _read_cache(path)
+    if cached is not None:
+        log.LogDebug(f"Using cached local stash_ids ({len(cached)} entries)")
+        return cached
+
     query = """
-    query FindScenes($filter: FindFilterType) {
-        findScenes(filter: $filter) {
+    query FindLinkedScenes($scene_filter: SceneFilterType, $filter: FindFilterType) {
+        findScenes(scene_filter: $scene_filter, filter: $filter) {
             count
             scenes {
                 id
@@ -225,39 +283,29 @@ def get_local_scene_stash_ids(endpoint):
         }
     }
     """
-
-    all_stash_ids = set()
+    target = normalize_endpoint(endpoint)
+    ids = set()
     page = 1
-    per_page = 100
-
     while True:
         data = stash_graphql(query, {
-            "filter": {
-                "page": page,
-                "per_page": per_page
-            }
+            "scene_filter": {"stash_id_endpoint": {"endpoint": endpoint, "modifier": "NOT_NULL"}},
+            "filter": {"per_page": LOCAL_IDS_PAGE_SIZE, "page": page},
         })
-
-        if not data or "findScenes" not in data:
-            break
-
-        scenes = data["findScenes"].get("scenes", [])
-        if not scenes:
-            break
-
+        if not data or not data.get("findScenes"):
+            raise RuntimeError("Could not list local scenes from Stash (no response to findScenes)")
+        found = data["findScenes"]
+        scenes = found.get("scenes") or []
         for scene in scenes:
-            for stash_id in scene.get("stash_ids", []):
-                if normalize_endpoint(stash_id.get("endpoint")) == normalize_endpoint(endpoint):
-                    all_stash_ids.add(stash_id.get("stash_id"))
-
-        total = data["findScenes"].get("count", 0)
-        if page * per_page >= total:
+            for sid in scene.get("stash_ids") or []:
+                if normalize_endpoint(sid.get("endpoint")) == target and sid.get("stash_id"):
+                    ids.add(sid["stash_id"])
+        if not scenes or page * LOCAL_IDS_PAGE_SIZE >= (found.get("count") or 0):
             break
-
         page += 1
 
-    log.LogInfo(f"Found {len(all_stash_ids)} local scenes linked to {endpoint}")
-    return all_stash_ids
+    log.LogInfo(f"Found {len(ids)} local scenes linked to {endpoint}")
+    _write_cache(path, ids)
+    return ids
 
 
 # ============================================================================
@@ -734,7 +782,7 @@ def get_scene_context(scene_id, plugin_settings, endpoint=None):
     return context, None
 
 
-def format_results(all_scenes, context, local_stash_ids, cache_hit):
+def format_results(all_scenes, context, local_stash_ids):
     """Format and score all scenes for the response."""
     performer_stash_ids = context["performer_stash_ids"]
     studio_stash_id = context["studio_stash_id"]
@@ -758,7 +806,7 @@ def format_results(all_scenes, context, local_stash_ids, cache_hit):
         formatted["duration_score"] = duration_score
         formatted["matches_studio"] = (
             studio_stash_id is not None and
-            stashdb_scene.get("studio", {}).get("id") == studio_stash_id
+            (stashdb_scene.get("studio") or {}).get("id") == studio_stash_id
         )
         formatted["in_local_stash"] = stashdb_scene_id in local_stash_ids
 
@@ -768,7 +816,7 @@ def format_results(all_scenes, context, local_stash_ids, cache_hit):
     return results
 
 
-def find_matches_fast(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None, endpoint=None):
+def find_matches_fast(scene_id, plugin_settings, endpoint=None):
     """
     Phase 1: Fast text-based searches.
     Uses cleaned title and constructed studio+performer query.
@@ -807,18 +855,9 @@ def find_matches_fast(scene_id, plugin_settings, cached_stash_ids=None, cache_en
             all_scenes[s["id"]] = s
 
     # Get local scene stash_ids to mark which results user already has
-    local_stash_ids = None
-    cache_hit = False
+    local_ids = local_stash_ids(context["endpoint"])
 
-    if cached_stash_ids and normalize_endpoint(cache_endpoint) == normalize_endpoint(stashdb_url):
-        local_stash_ids = set(cached_stash_ids)
-        cache_hit = True
-        log.LogDebug(f"Using cached local stash_ids ({len(local_stash_ids)} entries)")
-    else:
-        log.LogDebug("Fetching local scene stash_ids...")
-        local_stash_ids = get_local_scene_stash_ids(stashdb_url)
-
-    results = format_results(all_scenes, context, local_stash_ids, cache_hit)
+    results = format_results(all_scenes, context, local_ids)
 
     log.LogInfo(f"Phase 1: returning {len(results)} scenes from text searches")
 
@@ -840,14 +879,10 @@ def find_matches_fast(scene_id, plugin_settings, cached_stash_ids=None, cache_en
         "has_more": bool(context["performer_stash_ids"] or context["studio_stash_id"])
     }
 
-    # Include stash_ids for JS to cache (only on cache miss)
-    if not cache_hit:
-        response["local_stash_ids"] = list(local_stash_ids)
-
     return response
 
 
-def find_matches_thorough(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None, exclude_ids=None, endpoint=None):
+def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=None):
     """
     Phase 2: Thorough performer/studio searches.
     Uses combined filters when possible, higher page limits.
@@ -926,16 +961,9 @@ def find_matches_thorough(scene_id, plugin_settings, cached_stash_ids=None, cach
                     all_scenes[s["id"]] = s
 
     # Get local scene stash_ids
-    local_stash_ids = None
-    cache_hit = False
+    local_ids = local_stash_ids(context["endpoint"])
 
-    if cached_stash_ids and normalize_endpoint(cache_endpoint) == normalize_endpoint(stashdb_url):
-        local_stash_ids = set(cached_stash_ids)
-        cache_hit = True
-    else:
-        local_stash_ids = get_local_scene_stash_ids(stashdb_url)
-
-    results = format_results(all_scenes, context, local_stash_ids, cache_hit)
+    results = format_results(all_scenes, context, local_ids)
 
     log.LogInfo(f"Phase 2: returning {len(results)} additional scenes from performer/studio queries")
 
@@ -954,21 +982,17 @@ def find_matches_thorough(scene_id, plugin_settings, cached_stash_ids=None, cach
         "results": results
     }
 
-    # Include stash_ids for JS to cache (only on cache miss)
-    if not cache_hit:
-        response["local_stash_ids"] = list(local_stash_ids)
-
     return response
 
 
 # Legacy function for backward compatibility
-def find_matching_scenes(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None, endpoint=None):
+def find_matching_scenes(scene_id, plugin_settings, endpoint=None):
     """
     Find StashDB scenes matching a local scene.
     This is the legacy single-call version that runs both phases.
     """
     # Run Phase 1
-    phase1 = find_matches_fast(scene_id, plugin_settings, cached_stash_ids, cache_endpoint, endpoint=endpoint)
+    phase1 = find_matches_fast(scene_id, plugin_settings, endpoint=endpoint)
     if "error" in phase1:
         return phase1
 
@@ -976,8 +1000,6 @@ def find_matching_scenes(scene_id, plugin_settings, cached_stash_ids=None, cache
     phase1_ids = [r["stash_id"] for r in phase1.get("results", [])]
     phase2 = find_matches_thorough(
         scene_id, plugin_settings,
-        cached_stash_ids=phase1.get("local_stash_ids"),
-        cache_endpoint=phase1.get("endpoint"),
         exclude_ids=phase1_ids,
         endpoint=phase1.get("endpoint")
     )
@@ -996,8 +1018,7 @@ def find_matching_scenes(scene_id, plugin_settings, cached_stash_ids=None, cache
         "endpoint": phase1.get("endpoint"),
         "endpoint_name": phase1.get("endpoint_name"),
         "total_results": len(all_results),
-        "results": all_results,
-        "local_stash_ids": phase1.get("local_stash_ids") or phase2.get("local_stash_ids")
+        "results": all_results
     }
 
 
@@ -1013,6 +1034,8 @@ def main():
         output = {"error": f"Invalid JSON input: {e}"}
         print(json.dumps(output))
         return
+
+    plugin_data.configure(input_data.get("server_connection"))
 
     # Get plugin settings
     plugin_settings = {}
@@ -1042,12 +1065,8 @@ def main():
             if not scene_id:
                 output = {"error": "scene_id is required"}
             else:
-                cached_stash_ids = args.get("cached_local_stash_ids")
-                cache_endpoint = args.get("cache_endpoint")
                 output = find_matches_fast(
                     scene_id, plugin_settings,
-                    cached_stash_ids=cached_stash_ids,
-                    cache_endpoint=cache_endpoint,
                     endpoint=args.get("endpoint")
                 )
 
@@ -1057,13 +1076,9 @@ def main():
             if not scene_id:
                 output = {"error": "scene_id is required"}
             else:
-                cached_stash_ids = args.get("cached_local_stash_ids")
-                cache_endpoint = args.get("cache_endpoint")
                 exclude_ids = args.get("exclude_ids", [])
                 output = find_matches_thorough(
                     scene_id, plugin_settings,
-                    cached_stash_ids=cached_stash_ids,
-                    cache_endpoint=cache_endpoint,
                     exclude_ids=exclude_ids,
                     endpoint=args.get("endpoint")
                 )
@@ -1074,12 +1089,8 @@ def main():
             if not scene_id:
                 output = {"error": "scene_id is required"}
             else:
-                cached_stash_ids = args.get("cached_local_stash_ids")
-                cache_endpoint = args.get("cache_endpoint")
                 output = find_matching_scenes(
                     scene_id, plugin_settings,
-                    cached_stash_ids=cached_stash_ids,
-                    cache_endpoint=cache_endpoint,
                     endpoint=args.get("endpoint")
                 )
 

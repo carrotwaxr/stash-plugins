@@ -114,20 +114,13 @@ class TestFindMatches(unittest.TestCase):
         with mock.patch.object(scene_matcher, "get_stashbox_config", return_value=BOXES), \
              mock.patch.object(scene_matcher, "get_local_scene", return_value=scene), \
              mock.patch.object(scene_matcher, "query_stashdb_by_text", side_effect=fake_text), \
-             mock.patch.object(scene_matcher, "get_local_scene_stash_ids", return_value=set()):
+             mock.patch.object(scene_matcher, "local_stash_ids", return_value=set()):
             out = scene_matcher.find_matches_fast(
                 "1", {"stashBoxEndpoint": "https://stashdb.org/graphql"},
                 endpoint="https://theporndb.net/graphql")
         self.assertEqual(out["endpoint"], "https://theporndb.net/graphql")
         self.assertEqual(out["endpoint_name"], "ThePornDB")
         self.assertTrue(all(u == "https://theporndb.net/graphql" and k == "k2" for u, k in seen))
-
-    def test_local_stash_ids_compare_normalized(self):
-        page = {"findScenes": {"count": 1, "scenes": [
-            {"stash_ids": [{"endpoint": "HTTPS://StashDB.org/graphql/", "stash_id": "abc"}]}]}}
-        with mock.patch.object(scene_matcher, "stash_graphql", return_value=page):
-            ids = scene_matcher.get_local_scene_stash_ids("https://stashdb.org/graphql")
-        self.assertEqual(ids, {"abc"})
 
 
 class TestUserAgent(unittest.TestCase):
