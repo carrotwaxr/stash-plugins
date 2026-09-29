@@ -28,6 +28,7 @@
   let categoryMappings = {}; // { endpoint: { category_name: local_tag_id } } (see getCategoryMapping)
   let tagBlacklistRaw = ''; // Raw blacklist text as saved (for the editor)
   let blacklistPanelOpen = false;
+  let blacklistDraft = null; // Unsaved editor text (null when the editor matches the saved text)
   let tagBlacklist = []; // Parsed blacklist patterns [{type: 'literal'|'regex', pattern: string, regex?: RegExp}]
   let activeTab = 'match'; // 'match' or 'browse'
   let browseCategory = null; // Selected category in browse view
@@ -3325,6 +3326,12 @@
 
     const hasStashBox = stashBoxes.length > 0;
 
+    // A re-render (e.g. the focus refresh) must not drop focus from the blacklist editor.
+    const active = document.activeElement;
+    const editorFocus = active && active.id === 'tm-blacklist-text'
+      ? { start: active.selectionStart, end: active.selectionEnd }
+      : null;
+
     container.innerHTML = `
       <div class="tag-manager">
         <div class="tag-manager-header">
@@ -3376,7 +3383,7 @@
             ${blacklistPanelOpen ? `
               <div class="tm-blacklist-editor">
                 <textarea id="tm-blacklist-text" class="form-control" rows="6"
-                  placeholder="One pattern per line. Plain text matches the whole tag name; /regex/i is a regular expression.">${escapeHtml(tagBlacklistRaw)}</textarea>
+                  placeholder="One pattern per line. Plain text matches the whole tag name; /regex/i is a regular expression.">${escapeHtml(blacklistDraft ?? tagBlacklistRaw)}</textarea>
                 <div class="tm-blacklist-actions">
                   <button class="btn btn-primary btn-sm" id="tm-blacklist-save">Save</button>
                   <span class="tm-blacklist-hint">Blacklisted StashDB tags are hidden from matches and search results.</span>
@@ -3407,6 +3414,14 @@
 
     // Attach event handlers
     attachEventHandlers(container);
+
+    if (editorFocus) {
+      const editor = container.querySelector('#tm-blacklist-text');
+      if (editor) {
+        editor.focus();
+        editor.setSelectionRange(editorFocus.start, editorFocus.end);
+      }
+    }
   }
 
   /**
@@ -3642,6 +3657,10 @@
       blacklistPanelOpen = !blacklistPanelOpen;
       renderPage(container);
     });
+    // Unsaved text lives in blacklistDraft so a re-render keeps it
+    container.querySelector('#tm-blacklist-text')?.addEventListener('input', (e) => {
+      blacklistDraft = e.target.value;
+    });
     container.querySelector('#tm-blacklist-save')?.addEventListener('click', async (e) => {
       const btn = e.target;
       const text = container.querySelector('#tm-blacklist-text')?.value || '';
@@ -3649,6 +3668,7 @@
       btn.textContent = 'Saving...';
       const ok = await saveBlacklist(text);
       if (ok) {
+        if (blacklistDraft === text) blacklistDraft = null; // keep anything typed during the save
         renderPage(container);
         showStatus('Blacklist saved', 'success');
       } else {
@@ -6426,12 +6446,13 @@
       loadCategoryMappings,
       saveCategoryMappings,
       resolveCategoryParents,
+      renderPage,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,
       categoryMappings, tagBlacklist, isImporting, pendingChanges, isEditMode, cacheStatus,
       selectedForImport, hierarchyTags, hierarchyTree, expandedNodes, selectedTagId, copiedTagId,
-      originalParentMap,
+      originalParentMap, blacklistDraft, blacklistPanelOpen, tagBlacklistRaw,
     });
     window.__TAG_MANAGER_TEST__.setState = (patch) => {
       if ("localTags" in patch) localTags = patch.localTags;
@@ -6452,6 +6473,9 @@
       if ("selectedTagId" in patch) selectedTagId = patch.selectedTagId;
       if ("copiedTagId" in patch) copiedTagId = patch.copiedTagId;
       if ("originalParentMap" in patch) originalParentMap = patch.originalParentMap;
+      if ("blacklistDraft" in patch) blacklistDraft = patch.blacklistDraft;
+      if ("blacklistPanelOpen" in patch) blacklistPanelOpen = patch.blacklistPanelOpen;
+      if ("tagBlacklistRaw" in patch) tagBlacklistRaw = patch.tagBlacklistRaw;
     };
   }
 })();
