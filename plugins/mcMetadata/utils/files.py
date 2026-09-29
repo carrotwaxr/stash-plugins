@@ -274,9 +274,18 @@ def find_sidecars(video_path, other_videos=()):
     return found
 
 
+def is_same_file(path, other):
+    """True if other exists and is path's own file: a case-only rename (movie.mp4 -> Movie.mp4)
+    on a case-insensitive filesystem (Windows, macOS), which isn't a collision."""
+    try:
+        return os.path.exists(other) and os.path.samefile(path, other)
+    except OSError:
+        return False
+
+
 def rename_file(filepath, dest_filepath, settings):
-    """Move a file, never overwriting. Returns the destination, or False."""
-    if os.path.exists(dest_filepath):
+    """Move a file, never overwriting (a case-only rename is allowed). Returns the destination, or False."""
+    if os.path.exists(dest_filepath) and not is_same_file(filepath, dest_filepath):
         log.warning(f"Not moving {filepath}: destination already exists at {dest_filepath}")
         return False
     try:

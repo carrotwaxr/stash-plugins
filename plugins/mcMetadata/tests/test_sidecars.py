@@ -193,6 +193,99 @@ class TestCollisionSuffix(_Base):
         self.assertIn("renamerFilepathBudget", errors[0])
 
 
+def _case_insensitive_fs():
+    """Patch os.path.exists/samefile to act like Windows or macOS: names match in any case."""
+    real_exists, real_samefile = os.path.exists, os.path.samefile
+
+    def actual(path):
+        """The existing file path names, found case-insensitively, or None."""
+        if real_exists(path):
+            return path
+        folder, name = os.path.split(path)
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            return None
+        match = [n for n in names if n.lower() == name.lower()]
+        return os.path.join(folder, match[0]) if match else None
+
+    def exists(path):
+        return actual(path) is not None
+
+    def samefile(a, b):
+        a, b = actual(a), actual(b)
+        if a is None or b is None:
+            raise FileNotFoundError(a or b)
+        return real_samefile(a, b)
+
+    exists_patch = patch.object(os.path, "exists", side_effect=exists)
+    samefile_patch = patch.object(os.path, "samefile", side_effect=samefile)
+    return exists_patch, samefile_patch
+
+
+class TestCaseOnlyRename(_Base):
+    def setUp(self):
+        super().setUp()
+        for p in _case_insensitive_fs():
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _scene_in_place(self, **settings):
+        """Rename incoming/movie.mp4 to incoming/Movie.mp4 (a case-only rename)."""
+        for name in ("movie.mp4", "movie.srt", "movie-poster.jpg"):
+            _write(os.path.join(self.incoming, name), name)
+        files = [{"id": "f0", "path": os.path.join(self.incoming, "movie.mp4"), "height": 1080, "width": 1920}]
+        scene = {"id": "5", "title": "Movie", "date": None, "files": files,
+                 "performers": [], "studio": None, "tags": [], "stash_ids": []}
+        stash = _FakeStash({"f0": files[0]["path"]})
+        settings = self._settings(renamer_path=self.incoming, renamer_ignore_files_in_path=False, **settings)
+        with patch.object(scene_module.log, "warning") as warn, patch.object(scene_module.log, "info") as info:
+            result = self.rename(scene, stash, settings)
+        return result, [c.args[0] for c in warn.call_args_list], [c.args[0] for c in info.call_args_list]
+
+    def test_rename_file_allows_a_case_only_rename(self):
+        src, dest = os.path.join(self.incoming, "movie.srt"), os.path.join(self.incoming, "Movie.srt")
+        _write(src, "srt")
+        self.assertTrue(os.path.exists(dest))  # the simulation: the source answers for dest
+        self.assertEqual(rename_file(src, dest, {"dry_run": False}), dest)
+        self.assertEqual(os.listdir(self.incoming), ["Movie.srt"])
+        self.assertEqual(rename_file(dest, src, {"dry_run": True}), src)
+
+    def test_rename_file_still_refuses_another_file(self):
+        src, other = os.path.join(self.incoming, "a.srt"), os.path.join(self.incoming, "B.srt")
+        _write(src, "a")
+        _write(other, "b")
+        with patch.object(scene_module.log, "warning"):
+            self.assertFalse(rename_file(src, os.path.join(self.incoming, "b.srt"), {"dry_run": False}))
+        self.assertEqual(sorted(os.listdir(self.incoming)), ["B.srt", "a.srt"])
+
+    def test_video_and_sidecars_get_a_case_only_rename(self):
+        result, warnings, _ = self._scene_in_place()
+        self.assertEqual(result, os.path.join(self.incoming, "Movie.mp4"))
+        self.assertEqual(sorted(os.listdir(self.incoming)), ["Movie-poster.jpg", "Movie.mp4", "Movie.srt"])
+        self.assertFalse(any("already exists" in w for w in warnings), warnings)
+
+    def test_dry_run_reports_the_case_only_rename(self):
+        result, warnings, info = self._scene_in_place(dry_run=True)
+        self.assertEqual(result, os.path.join(self.incoming, "Movie.mp4"))
+        self.assertIn(f"[DRY RUN]                    To: {os.path.join(self.incoming, 'Movie.mp4')}", info)
+        self.assertIn(
+            f"[DRY RUN] Would move sidecar: {os.path.join(self.incoming, 'movie.srt')} -> "
+            f"{os.path.join(self.incoming, 'Movie.srt')}", info)
+        self.assertFalse(any("already exists" in w for w in warnings), warnings)
+        self.assertEqual(sorted(os.listdir(self.incoming)), ["movie-poster.jpg", "movie.mp4", "movie.srt"])
+
+    def test_another_scene_file_at_the_same_name_is_still_a_collision(self):
+        # a dry run that already sent another file to Movie.mp4 must not see it as the source
+        pending = scene_module._PendingMoves()
+        src = os.path.join(self.incoming, "movie.mp4")
+        _write(src)
+        dest = os.path.join(self.incoming, "Movie.mp4")
+        self.assertTrue(pending.same_file(src, dest))
+        pending.add(os.path.join(self.tmp, "elsewhere.mp4"), dest, video=True)
+        self.assertFalse(pending.same_file(src, dest))
+
+
 class TestSidecarMoves(_Base):
     def test_sidecars_follow_every_moved_file(self):
         v1 = os.path.join(self.incoming, "one.mp4")

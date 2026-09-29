@@ -2,7 +2,7 @@ import os
 from collections import Counter
 import utils.logger as log
 from performer import process_performer
-from utils.files import authenticated_url, download_image, find_sidecars, rename_file, replace_file_ext
+from utils.files import authenticated_url, download_image, find_sidecars, is_same_file, rename_file, replace_file_ext
 from utils.nfo import _is_plex, _count_videos, artwork_filenames, artwork_templates, build_nfo_xml, is_folder_level, _render
 from utils.paths import is_inside
 from utils.replacer import get_new_path, with_collision_suffix
@@ -207,6 +207,15 @@ class _PendingMoves:
             return False
         return os.path.exists(path)
 
+    def same_file(self, source, dest):
+        """Whether dest is source's own file (a case-only rename), not another file.
+
+        Not when a recorded move sends another file to dest, or source has moved away.
+        """
+        if dest in self.arrived or source in self.left:
+            return False
+        return is_same_file(source, dest)
+
     def video_count(self, folder):
         """Videos folder would hold after the run."""
         count = _count_videos(folder)
@@ -409,7 +418,7 @@ def __rename_videos(scene, stash, settings, pending=None):
                 primary_path = video_path
             continue
 
-        if pending.exists(expected_path):
+        if pending.exists(expected_path) and not pending.same_file(video_path, expected_path):
             log.warning(f"File {idx + 1}: Destination already exists at {expected_path}")
             if idx == 0:
                 primary_path = video_path
