@@ -7,6 +7,7 @@ import urllib.request
 import urllib.error
 import utils.logger as log
 from utils.run_flow import is_dry_run
+from utils.videos import is_video
 
 # JPEG magic bytes (SOI marker)
 JPEG_MAGIC = b'\xff\xd8\xff'
@@ -227,13 +228,27 @@ def download_image(url, dest_filepath, settings):
     return False
 
 
-VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".webm", ".flv", ".ts", ".m2ts")
+def _owner_stem(name, stems):
+    """The longest stem in stems that name starts with, followed by "." or "-"; None if none."""
+    owner = None
+    for stem in stems:
+        if (
+            len(name) > len(stem)
+            and name.startswith(stem)
+            and name[len(stem)] in ".-"
+            and (owner is None or len(stem) > len(owner))
+        ):
+            owner = stem
+    return owner
 
 
-def find_sidecars(video_path):
-    """Files in the video's folder named like it: `<stem>.<anything>` or `<stem>-<anything>`.
+def find_sidecars(video_path, other_videos=()):
+    """Files in the video's folder that belong to it: named `<stem>.<anything>` or `<stem>-<anything>`.
 
-    Excludes the video itself and other videos.
+    A file belongs to the video in its folder with the longest stem it starts with, so
+    `Show-Part2.srt` is Show-Part2.mp4's, not Show.mp4's. other_videos are more video
+    paths to count as in the folder (a scene's videos this run already moved away).
+    Excludes the video itself and every other video.
     """
     folder = os.path.dirname(video_path)
     video_name = os.path.basename(video_path)
@@ -242,11 +257,16 @@ def find_sidecars(video_path):
         names = sorted(os.listdir(folder))
     except OSError:
         return []
+    stems = {stem}
+    stems.update(
+        os.path.splitext(n)[0] for n in names if is_video(n) and os.path.isfile(os.path.join(folder, n))
+    )
+    stems.update(
+        os.path.splitext(os.path.basename(p))[0] for p in other_videos if os.path.dirname(p) == folder
+    )
     found = []
     for name in names:
-        if name == video_name or not name.startswith(stem) or len(name) == len(stem):
-            continue
-        if name[len(stem)] not in ".-" or name.lower().endswith(VIDEO_EXTENSIONS):
+        if name == video_name or is_video(name) or _owner_stem(name, stems) != stem:
             continue
         path = os.path.join(folder, name)
         if os.path.isfile(path):

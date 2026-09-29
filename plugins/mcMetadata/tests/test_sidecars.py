@@ -100,6 +100,48 @@ class TestFindSidecars(_Base):
     def test_missing_folder_gives_empty_list(self):
         self.assertEqual(find_sidecars(os.path.join(self.tmp, "nope", "a.mp4")), [])
 
+    def test_another_videos_files_are_not_sidecars(self):
+        show = ["Show.nfo", "Show-poster.jpg", "Show.srt"]
+        part2 = ["Show-Part2.nfo", "Show-Part2-poster.jpg", "Show-Part2.srt"]
+        for name in show + part2 + ["Show.mp4", "Show-Part2.mp4"]:
+            _write(os.path.join(self.incoming, name))
+        found = find_sidecars(os.path.join(self.incoming, "Show.mp4"))
+        self.assertEqual(sorted(os.path.basename(p) for p in found), sorted(show))
+        found = find_sidecars(os.path.join(self.incoming, "Show-Part2.mp4"))
+        self.assertEqual(sorted(os.path.basename(p) for p in found), sorted(part2))
+
+    def test_videos_of_any_common_type_are_not_sidecars(self):
+        videos = ["Show.mpg", "Show.mpeg", "Show.vob", "Show.3gp", "Show.3g2", "Show.rm", "Show.rmvb",
+                  "Show.ogv", "Show.divx", "Show.xvid", "Show.asf", "Show.iso", "Show.f4v", "Show.mts",
+                  "Show.MPG"]
+        for name in videos + ["Show.mp4", "Show.srt"]:
+            _write(os.path.join(self.incoming, name))
+        found = find_sidecars(os.path.join(self.incoming, "Show.mp4"))
+        self.assertEqual([os.path.basename(p) for p in found], ["Show.srt"])
+
+    def test_scene_videos_that_already_moved_keep_their_files(self):
+        # Show-Part2.mp4 was moved earlier in the run, but a sidecar of it stayed behind
+        for name in ("Show.mp4", "Show.srt", "Show-Part2.srt"):
+            _write(os.path.join(self.incoming, name))
+        moved = os.path.join(self.incoming, "Show-Part2.mp4")
+        found = find_sidecars(os.path.join(self.incoming, "Show.mp4"), other_videos=[moved])
+        self.assertEqual([os.path.basename(p) for p in found], ["Show.srt"])
+
+    def test_shared_video_extensions(self):
+        from utils import nfo as nfo_module
+        from utils import videos
+
+        for name in ("a.mp4", "b.mpg", "c.iso", "d.srt"):
+            _write(os.path.join(self.incoming, name))
+        self.assertEqual(nfo_module._count_videos(self.incoming), 3)
+        for ext in ("mp4 m4v mkv avi mov wmv webm flv ts m2ts mts mpg mpeg vob 3gp 3g2 rm rmvb ogv "
+                    "divx xvid asf iso f4v").split():
+            self.assertTrue(videos.is_video(f"x.{ext.upper()}"), ext)
+        self.assertFalse(videos.is_video("x.srt"))
+        self.assertFalse(hasattr(nfo_module, "_VIDEO_EXTENSIONS"))
+        import utils.files as files_module
+        self.assertFalse(hasattr(files_module, "VIDEO_EXTENSIONS"))
+
 
 class TestRenameFile(_Base):
     def test_refuses_to_overwrite(self):
@@ -127,6 +169,29 @@ class TestSidecarMoves(_Base):
         self.assertEqual(os.listdir(self.incoming), [])
         self.assertEqual(_read(os.path.join(self.lib, "New Name (2).funscript")), "two.funscript")
         self.assertEqual(_read(os.path.join(self.lib, "New Name.en.srt")), "one.en.srt")
+
+    def test_rename_leaves_another_videos_files(self):
+        for name in ("Show.mp4", "Show.nfo", "Show-poster.jpg", "Show.srt", "Show.mpg",
+                     "Show-Part2.mp4", "Show-Part2.nfo", "Show-Part2-poster.jpg", "Show-Part2.srt"):
+            _write(os.path.join(self.incoming, name), name)
+        self._run([os.path.join(self.incoming, "Show.mp4")])
+        self.assertEqual(sorted(os.listdir(self.lib)), sorted([
+            "New Name.mp4", "New Name.nfo", "New Name-poster.jpg", "New Name.srt",
+        ]))
+        self.assertEqual(sorted(os.listdir(self.incoming)), sorted([
+            "Show.mpg", "Show-Part2.mp4", "Show-Part2.nfo", "Show-Part2-poster.jpg", "Show-Part2.srt",
+        ]))
+
+    def test_left_behind_file_of_a_moved_scene_video_stays(self):
+        # Show-Part2.srt can't follow its video (the destination is taken), and Show.mp4,
+        # moved next, must not take it either
+        for name in ("Show-Part2.mp4", "Show-Part2.srt", "Show.mp4", "Show.srt"):
+            _write(os.path.join(self.incoming, name), name)
+        _write(os.path.join(self.lib, "New Name.srt"), "existing")
+        with patch.object(scene_module.log, "warning"):
+            self._run([os.path.join(self.incoming, "Show-Part2.mp4"), os.path.join(self.incoming, "Show.mp4")])
+        self.assertEqual(os.listdir(self.incoming), ["Show-Part2.srt"])
+        self.assertEqual(_read(os.path.join(self.lib, "New Name (2).srt")), "Show.srt")
 
     def test_existing_destination_not_overwritten(self):
         video = os.path.join(self.incoming, "old.mp4")

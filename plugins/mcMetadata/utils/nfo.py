@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 from xml.sax.saxutils import escape
 
 import utils.logger as log
+from utils.videos import is_video
 
 # Characters XML 1.0 does not allow: C0 controls except tab/LF/CR, surrogates, U+FFFE/U+FFFF
 _XML_ILLEGAL = re.compile("[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
@@ -74,7 +75,6 @@ PLEX_FANART_NAME = "{basename}-fanart.jpg"
 BASENAME_PLACEHOLDER = "{basename}"
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 RATING_FIELD_CHOICES = ("both", "rating", "userrating")
-_VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".webm", ".flv", ".ts", ".m2ts")
 _warned = set()
 
 
@@ -115,7 +115,7 @@ def _count_videos(folder):
     try:
         return sum(
             1 for n in os.listdir(folder)
-            if n.lower().endswith(_VIDEO_EXTENSIONS) and os.path.isfile(os.path.join(folder, n))
+            if is_video(n) and os.path.isfile(os.path.join(folder, n))
         )
     except OSError:
         return 0

@@ -409,7 +409,8 @@ def __rename_videos(scene, stash, settings, pending=None):
         # Track this path as used
         used_paths.add(expected_path)
 
-        sidecars = __collect_sidecars(video_path, settings)
+        # The scene's other videos own their files even once this run has moved them
+        sidecars = __collect_sidecars(video_path, settings, [f["path"] for f in files])
 
         # In dry run mode, log what would happen but don't actually do anything
         if dry_run:
@@ -453,9 +454,9 @@ def __rename_videos(scene, stash, settings, pending=None):
     return primary_path or files[0]["path"]
 
 
-def __collect_sidecars(video_path, settings):
+def __collect_sidecars(video_path, settings, other_videos=()):
     """Files to move with a video: all sidecars, or just its NFO and poster when the setting is off."""
-    sidecars = find_sidecars(video_path)
+    sidecars = find_sidecars(video_path, other_videos)
     if settings.get("renamer_move_sidecars", True):
         return sidecars
     keep = tuple(_render(t, video_path) for t in artwork_templates(settings) if t and not is_folder_level(t))
