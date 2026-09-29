@@ -1066,4 +1066,33 @@
 
   // Start the plugin
   init();
+
+  // Test hook: only active when a test harness sets window.__SCENE_MATCHER_TEST__ first.
+  if (window.__SCENE_MATCHER_TEST__) {
+    window.__SCENE_MATCHER_TEST__.exports = {
+      graphqlRequest, runPluginOperation, findMatchesFast, findMatchesThorough,
+      formatDuration, formatDate, escapeHtml, renderResults, createSceneCard,
+      handleSelectMatch, mergeResults, handleDeepSearchClick, handleMatchClick,
+      getSceneIdFromElement, sceneHasStashId, createMatchButton, addMatchButtons,
+      isTaggerPage, waitForPage, waitForTaggerElements, init,
+      createModal, removeModal, updateStats, setStatus, showLoading, showError,
+    };
+    window.__SCENE_MATCHER_TEST__.getState = () => ({
+      modalRoot, currentSceneId, currentSceneElement, matchResults, isLoading, isLoadingDeep,
+      stashdbUrl, canSearchDeep, phase1SearchAttrs, cachedLocalStashIds, cacheEndpoint,
+    });
+    window.__SCENE_MATCHER_TEST__.setState = (patch) => {
+      if ("modalRoot" in patch) modalRoot = patch.modalRoot;
+      if ("currentSceneId" in patch) currentSceneId = patch.currentSceneId;
+      if ("currentSceneElement" in patch) currentSceneElement = patch.currentSceneElement;
+      if ("matchResults" in patch) matchResults = patch.matchResults;
+      if ("isLoading" in patch) isLoading = patch.isLoading;
+      if ("isLoadingDeep" in patch) isLoadingDeep = patch.isLoadingDeep;
+      if ("stashdbUrl" in patch) stashdbUrl = patch.stashdbUrl;
+      if ("canSearchDeep" in patch) canSearchDeep = patch.canSearchDeep;
+      if ("phase1SearchAttrs" in patch) phase1SearchAttrs = patch.phase1SearchAttrs;
+      if ("cachedLocalStashIds" in patch) cachedLocalStashIds = patch.cachedLocalStashIds;
+      if ("cacheEndpoint" in patch) cacheEndpoint = patch.cacheEndpoint;
+    };
+  }
 })();
