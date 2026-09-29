@@ -35,6 +35,52 @@ _stash_connection = None
 _input_data = None
 
 
+def normalize_endpoint(url):
+    """Canonical form for comparing endpoints: trimmed, no trailing slash, lowercase."""
+    return (url or "").strip().rstrip("/").lower()
+
+
+def _strip_graphql(url):
+    n = normalize_endpoint(url)
+    return n[:-len("/graphql")] if n.endswith("/graphql") else n
+
+
+def site_base(endpoint):
+    """Site base URL for links: the text up to and including the slash before /graphql."""
+    m = re.match(r"(https?://.*?/)graphql", endpoint or "")
+    return m.group(1) if m else endpoint
+
+
+def resolve_endpoint(requested, boxes, setting):
+    """Pick a configured stash-box. Returns (box, None) or (None, error message).
+
+    Order: the endpoint sent by the UI (must be a configured box, never called
+    otherwise), then the plugin setting, then the first configured box.
+    """
+    if not boxes:
+        return None, "No stash-box endpoints configured in Stash settings"
+    available = ", ".join(b.get("name") or b.get("endpoint", "") for b in boxes)
+
+    want = normalize_endpoint(requested)
+    if want:
+        for box in boxes:
+            if normalize_endpoint(box.get("endpoint")) == want:
+                return box, None
+        return None, f"Stash-box endpoint '{requested}' is not configured in Stash. Available: {available}"
+
+    pref = normalize_endpoint(setting)
+    if pref:
+        for box in boxes:
+            if normalize_endpoint(box.get("endpoint")) == pref:
+                return box, None
+        for box in boxes:
+            if _strip_graphql(box.get("endpoint")) == _strip_graphql(pref):
+                return box, None
+        return None, f"Configured stash-box endpoint '{setting}' not found. Available: {available}"
+
+    return boxes[0], None
+
+
 def get_stash_connection():
     """Get Stash connection details from plugin input."""
     global _stash_connection, _input_data
@@ -200,7 +246,7 @@ def get_local_scene_stash_ids(endpoint):
 
         for scene in scenes:
             for stash_id in scene.get("stash_ids", []):
-                if stash_id.get("endpoint") == endpoint:
+                if normalize_endpoint(stash_id.get("endpoint")) == normalize_endpoint(endpoint):
                     all_stash_ids.add(stash_id.get("stash_id"))
 
         total = data["findScenes"].get("count", 0)
@@ -603,32 +649,21 @@ def result_sort_key(x):
     return (in_stash, score, duration, -date_int)
 
 
-def get_scene_context(scene_id, plugin_settings):
+def get_scene_context(scene_id, plugin_settings, endpoint=None):
     """
     Get scene context needed for searching.
     Returns scene data, stashbox config, and extracted attributes.
+    `endpoint` is the stash-box the UI selected; it must match a configured box.
     """
-    # Get stash-box configuration
     stashbox_configs = get_stashbox_config()
-    if not stashbox_configs:
-        return None, {"error": "No stash-box endpoints configured in Stash settings"}
+    stashbox, err = resolve_endpoint(
+        endpoint, stashbox_configs, (plugin_settings or {}).get("stashBoxEndpoint", ""))
+    if err:
+        return None, {"error": err}
 
-    # Find the stash-box to use
-    preferred_endpoint = plugin_settings.get("stashBoxEndpoint", "").strip()
-    stashbox = None
-
-    if preferred_endpoint:
-        for config in stashbox_configs:
-            if config["endpoint"] == preferred_endpoint:
-                stashbox = config
-                break
-        if not stashbox:
-            available = ", ".join([c.get("name", c["endpoint"]) for c in stashbox_configs])
-            return None, {"error": f"Configured stash-box endpoint '{preferred_endpoint}' not found. Available: {available}"}
-    else:
-        stashbox = stashbox_configs[0]
-
-    stashdb_url = stashbox["endpoint"]
+    graphql_url = stashbox["endpoint"]
+    target = normalize_endpoint(graphql_url)
+    stashdb_url = site_base(graphql_url)
     stashdb_api_key = stashbox.get("api_key", "")
     stashdb_name = stashbox.get("name", "StashDB")
 
@@ -637,10 +672,10 @@ def get_scene_context(scene_id, plugin_settings):
     if not scene:
         return None, {"error": f"Scene not found: {scene_id}"}
 
-    # Check if scene already has a StashDB ID
+    # Reject only if already linked to the resolved endpoint
     for stash_id in scene.get("stash_ids", []):
-        if stash_id.get("endpoint") == stashdb_url:
-            return None, {"error": "Scene already has a StashDB ID. No matching needed."}
+        if normalize_endpoint(stash_id.get("endpoint")) == target:
+            return None, {"error": f"Scene already has a {stashdb_name} ID. No matching needed."}
 
     # Extract performer stash_ids and names
     # performer_stash_ids: only performers linked to this endpoint (for filter queries)
@@ -653,7 +688,7 @@ def get_scene_context(scene_id, plugin_settings):
             performer_names.append(performer.get("name"))
         # Check if linked to this endpoint
         for stash_id in performer.get("stash_ids", []):
-            if stash_id.get("endpoint") == stashdb_url:
+            if normalize_endpoint(stash_id.get("endpoint")) == target:
                 performer_stash_ids.add(stash_id.get("stash_id"))
                 break
 
@@ -666,7 +701,7 @@ def get_scene_context(scene_id, plugin_settings):
     if studio:
         studio_name = studio.get("name")  # Always use name for text search
         for stash_id in studio.get("stash_ids", []):
-            if stash_id.get("endpoint") == stashdb_url:
+            if normalize_endpoint(stash_id.get("endpoint")) == target:
                 studio_stash_id = stash_id.get("stash_id")
                 break
 
@@ -683,6 +718,7 @@ def get_scene_context(scene_id, plugin_settings):
     context = {
         "scene": scene,
         "stashdb_url": stashdb_url,
+        "endpoint": graphql_url,
         "stashdb_api_key": stashdb_api_key,
         "stashdb_name": stashdb_name,
         "performer_stash_ids": performer_stash_ids,
@@ -731,17 +767,17 @@ def format_results(all_scenes, context, local_stash_ids, cache_hit):
     return results
 
 
-def find_matches_fast(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None):
+def find_matches_fast(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None, endpoint=None):
     """
     Phase 1: Fast text-based searches.
     Uses cleaned title and constructed studio+performer query.
     Returns quickly with initial results.
     """
-    context, error = get_scene_context(scene_id, plugin_settings)
+    context, error = get_scene_context(scene_id, plugin_settings, endpoint=endpoint)
     if error:
         return error
 
-    stashdb_url = context["stashdb_url"]
+    stashdb_url = context["endpoint"]  # GraphQL URL for requests
     stashdb_api_key = context["stashdb_api_key"]
     stashdb_name = context["stashdb_name"]
     performer_names = context["performer_names"]
@@ -773,7 +809,7 @@ def find_matches_fast(scene_id, plugin_settings, cached_stash_ids=None, cache_en
     local_stash_ids = None
     cache_hit = False
 
-    if cached_stash_ids and cache_endpoint == stashdb_url:
+    if cached_stash_ids and normalize_endpoint(cache_endpoint) == normalize_endpoint(stashdb_url):
         local_stash_ids = set(cached_stash_ids)
         cache_hit = True
         log.LogDebug(f"Using cached local stash_ids ({len(local_stash_ids)} entries)")
@@ -795,7 +831,9 @@ def find_matches_fast(scene_id, plugin_settings, cached_stash_ids=None, cache_en
             "constructed_query": constructed_query
         },
         "stashdb_name": stashdb_name,
-        "stashdb_url": stashdb_url.replace("/graphql", ""),
+        "stashdb_url": context["stashdb_url"],
+        "endpoint": stashdb_url,
+        "endpoint_name": stashdb_name,
         "total_results": len(results),
         "results": results,
         "has_more": bool(context["performer_stash_ids"] or context["studio_stash_id"])
@@ -808,17 +846,17 @@ def find_matches_fast(scene_id, plugin_settings, cached_stash_ids=None, cache_en
     return response
 
 
-def find_matches_thorough(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None, exclude_ids=None):
+def find_matches_thorough(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None, exclude_ids=None, endpoint=None):
     """
     Phase 2: Thorough performer/studio searches.
     Uses combined filters when possible, higher page limits.
     Returns additional results not found in Phase 1.
     """
-    context, error = get_scene_context(scene_id, plugin_settings)
+    context, error = get_scene_context(scene_id, plugin_settings, endpoint=endpoint)
     if error:
         return error
 
-    stashdb_url = context["stashdb_url"]
+    stashdb_url = context["endpoint"]  # GraphQL URL for requests
     stashdb_api_key = context["stashdb_api_key"]
     stashdb_name = context["stashdb_name"]
     performer_stash_ids = context["performer_stash_ids"]
@@ -835,7 +873,9 @@ def find_matches_thorough(scene_id, plugin_settings, cached_stash_ids=None, cach
                 "studio": studio_name
             },
             "stashdb_name": stashdb_name,
-            "stashdb_url": stashdb_url.replace("/graphql", ""),
+            "stashdb_url": context["stashdb_url"],
+            "endpoint": stashdb_url,
+            "endpoint_name": stashdb_name,
             "total_results": 0,
             "results": [],
             "message": "No performers or studio linked - skipping thorough search"
@@ -888,7 +928,7 @@ def find_matches_thorough(scene_id, plugin_settings, cached_stash_ids=None, cach
     local_stash_ids = None
     cache_hit = False
 
-    if cached_stash_ids and cache_endpoint == stashdb_url:
+    if cached_stash_ids and normalize_endpoint(cache_endpoint) == normalize_endpoint(stashdb_url):
         local_stash_ids = set(cached_stash_ids)
         cache_hit = True
     else:
@@ -906,7 +946,9 @@ def find_matches_thorough(scene_id, plugin_settings, cached_stash_ids=None, cach
             "studio": studio_name
         },
         "stashdb_name": stashdb_name,
-        "stashdb_url": stashdb_url.replace("/graphql", ""),
+        "stashdb_url": context["stashdb_url"],
+        "endpoint": stashdb_url,
+        "endpoint_name": stashdb_name,
         "total_results": len(results),
         "results": results
     }
@@ -919,13 +961,13 @@ def find_matches_thorough(scene_id, plugin_settings, cached_stash_ids=None, cach
 
 
 # Legacy function for backward compatibility
-def find_matching_scenes(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None):
+def find_matching_scenes(scene_id, plugin_settings, cached_stash_ids=None, cache_endpoint=None, endpoint=None):
     """
     Find StashDB scenes matching a local scene.
     This is the legacy single-call version that runs both phases.
     """
     # Run Phase 1
-    phase1 = find_matches_fast(scene_id, plugin_settings, cached_stash_ids, cache_endpoint)
+    phase1 = find_matches_fast(scene_id, plugin_settings, cached_stash_ids, cache_endpoint, endpoint=endpoint)
     if "error" in phase1:
         return phase1
 
@@ -934,8 +976,9 @@ def find_matching_scenes(scene_id, plugin_settings, cached_stash_ids=None, cache
     phase2 = find_matches_thorough(
         scene_id, plugin_settings,
         cached_stash_ids=phase1.get("local_stash_ids"),
-        cache_endpoint=phase1.get("stashdb_url", "").rstrip("/") + "/graphql",
-        exclude_ids=phase1_ids
+        cache_endpoint=phase1.get("endpoint"),
+        exclude_ids=phase1_ids,
+        endpoint=phase1.get("endpoint")
     )
 
     # Merge results
@@ -949,6 +992,8 @@ def find_matching_scenes(scene_id, plugin_settings, cached_stash_ids=None, cache
         "search_attributes": phase1.get("search_attributes"),
         "stashdb_name": phase1.get("stashdb_name"),
         "stashdb_url": phase1.get("stashdb_url"),
+        "endpoint": phase1.get("endpoint"),
+        "endpoint_name": phase1.get("endpoint_name"),
         "total_results": len(all_results),
         "results": all_results,
         "local_stash_ids": phase1.get("local_stash_ids") or phase2.get("local_stash_ids")
@@ -1001,7 +1046,8 @@ def main():
                 output = find_matches_fast(
                     scene_id, plugin_settings,
                     cached_stash_ids=cached_stash_ids,
-                    cache_endpoint=cache_endpoint
+                    cache_endpoint=cache_endpoint,
+                    endpoint=args.get("endpoint")
                 )
 
         elif operation == "find_matches_thorough":
@@ -1017,7 +1063,8 @@ def main():
                     scene_id, plugin_settings,
                     cached_stash_ids=cached_stash_ids,
                     cache_endpoint=cache_endpoint,
-                    exclude_ids=exclude_ids
+                    exclude_ids=exclude_ids,
+                    endpoint=args.get("endpoint")
                 )
 
         elif operation == "find_matches":
@@ -1031,7 +1078,8 @@ def main():
                 output = find_matching_scenes(
                     scene_id, plugin_settings,
                     cached_stash_ids=cached_stash_ids,
-                    cache_endpoint=cache_endpoint
+                    cache_endpoint=cache_endpoint,
+                    endpoint=args.get("endpoint")
                 )
 
         elif operation:
