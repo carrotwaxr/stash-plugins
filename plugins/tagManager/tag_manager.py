@@ -506,75 +506,69 @@ def handle_clear_cache(stashdb_url):
     return {"success": success, "endpoint": stashdb_url}
 
 
-def handle_sync_scene_tags(server_connection, stash_config, api_key):
+def handle_sync_scene_tags(server_connection):
     """
-    Handle sync_scene_tags mode - sync tags from StashDB to local scenes.
+    Handle sync_scene_tags mode - sync tags from every configured stash-box
+    that has an API key to the local scenes linked to it.
 
     Args:
         server_connection: Stash server connection info
-        stash_config: Full Stash configuration
-        api_key: Stash API key for authentication
 
     Returns:
-        Dict with sync results
+        Dict with sync results, or with `error` if the run stopped or no scene synced
     """
     from stashdb_scene_sync import sync_scene_tags
-    from stashapi.stashapp import StashInterface
 
-    # Initialize Stash interface with API key for long-running operations
-    # Session cookies can expire during long sync operations (see stash#5332)
-    connection_with_api_key = {**server_connection, "ApiKey": api_key}
-    stash = StashInterface(connection_with_api_key)
-
-    # Get StashDB configuration from Stash
     try:
-        stash_boxes = stash_config.get("general", {}).get("stashBoxes", [])
-    except Exception as e:
+        stash_config = LocalStash(server_connection).configuration()
+    except StashError as e:
         log.LogError(f"Failed to get Stash configuration: {e}")
         return {"error": f"Failed to get Stash configuration: {e}"}
 
-    if not stash_boxes:
-        log.LogWarning("No stash-box endpoints configured in Stash")
-        return {"error": "No stash-box endpoints configured. Go to Settings > Metadata Providers to add StashDB."}
+    general = stash_config.get("general") or {}
 
-    # Use first stash-box (typically StashDB)
-    stashdb_config = stash_boxes[0]
-    stashdb_url = stashdb_config.get("endpoint", "")
-    stashdb_api_key = stashdb_config.get("api_key", "")
+    # Session cookies can expire during a long sync (stash#5332), so prefer the API key.
+    api_key = general.get("apiKey") or None
+    if not api_key:
+        log.LogWarning("No Stash API key configured - using session cookie (may time out)")
+    client = LocalStash(server_connection, api_key=api_key)
 
-    if not stashdb_url or not stashdb_api_key:
-        log.LogError("StashDB endpoint or API key not configured")
-        return {"error": "StashDB endpoint or API key not configured"}
+    boxes = []
+    for box in general.get("stashBoxes") or []:
+        if not box.get("endpoint"):
+            continue
+        if not box.get("api_key"):
+            log.LogWarning(f"Skipping {box.get('name') or box['endpoint']}: no API key configured")
+            continue
+        boxes.append(box)
+    if not boxes:
+        log.LogWarning("No stash-box endpoints with an API key configured in Stash")
+        return {"error": "No stash-box endpoints with an API key are configured. "
+                         "Go to Settings > Metadata Providers to add StashDB."}
 
-    log.LogInfo(f"Using stash-box endpoint: {stashdb_url}")
-
-    # Get dry_run setting from plugin config (safe-defaults on malformed config)
+    # Settings come from what's saved in Stash (dry run safe-defaults on malformed config)
+    plugin_config = (stash_config.get("plugins") or {}).get(PLUGIN_ID) or {}
     dry_run = resolve_sync_dry_run(stash_config)
-
     sync_settings = {
-        "dry_run": dry_run
+        "dry_run": dry_run,
+        "tag_blacklist": plugin_config.get("tagBlacklist", DEFAULT_PLUGIN_SETTINGS["tagBlacklist"]),
     }
 
-    # Run sync
     try:
-        stats = sync_scene_tags(stash, stashdb_url, stashdb_api_key, sync_settings)
-        return {
-            "success": True,
-            "dry_run": dry_run,
-            "total_scenes": stats.total_scenes,
-            "processed": stats.processed,
-            "updated": stats.updated,
-            "no_changes": stats.no_changes,
-            "skipped": stats.skipped,
-            "errors": stats.errors,
-            "tags_added": stats.tags_added_total,
-            "tags_skipped": stats.tags_skipped_total
-        }
+        stats = sync_scene_tags(client, boxes, sync_settings)
     except Exception as e:
         log.LogError(f"Sync failed: {e}")
         import traceback
         log.LogDebug(traceback.format_exc())
         return {"error": str(e)}
+
+    result = {"dry_run": dry_run, **stats.counts(), "by_endpoint": stats.by_endpoint}
+    error = stats.error
+    if not error and stats.processed == 0 and stats.errors > 0:
+        error = f"All {stats.errors} scenes failed to sync. See the Stash log for details."
+    if error:
+        return {"error": error, **result}
+    return {"success": True, **result}
 
 
 def main():
@@ -626,25 +620,7 @@ def main():
 
     if mode == "sync_scene_tags":
         log.LogInfo("Starting scene tag sync task")
-        
-        from stashapi.stashapp import StashInterface
-        
-        # Get stash config for stash-box credentials and API key
-        stash = StashInterface(server_connection)
-        try:
-            stash_config = stash.get_configuration()
-        except Exception as e:
-            log.LogError(f"Failed to get Stash configuration: {e}")
-            print(json.dumps({"output": {"error": f"Failed to get configuration: {e}"}}))
-            return
-
-        # Get the Stash API key for long-running sync operations
-        # Session cookies can expire during multi-hour syncs (stash#5332)
-        api_key = stash_config.get("general", {}).get("apiKey", "")
-        if not api_key:
-            log.LogWarning("No Stash API key configured - using session cookie (may timeout)")
-
-        result = handle_sync_scene_tags(server_connection, stash_config, api_key)
+        result = handle_sync_scene_tags(server_connection)
         print(json.dumps({"output": result}))
         return
 
