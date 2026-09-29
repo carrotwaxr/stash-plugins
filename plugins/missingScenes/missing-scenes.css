@@ -761,3 +761,9 @@
   margin-top: 0;
   flex-shrink: 0;
 }
+
+.ms-whisparr-hint {
+  font-size: 12px;
+  color: #ffc107;
+  align-self: center;
+}

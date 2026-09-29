@@ -145,14 +145,55 @@
   }
 
   /**
-   * Add a scene to Whisparr
+   * True when the endpoint URL is StashDB (host stashdb.org, case-insensitive).
+   * Mirrors is_stashdb_endpoint() in the backend: Whisparr matches StashDB IDs only.
    */
-  async function addToWhisparr(stashId, title) {
-    return runPluginOperation({
+  function isStashdbEndpoint(url) {
+    if (!url) return false;
+    try {
+      return new URL(String(url).trim()).hostname.toLowerCase() === "stashdb.org";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * Status-line text for a successful add_to_whisparr result. Plain text.
+   */
+  function describeWhisparrAdd(scene, result) {
+    const title = scene && scene.title ? scene.title : "scene";
+    if (result && result.already_exists) return `"${title}" is already in Whisparr`;
+    if (result && result.search_triggered === false) {
+      const why = result.search_error ? ` (${result.search_error})` : "";
+      return `Added "${title}" to Whisparr without starting a search${why}`;
+    }
+    return `Added "${title}" to Whisparr`;
+  }
+
+  /**
+   * Banner text when the Whisparr status map could not be fetched. Plain text.
+   */
+  function describeWhisparrStatusError(error) {
+    return `Whisparr status unavailable: ${error}. Run Test Whisparr Connection.`;
+  }
+
+  const WHISPARR_STASHDB_HINT = "Whisparr needs StashDB";
+
+  /**
+   * Add a scene to Whisparr. Resolves with the result; throws when the add fails.
+   */
+  async function addToWhisparr(stashId, title, endpoint) {
+    const args = {
       operation: "add_to_whisparr",
       stash_id: stashId,
       title: title,
-    });
+    };
+    if (endpoint) args.endpoint = endpoint;
+    const result = await runPluginOperation(args);
+    if (result && result.success === false) {
+      throw new Error(result.error || "Whisparr add failed");
+    }
+    return result;
   }
 
   /**
@@ -160,7 +201,8 @@
    * @param {Object} scene - Scene object with stash_id and title
    * @param {HTMLElement} button - The button element to update
    * @param {Object} config - Configuration object
-   * @param {Function} config.onSuccess - Optional callback on success
+   * @param {string} config.endpoint - The view's stash-box endpoint URL
+   * @param {Function} config.onSuccess - Optional callback on success (scene, result)
    * @param {Function} config.onError - Optional callback on error
    */
   async function handleAddToWhisparr(scene, button, config = {}) {
@@ -170,7 +212,7 @@
     button.classList.add("ms-btn-loading");
 
     try {
-      await addToWhisparr(scene.stash_id, scene.title);
+      const result = await addToWhisparr(scene.stash_id, scene.title, config.endpoint);
 
       // Update button state
       button.textContent = "Added!";
@@ -181,7 +223,7 @@
       scene.in_whisparr = true;
 
       if (config.onSuccess) {
-        config.onSuccess(scene);
+        config.onSuccess(scene, result);
       }
 
       // After a delay, update button to show final state
@@ -214,11 +256,12 @@
    * @param {Object} config - Configuration
    * @param {string} config.stashdbUrl - Base URL for StashDB links
    * @param {boolean} config.whisparrConfigured - Whether Whisparr is configured
-   * @param {Function} config.onWhisparrAdd - Callback when Whisparr add completes (success or error)
+   * @param {string} config.endpoint - Stash-box endpoint of the view (Whisparr is StashDB only)
+   * @param {Function} config.onWhisparrAdd - Callback when Whisparr add completes: (scene, true, result) or (scene, false, error)
    * @returns {HTMLElement} The scene card element
    */
   function createSceneCard(scene, config) {
-    const { stashdbUrl = "https://stashdb.org", whisparrConfigured = false, onWhisparrAdd } = config;
+    const { stashdbUrl = "https://stashdb.org", whisparrConfigured = false, onWhisparrAdd, endpoint } = config;
 
     const card = document.createElement("div");
     card.className = "ms-scene-card";
@@ -317,7 +360,13 @@
     actions.appendChild(stashdbLink);
 
     // Whisparr button (if configured)
-    if (whisparrConfigured) {
+    if (whisparrConfigured && !isStashdbEndpoint(endpoint || stashdbUrl)) {
+      const hint = document.createElement("span");
+      hint.className = "ms-whisparr-hint";
+      hint.textContent = WHISPARR_STASHDB_HINT;
+      hint.title = "Whisparr matches StashDB scene IDs only";
+      actions.appendChild(hint);
+    } else if (whisparrConfigured) {
       const whisparrBtn = document.createElement("button");
       whisparrBtn.className = "ms-btn ms-btn-small ms-btn-whisparr";
 
@@ -363,7 +412,8 @@
         whisparrBtn.onclick = (e) => {
           e.stopPropagation();
           handleAddToWhisparr(scene, whisparrBtn, {
-            onSuccess: onWhisparrAdd ? () => onWhisparrAdd(scene, true) : undefined,
+            endpoint: endpoint || stashdbUrl,
+            onSuccess: onWhisparrAdd ? (sc, result) => onWhisparrAdd(scene, true, result) : undefined,
             onError: onWhisparrAdd ? (err) => onWhisparrAdd(scene, false, err) : undefined,
           });
         };
@@ -397,6 +447,9 @@
     // Whisparr
     addToWhisparr,
     handleAddToWhisparr,
+    isStashdbEndpoint,
+    describeWhisparrAdd,
+    describeWhisparrStatusError,
 
     // Components
     createSceneCard,
@@ -414,6 +467,9 @@
       formatDuration,
       addToWhisparr,
       handleAddToWhisparr,
+      isStashdbEndpoint,
+      describeWhisparrAdd,
+      describeWhisparrStatusError,
       createSceneCard,
     };
   }

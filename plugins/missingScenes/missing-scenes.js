@@ -8,6 +8,9 @@
     describeFailure,
     escapeHtml,
     addToWhisparr,
+    isStashdbEndpoint,
+    describeWhisparrAdd,
+    describeWhisparrStatusError,
     createSceneCard: coreCreateSceneCard,
   } = Core;
 
@@ -21,6 +24,7 @@
   let requestToken = 0; // bumped by every new search and when the modal closes
   let currentWarning = null; // {message, retryLabel} shown above partial results
   let whisparrConfigured = false;
+  let whisparrError = null; // set when the Whisparr status map could not be fetched
   let stashdbUrl = "";
 
   // Endpoint selection state (for entities with multiple stash-box links)
@@ -427,6 +431,26 @@
   }
 
   /**
+   * The stash-box endpoint the current results came from
+   */
+  function currentEndpoint() {
+    return selectedEndpoint || stashdbUrl;
+  }
+
+  /**
+   * Whisparr status-unavailable banner
+   */
+  function buildWhisparrBanner(error) {
+    const banner = document.createElement("div");
+    banner.className = "ms-warning ms-whisparr-banner";
+    const msg = document.createElement("span");
+    msg.className = "ms-warning-text";
+    msg.innerHTML = escapeHtml(describeWhisparrStatusError(error));
+    banner.appendChild(msg);
+    return banner;
+  }
+
+  /**
    * Render the results grid
    */
   function renderResults() {
@@ -452,12 +476,13 @@
       const item = coreCreateSceneCard(scene, {
         stashdbUrl: stashdbUrl,
         whisparrConfigured: whisparrConfigured,
+        endpoint: currentEndpoint(),
         activeFilterTagIds: activeFilterTagIds,
-        onWhisparrAdd: (scene, success, error) => {
+        onWhisparrAdd: (scene, success, detail) => {
           if (success) {
-            setStatus(`Added "${scene.title}" to Whisparr`, "success");
+            setStatus(describeWhisparrAdd(scene, detail), detail && detail.search_triggered === false ? "error" : "success");
           } else {
-            setStatus(`Failed to add: ${error?.message || "Unknown error"}`, "error");
+            setStatus(`Failed to add: ${detail?.message || "Unknown error"}`, "error");
           }
         }
       });
@@ -465,6 +490,9 @@
     }
 
     container.innerHTML = "";
+    if (whisparrConfigured && whisparrError) {
+      container.appendChild(buildWhisparrBanner(whisparrError));
+    }
     if (currentWarning) {
       container.appendChild(buildWarningBanner(currentWarning.message, currentWarning.retryLabel, currentWarning.onRetry));
     }
@@ -472,12 +500,15 @@
 
     // Show "Add All" button if Whisparr is configured
     const addAllBtn = document.getElementById("ms-add-all-btn");
-    if (addAllBtn && whisparrConfigured) {
+    if (addAllBtn) {
       const notInWhisparr = missingScenes.filter((s) => !s.in_whisparr);
-      if (notInWhisparr.length > 0) {
+      // Whisparr matches StashDB IDs only, so no bulk add elsewhere
+      if (whisparrConfigured && isStashdbEndpoint(currentEndpoint()) && notInWhisparr.length > 0) {
         addAllBtn.style.display = "inline-block";
         addAllBtn.textContent = `Add All to Whisparr (${notInWhisparr.length})`;
         addAllBtn.onclick = () => handleAddAll(notInWhisparr);
+      } else {
+        addAllBtn.style.display = "none";
       }
     }
 
@@ -519,11 +550,17 @@
     const addAllBtn = document.getElementById("ms-add-all-btn");
     if (!addAllBtn) return;
 
+    if (!isStashdbEndpoint(currentEndpoint())) {
+      setStatus("Whisparr needs StashDB: it matches StashDB scene IDs only", "error");
+      return;
+    }
+
     addAllBtn.disabled = true;
     addAllBtn.classList.add("ms-btn-loading");
 
     let added = 0;
     let failed = 0;
+    const failures = [];
 
     for (const scene of scenes) {
       if (scene.in_whisparr) continue;
@@ -531,7 +568,7 @@
       setStatus(`Adding ${added + failed + 1}/${scenes.length}: ${scene.title}...`, "loading");
 
       try {
-        await addToWhisparr(scene.stash_id, scene.title);
+        await addToWhisparr(scene.stash_id, scene.title, currentEndpoint());
         scene.in_whisparr = true;
         added++;
 
@@ -548,6 +585,7 @@
       } catch (error) {
         console.error(`[MissingScenes] Failed to add ${scene.title}:`, error);
         failed++;
+        failures.push(`${scene.title}: ${error.message || "Unknown error"}`);
       }
 
       // Small delay between requests
@@ -563,7 +601,7 @@
     } else {
       addAllBtn.textContent = `Added ${added}, ${failed} failed`;
       addAllBtn.classList.add("ms-btn-error");
-      setStatus(`Added ${added} scenes, ${failed} failed`, "error");
+      setStatus(`Added ${added} scenes, ${failed} failed. ${failures.join("; ")}`, "error");
     }
 
     // Hide button after all are added
@@ -739,6 +777,7 @@
       missingScenes = [...missingScenes, ...newScenes];
 
       whisparrConfigured = result.whisparr_configured || false;
+      whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
       activeFilterTagIds = result.active_filter_tag_ids || [];
 

@@ -9,6 +9,8 @@
     runPluginOperation,
     describeFailure,
     escapeHtml,
+    describeWhisparrAdd,
+    describeWhisparrStatusError,
     createSceneCard,
   } = Core;
 
@@ -53,6 +55,7 @@
   let activeFilterTagIds = [];
   let pageSize = 50;
   let whisparrConfigured = false;
+  let whisparrError = null; // set when the Whisparr status map could not be fetched
   let stashdbUrl = "";
   let availableEndpoints = [];
   let selectedEndpoint = null;
@@ -220,6 +223,8 @@
         </div>
 
         <div class="ms-browse-stats">${escapeHtml(statsText)}</div>
+        ${whisparrConfigured && whisparrError ? `<div class="ms-warning ms-whisparr-banner"><span class="ms-warning-text">${escapeHtml(describeWhisparrStatusError(whisparrError))}</span></div>` : ''}
+        <div class="ms-browse-whisparr-status" id="ms-browse-status"></div>
         ${warning ? `<div class="ms-warning"><span class="ms-warning-text">${escapeHtml(warning)}</span> <button class="ms-btn ms-btn-secondary ms-retry-btn" id="ms-retry-btn">Retry from here</button></div>` : ''}
 
         <div class="ms-browse-results">
@@ -246,7 +251,18 @@
           const card = createSceneCard(scene, {
             stashdbUrl: stashdbUrl || "https://stashdb.org",
             whisparrConfigured: whisparrConfigured,
+            endpoint: selectedEndpoint || stashdbUrl,
             activeFilterTagIds: activeFilterTagIds,
+            onWhisparrAdd: (sc, success, detail) => {
+              const el = container.querySelector('#ms-browse-status');
+              if (!el) return;
+              const msg = success
+                ? describeWhisparrAdd(sc, detail)
+                : `Failed to add: ${detail?.message || "Unknown error"}`;
+              el.textContent = msg;
+              el.className = "ms-status " +
+                (!success || detail?.search_triggered === false ? "ms-status-error" : "ms-status-success");
+            },
           });
           grid.appendChild(card);
         }
@@ -309,6 +325,7 @@
       currentCursor = result.cursor;
       hasMore = result.has_more;
       whisparrConfigured = result.whisparr_configured;
+      whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
       activeFilterTagIds = result.active_filter_tag_ids || [];
 
