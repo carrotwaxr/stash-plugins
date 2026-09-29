@@ -281,6 +281,38 @@ class TestThorough(MatchBase):
         self.assertNotIn("warnings", out)
 
 
+class TestLocalIdsFailure(MatchBase):
+    """Failing to list the library's stash IDs costs the In Stash badges, not the results."""
+
+    FAILURES = (RuntimeError("Could not list local scenes from Stash"),
+                urllib.error.URLError("connection refused"), socket.timeout("timed out"))
+
+    def check(self, out):
+        self.assertNotIn("error", out)
+        self.assertEqual(out["total_results"], 1)
+        self.assertFalse(out["results"][0]["in_local_stash"])
+        self.assertIn("Couldn't read your library's stash IDs; In Stash badges may be missing",
+                      out["warnings"])
+
+    def test_phase1_keeps_results(self):
+        for exc in self.FAILURES:
+            with self.subTest(exc=exc), \
+                 mock.patch.object(scene_matcher, "local_stash_ids", side_effect=exc), \
+                 mock.patch.object(scene_matcher, "query_stashdb_by_text", return_value=[sc("a")]):
+                self.check(scene_matcher.find_matches_fast("1", {}))
+
+    def test_phase2_keeps_results(self):
+        for exc in self.FAILURES:
+            with self.subTest(exc=exc), \
+                 mock.patch.object(scene_matcher, "local_stash_ids", side_effect=exc), \
+                 mock.patch.object(scene_matcher, "query_stashdb_scenes_combined", return_value=([sc("a")], None)), \
+                 mock.patch.object(scene_matcher, "query_stashdb_scenes_by_performers", return_value=([], None)), \
+                 mock.patch.object(scene_matcher, "query_stashdb_scenes_by_studio", return_value=([], None)):
+                out = scene_matcher.find_matches_thorough("1", {})
+                self.check(out)
+                self.assertNotIn("partial", out)  # the results themselves are complete
+
+
 class FakeClock:
     """Stands in for stashbox_api's `time`: sleep() moves monotonic() on, so waits add up."""
 

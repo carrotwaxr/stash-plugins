@@ -1054,6 +1054,20 @@ def _auth_message(name, error):
             f"in Stash Settings > Metadata Providers.")
 
 
+LOCAL_IDS_WARNING = "Couldn't read your library's stash IDs; In Stash badges may be missing"
+
+
+def _local_ids_or_warn(endpoint, warnings):
+    """local_stash_ids(endpoint), or an empty set plus a warning when Stash can't list them:
+    the badges are lost, not the stash-box results already fetched."""
+    try:
+        return local_stash_ids(endpoint)
+    except Exception as e:
+        log.LogWarning(f"Could not list the library's stash IDs: {e}")
+        warnings.append(LOCAL_IDS_WARNING)
+        return set()
+
+
 def _out_of_time(errors):
     return any(isinstance(e, stashbox_api.BudgetExceeded) for e in errors)
 
@@ -1144,7 +1158,8 @@ def find_matches_fast(scene_id, plugin_settings, endpoint=None):
         return _failure_response(base, stashdb_name, errors)
 
     # Get local scene stash_ids to mark which results user already has
-    local_ids = local_stash_ids(context["endpoint"])
+    warnings = _warnings(stashdb_name, errors)
+    local_ids = _local_ids_or_warn(context["endpoint"], warnings)
 
     results = format_results(all_scenes, context, local_ids)
 
@@ -1167,8 +1182,8 @@ def find_matches_fast(scene_id, plugin_settings, endpoint=None):
         "results": results,
         "has_more": bool(context["performer_stash_ids"] or context["studio_stash_id"])
     }
-    if errors:
-        response["warnings"] = _warnings(stashdb_name, errors)
+    if warnings:
+        response["warnings"] = warnings
     if _out_of_time(errors):
         response["partial"] = True
 
@@ -1287,7 +1302,8 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
         }, stashdb_name, errors)
 
     # Get local scene stash_ids
-    local_ids = local_stash_ids(context["endpoint"])
+    warnings = _warnings(stashdb_name, errors)
+    local_ids = _local_ids_or_warn(context["endpoint"], warnings)
 
     results = format_results(all_scenes, context, local_ids)  # sorted best first
     candidates = len(results)
@@ -1319,7 +1335,8 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
         response["total_candidates"] = candidates
     if errors:
         response["partial"] = True
-        response["warnings"] = _warnings(stashdb_name, errors)
+    if warnings:
+        response["warnings"] = warnings
 
     return response
 
