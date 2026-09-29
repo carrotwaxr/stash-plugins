@@ -7,6 +7,8 @@ Entry point for plugin operations. Handles different modes:
 - get_cache_status: Get cache info for an endpoint
 - refresh_cache: Force refresh cache for an endpoint
 - clear_cache: Clear cache for an endpoint
+- reset_sync_history: Forget which stash-box tags scene sync has applied, so the
+  next sync adds back tags removed from scenes
 
 Called via runPluginOperation from JavaScript UI.
 """
@@ -15,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 
@@ -24,6 +27,7 @@ from stashdb_api import search_tags_by_name, query_all_tags, StashDBAPIError
 from matcher import TagMatcher, load_synonyms
 from blacklist import Blacklist
 from stash_client import LocalStash, StashError
+from sync_history import SyncHistory
 
 # Plugin ID must match yml
 PLUGIN_ID = "tagManager"
@@ -62,6 +66,11 @@ def get_cache_dir():
     cache_dir = os.path.join(plugin_data.current_dir(), "tag_cache")
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
+
+
+def get_sync_history_path():
+    """The scene sync history file (inside Stash's config dir)."""
+    return os.path.join(plugin_data.current_dir(), "sync_history.sqlite")
 
 
 def get_cache_file_path(endpoint_url):
@@ -554,13 +563,27 @@ def handle_sync_scene_tags(server_connection):
         "tag_blacklist": plugin_config.get("tagBlacklist", DEFAULT_PLUGIN_SETTINGS["tagBlacklist"]),
     }
 
+    # A dry run reads the history too (so its preview leaves out removed tags) but doesn't record.
+    history_path = get_sync_history_path()
     try:
-        stats = sync_scene_tags(client, boxes, sync_settings)
+        history = SyncHistory(history_path)
+    except sqlite3.Error as e:
+        log.LogError(f"Could not open the scene sync history {history_path}: {e}")
+        return {"error": f"Could not open the scene sync history {history_path}: {e}"}
+    log.LogDebug(f"Scene sync history: {history_path}")
+
+    try:
+        stats = sync_scene_tags(client, boxes, sync_settings, history=history)
     except Exception as e:
         log.LogError(f"Sync failed: {e}")
         import traceback
         log.LogDebug(traceback.format_exc())
         return {"error": str(e)}
+    finally:
+        try:
+            history.close()
+        except sqlite3.Error as e:
+            log.LogError(f"Could not save the scene sync history: {e}")
 
     result = {"dry_run": dry_run, **stats.counts(), "by_endpoint": stats.by_endpoint}
     error = stats.error
@@ -569,6 +592,31 @@ def handle_sync_scene_tags(server_connection):
     if error:
         return {"error": error, **result}
     return {"success": True, **result}
+
+
+def handle_reset_sync_history():
+    """
+    Handle reset_sync_history mode - empty the scene sync history, so the next
+    sync considers every stash-box tag again (adding back ones removed from scenes).
+
+    Returns:
+        Dict with `cleared` (scenes forgotten), or with `error`
+    """
+    path = get_sync_history_path()
+    if not os.path.exists(path):
+        log.LogInfo("Scene sync history is already empty")
+        return {"success": True, "cleared": 0}
+    try:
+        history = SyncHistory(path)
+        try:
+            cleared = history.reset()
+        finally:
+            history.close()
+    except sqlite3.Error as e:
+        log.LogError(f"Could not reset the scene sync history {path}: {e}")
+        return {"error": f"Could not reset the scene sync history: {e}"}
+    log.LogInfo(f"Scene sync history reset: forgot {cleared} scenes")
+    return {"success": True, "cleared": cleared}
 
 
 def main():
@@ -591,6 +639,12 @@ def main():
     server_connection = input_data.get("server_connection", {})
     plugin_data.configure(server_connection)
     settings = get_settings_from_config(DEFAULT_PLUGIN_SETTINGS)  # overridden from Stash's config below
+
+    # Needs no stash-box (nor Stash)
+    if mode == "reset_sync_history":
+        log.LogInfo("Resetting scene tag sync history")
+        print(json.dumps({"output": handle_reset_sync_history()}))
+        return
 
     # The UI says which stash-box it has selected; the URL we use (also the cache key)
     # and its API key come from Stash's config. Scene sync resolves its own below.

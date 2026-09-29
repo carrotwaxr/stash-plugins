@@ -439,6 +439,12 @@ class TestHandleSyncSceneTags(unittest.TestCase):
     SERVER = {"Scheme": "http", "Host": "localhost", "Port": 9999}
 
     def setUp(self):
+        # The handler keeps its sync history in plugin_data; give each test its own.
+        import plugin_data
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.addCleanup(setattr, plugin_data, "_current_dir", None)
+        plugin_data.configure({"Dir": tmp})
         self.remote = FakeRemote()
         self.remote.add(STASHDB, "sd-1", [remote_tag("a", "Anal"), remote_tag("b", "Blonde")])
         self.plugin_config = {"syncDryRun": False, "tagBlacklist": "Blonde"}

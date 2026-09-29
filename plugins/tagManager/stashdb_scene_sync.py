@@ -4,6 +4,12 @@ Stash-box Scene Tag Sync
 Syncs tags from each configured stash-box (StashDB, ThePornDB, ...) to the local
 scenes linked to it, replicating Stash's Tagger merge behavior: tags are only
 ever added, never removed.
+
+With a SyncHistory, a live sync records which stash-box tags matched a local tag
+on each scene, and later syncs don't add those again. So a tag the user removed
+from a scene stays removed, while tags the stash-box gains, or that only now
+match a local tag or are no longer blacklisted, are still added. A dry run reads
+the history (its preview leaves out removed tags) but never records.
 """
 
 from dataclasses import dataclass, field
@@ -77,6 +83,7 @@ class _Run:
     tag_cache: TagCache
     settings: dict
     blacklist: Blacklist
+    history: object = None  # sync_history.SyncHistory, or None to sync without one
 
 
 @dataclass
@@ -127,26 +134,36 @@ def match_stashdb_tag_to_local(stashdb_tag, tag_cache, endpoint):
     return None
 
 
-def process_scene(scene, remote_scene, tag_cache, client, settings, endpoint, blacklist):
+def process_scene(scene, remote_scene, tag_cache, client, settings, endpoint, blacklist, history=None):
     """
     Decide which tags a scene gains from its stash-box scene, and add them.
 
     Writes only in live mode, and only the missing tags (ADD mode), so tags added
     to the scene since it was fetched are kept.
 
+    With a history, stash-box tags recorded at the scene's last live sync are not
+    added again (the user may have removed them). After a live sync that didn't
+    fail, the stash-box tags that matched a local tag are recorded, whether added
+    now, already present, or left out as recorded before. Unmatched and
+    blacklisted tags are not recorded, so they are added once they match or are
+    no longer blacklisted.
+
     Args:
         scene: Local scene dict with id, tags
-        remote_scene: Stash-box scene dict with tags
+        remote_scene: Stash-box scene dict with id, tags
         tag_cache: TagCache instance
         client: LocalStash (not used in dry run)
         settings: Sync settings dict with 'dry_run' key
         endpoint: Stash-box endpoint URL
         blacklist: Blacklist instance for filtering tags
+        history: SyncHistory, or None to consider every stash-box tag
 
     Returns:
         ProcessResult with status, tags_added, tags_skipped
     """
     scene_id = scene.get("id", "unknown")
+    remote_id = remote_scene.get("id")
+    dry_run = settings.get("dry_run", True)
     existing_tags = scene.get("tags", []) or []
     existing_tag_ids = set(str(t.get("id", "")) for t in existing_tags if t.get("id"))
 
@@ -155,31 +172,45 @@ def process_scene(scene, remote_scene, tag_cache, client, settings, endpoint, bl
     remote_tags, hidden_count = blacklist.filter_tags(remote_tags)
     if hidden_count > 0:
         log.LogDebug(f"Scene {scene_id}: Filtered {hidden_count} blacklisted tags")
+    # Tags that matched at the last live sync; None if never synced (or re-linked)
+    prior = history.get(endpoint, scene_id, remote_id) if history is not None else None
 
     # Match them to local tags
     new_tag_ids = set()
+    matched_remote_ids = set()  # what the history records
     skipped_tags = []
     for remote_tag in remote_tags:
+        name = remote_tag.get("name", "")
+        remote_tag_id = str(remote_tag.get("id") or "")
         local_id = match_stashdb_tag_to_local(remote_tag, tag_cache, endpoint)
 
-        if local_id:
-            if local_id not in existing_tag_ids:
-                new_tag_ids.add(local_id)
-                log.LogDebug(f"Scene {scene_id}: matched '{remote_tag.get('name', '')}' -> local tag {local_id}")
-            else:
-                log.LogTrace(f"Scene {scene_id}: tag '{remote_tag.get('name', '')}' already present")
+        if not local_id:
+            skipped_tags.append(name)
+            log.LogDebug(f"Scene {scene_id}: no local match for '{name}'")
+            continue
+
+        if remote_tag_id:
+            matched_remote_ids.add(remote_tag_id)
+        if local_id in existing_tag_ids:
+            log.LogTrace(f"Scene {scene_id}: tag '{name}' already present")
+        elif prior is not None and remote_tag_id in prior:
+            log.LogDebug(f"Scene {scene_id}: not re-adding '{name}' (synced before, since removed)")
         else:
-            skipped_tags.append(remote_tag.get("name", ""))
-            log.LogDebug(f"Scene {scene_id}: no local match for '{remote_tag.get('name', '')}'")
+            new_tag_ids.add(local_id)
+            log.LogDebug(f"Scene {scene_id}: matched '{name}' -> local tag {local_id}")
+
+    record = history is not None and not dry_run  # a dry run never records
 
     if not new_tag_ids:
+        if record:
+            history.record(endpoint, scene_id, remote_id, matched_remote_ids)
         return ProcessResult(status="no_changes", tags_skipped=len(skipped_tags))
 
     # What to write
     tag_ids = sorted(new_tag_ids)
     tag_names = [tag_cache.get_name(tid) or tid for tid in tag_ids]
 
-    if settings.get("dry_run", True):
+    if dry_run:
         log.LogInfo(f"[DRY RUN] Scene {scene_id}: would add {len(tag_ids)} tags: {tag_names}")
         return ProcessResult(status="dry_run", tags_added=len(tag_ids), tags_skipped=len(skipped_tags))
 
@@ -189,11 +220,13 @@ def process_scene(scene, remote_scene, tag_cache, client, settings, endpoint, bl
         log.LogError(f"Scene {scene_id}: failed to update - {e}")
         return ProcessResult(status="error", tags_skipped=len(skipped_tags), error=str(e))
 
+    if record:
+        history.record(endpoint, scene_id, remote_id, matched_remote_ids)
     log.LogInfo(f"Scene {scene_id}: added {len(tag_ids)} tags: {tag_names}")
     return ProcessResult(status="updated", tags_added=len(tag_ids), tags_skipped=len(skipped_tags))
 
 
-def sync_scene_tags(client, boxes, settings):
+def sync_scene_tags(client, boxes, settings, history=None):
     """
     Main sync algorithm.
 
@@ -213,6 +246,8 @@ def sync_scene_tags(client, boxes, settings):
         boxes: List of {endpoint, api_key, name, max_requests_per_minute} dicts,
             each with an api_key
         settings: Sync settings dict with 'dry_run' and 'tag_blacklist' keys
+        history: SyncHistory, so tags a scene was synced with before are not
+            added again; None to consider every stash-box tag
 
     Returns:
         SyncStats with operation statistics
@@ -228,7 +263,8 @@ def sync_scene_tags(client, boxes, settings):
 
     try:
         tag_cache = _build_tag_cache(client)
-        run = _Run(client=client, tag_cache=tag_cache, settings=settings, blacklist=blacklist)
+        run = _Run(client=client, tag_cache=tag_cache, settings=settings, blacklist=blacklist,
+                   history=history)
 
         for index, box_config in enumerate(boxes):
             limit = None
@@ -367,7 +403,7 @@ def _process(run, box, scene, remote_scene, stats):
     """Process one scene against its stash-box scene and count the result."""
     result = process_scene(
         scene, remote_scene, run.tag_cache,
-        run.client, run.settings, box.endpoint, run.blacklist
+        run.client, run.settings, box.endpoint, run.blacklist, run.history
     )
     _update_stats(stats, result)
     return result

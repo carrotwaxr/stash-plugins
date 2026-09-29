@@ -64,3 +64,7 @@ tasks:
     description: Fetch tags from StashDB for all scenes with StashIDs and merge with local tags
     defaultArgs:
       mode: sync_scene_tags
+  - name: Reset Scene Tag Sync History
+    description: Forget which stash-box tags each scene was synced with. The next sync considers every tag again, adding back tags you removed from scenes.
+    defaultArgs:
+      mode: reset_sync_history
