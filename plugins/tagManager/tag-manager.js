@@ -23,7 +23,7 @@
   let isCacheLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
-  let categoryMappings = {}; // Cache of category_name -> local_tag_id
+  let categoryMappings = {}; // { endpoint: { category_name: local_tag_id } } (see getCategoryMapping)
   let tagBlacklistRaw = ''; // Raw blacklist text as saved (for the editor)
   let blacklistPanelOpen = false;
   let tagBlacklist = []; // Parsed blacklist patterns [{type: 'literal'|'regex', pattern: string, regex?: RegExp}]
@@ -64,6 +64,80 @@
     const baseURL = baseEl ? baseEl.getAttribute("href") : "/";
     const normalizedAssetPath = assetPath.replace(/^\/+/, "");
     return `${baseURL}plugin/${PLUGIN_ID}/assets/${normalizedAssetPath}`;
+  }
+
+  /**
+   * F16: an app path under Stash's <base href> (e.g. "/stash/"), so links and
+   * navigation work when Stash is served from a sub-path. Accepts paths with or
+   * without a leading slash; never doubles slashes.
+   *   stashPath("/tags/5") -> "/tags/5" (base "/") or "/stash/tags/5" (base "/stash/")
+   */
+  function stashPath(path) {
+    const baseEl = document.querySelector("base");
+    let base = (baseEl && baseEl.getAttribute("href")) || "/";
+    if (/^([a-z][a-z\d+.-]*:)?\/\//i.test(base)) { // absolute or protocol-relative
+      try { base = new URL(base, window.location.href).pathname; } catch (e) { /* keep the raw href */ }
+    }
+    let prefix = base.replace(/\/+$/, "");
+    if (prefix && !prefix.startsWith("/")) prefix = `/${prefix}`;
+    const rel = String(path == null ? "" : path).replace(/^\/+/, "");
+    return `${prefix}/${rel}`;
+  }
+
+  /**
+   * F16: navigate inside Stash's single-page app (react-router's BrowserRouter
+   * listens for popstate) instead of a full page load. `path` is un-based
+   * ("/tags/5"); stashPath adds the base. Falls back to a normal load only if
+   * the History API refuses.
+   */
+  function navigateTo(path) {
+    const url = stashPath(path);
+    try {
+      window.history.pushState({}, "", url);
+      // history v4 ignores a popstate whose state is undefined, so pass one.
+      window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
+    } catch (e) {
+      console.warn("[tagManager] In-app navigation failed; loading the page instead:", e);
+      window.location.href = url;
+    }
+  }
+
+  /**
+   * F16: delegated click handler for in-page links that carry
+   * data-tm-route="/tags/5" (their href is the based path, so middle-click and
+   * open-in-new-tab still work). A plain left click navigates in the SPA; any
+   * modifier key, non-left button, target=_blank or an already-handled click is
+   * left to the browser.
+   */
+  function handleInternalLinkClick(e) {
+    if (!e || e.defaultPrevented || e.button !== 0) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const link = e.target && typeof e.target.closest === "function" ? e.target.closest("a[data-tm-route]") : null;
+    if (!link) return;
+    const target = link.getAttribute("target");
+    if (target && target !== "_self") return;
+    const route = link.getAttribute("data-tm-route");
+    if (!route) return;
+    e.preventDefault();
+    navigateTo(route);
+  }
+
+  /** href + data-tm-route attributes for an in-page link to a Stash path. */
+  function internalLinkAttrs(path) {
+    return `href="${escapeHtml(stashPath(path))}" data-tm-route="${escapeHtml(path)}"`;
+  }
+
+  // Used when default_settings.json could not be loaded (DEFAULTS is {}).
+  const FALLBACK_NUMERIC_DEFAULTS = { fuzzyThreshold: 80, pageSize: 25 };
+
+  /**
+   * F18: parse an integer setting (radix 10). NaN or below `min` gives `def`;
+   * above `max` is capped. 0 is a valid value when `min` allows it.
+   */
+  function parseIntSetting(value, def, min = -Infinity, max = Infinity) {
+    const n = Number.parseInt(String(value), 10);
+    if (Number.isNaN(n) || n < min) return def;
+    return n > max ? max : n;
   }
 
   /**
@@ -242,8 +316,11 @@
         stashdbApiKey: pluginConfig.stashdbApiKey || STASHDB_API_KEY,
         enableFuzzySearch: pluginConfig.enableFuzzySearch ?? DEFAULTS.enableFuzzySearch,
         enableSynonymSearch: pluginConfig.enableSynonymSearch ?? DEFAULTS.enableSynonymSearch,
-        fuzzyThreshold: parseInt(pluginConfig.fuzzyThreshold) || DEFAULTS.fuzzyThreshold,
-        pageSize: parseInt(pluginConfig.pageSize) || DEFAULTS.pageSize,
+        // F18: 0 is a valid threshold; a missing/unusable DEFAULTS falls back to constants.
+        fuzzyThreshold: parseIntSetting(pluginConfig.fuzzyThreshold,
+          parseIntSetting(DEFAULTS.fuzzyThreshold, FALLBACK_NUMERIC_DEFAULTS.fuzzyThreshold, 0, 100), 0, 100),
+        pageSize: parseIntSetting(pluginConfig.pageSize,
+          parseIntSetting(DEFAULTS.pageSize, FALLBACK_NUMERIC_DEFAULTS.pageSize, 1), 1),
         preferStashBoxName: pluginConfig.preferStashBoxName ?? DEFAULTS.preferStashBoxName,
         preferStashBoxDescription: pluginConfig.preferStashBoxDescription ?? DEFAULTS.preferStashBoxDescription,
         leaveParentTagsAlone: pluginConfig.leaveParentTagsAlone ?? DEFAULTS.leaveParentTagsAlone,
@@ -276,8 +353,94 @@
     }
   }
 
+  // Category mappings were one flat map, and the plugin historically targeted StashDB.
+  const LEGACY_MAPPINGS_ENDPOINT = STASHDB_ENDPOINT;
+
+  const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const isMappingId = (v) => typeof v === "string" || (typeof v === "number" && Number.isFinite(v));
+  const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
   /**
-   * Load category mappings from plugin settings
+   * F20: normalize stored category mappings to the per-endpoint shape
+   * { endpoint: { categoryName: localTagId } }. Pure: returns a new object.
+   *   - a string/number value is a legacy flat entry { category: id }; it moves
+   *     under `legacyEndpoint`, unless that endpoint's nested map already has the
+   *     category (the nested entry wins).
+   *   - a plain-object value is an endpoint map; its string/number ids are kept.
+   *   - ids are stored as strings (local tag ids are strings).
+   *   - anything else (null, booleans, arrays) is dropped with a console.warn.
+   *   - a non-object input gives {}.
+   * An already-nested map, or {}, comes back unchanged.
+   */
+  function migrateCategoryMappings(raw, legacyEndpoint = LEGACY_MAPPINGS_ENDPOINT) {
+    if (!isPlainObject(raw)) {
+      if (raw !== null && raw !== undefined) {
+        console.warn("[tagManager] Category mappings are not an object; ignoring them:", raw);
+      }
+      return {};
+    }
+    const out = {};
+    const legacy = {};
+    const dropped = [];
+    for (const [key, value] of Object.entries(raw)) {
+      if (isMappingId(value)) {
+        legacy[key] = String(value);
+      } else if (isPlainObject(value)) {
+        const inner = {};
+        for (const [category, id] of Object.entries(value)) {
+          if (isMappingId(id)) inner[category] = String(id);
+          else dropped.push(`${key} / ${category}`);
+        }
+        out[key] = inner;
+      } else {
+        dropped.push(key);
+      }
+    }
+    if (Object.keys(legacy).length > 0) {
+      const target = out[legacyEndpoint] || {};
+      const overridden = Object.keys(legacy).filter(c => hasOwn(target, c) && target[c] !== legacy[c]);
+      if (overridden.length > 0) {
+        console.warn(`[tagManager] Legacy category mappings for ${overridden.join(", ")} conflict with ` +
+          `newer ${legacyEndpoint} mappings; keeping the newer ones.`);
+      }
+      out[legacyEndpoint] = { ...legacy, ...target };
+    }
+    if (dropped.length > 0) {
+      console.warn("[tagManager] Dropped unreadable category mapping entries:", dropped);
+    }
+    return out;
+  }
+
+  /** F20: the saved local parent tag id for `category` on `endpoint`, or undefined. */
+  function getCategoryMapping(endpoint, category) {
+    if (!endpoint || !category || !hasOwn(categoryMappings, endpoint)) return undefined;
+    const map = categoryMappings[endpoint];
+    return isPlainObject(map) && hasOwn(map, category) ? map[category] : undefined;
+  }
+
+  /** F20: remember `category` -> local tag `id` for `endpoint` (in memory; save separately). */
+  function setCategoryMapping(endpoint, category, id) {
+    if (!endpoint || !category || id === null || id === undefined) return;
+    if (!hasOwn(categoryMappings, endpoint) || !isPlainObject(categoryMappings[endpoint])) {
+      categoryMappings[endpoint] = {};
+    }
+    categoryMappings[endpoint][category] = String(id);
+  }
+
+  /** F20: forget one endpoint's mapping for `category`; drops the endpoint map once empty. */
+  function deleteCategoryMapping(endpoint, category) {
+    if (!endpoint || !category || !hasOwn(categoryMappings, endpoint)) return;
+    const map = categoryMappings[endpoint];
+    if (isPlainObject(map)) delete map[category];
+    if (!isPlainObject(map) || Object.keys(map).length === 0) delete categoryMappings[endpoint];
+  }
+
+  /**
+   * Load category mappings from plugin settings. F20: a legacy flat map is
+   * migrated to the per-endpoint shape (under StashDB) and saved once. If that
+   * save fails, the migrated map stays in memory: every later save writes the
+   * whole map, and the next load migrates the stored flat map again, so nothing
+   * is lost.
    */
   async function loadCategoryMappings() {
     try {
@@ -293,12 +456,25 @@
 
       // Parse JSON string from settings
       if (pluginConfig.categoryMappings) {
+        let parsed;
         try {
-          categoryMappings = JSON.parse(pluginConfig.categoryMappings);
-          console.debug("[tagManager] Loaded category mappings:", Object.keys(categoryMappings).length);
+          parsed = typeof pluginConfig.categoryMappings === "string"
+            ? JSON.parse(pluginConfig.categoryMappings)
+            : pluginConfig.categoryMappings;
         } catch (e) {
           console.warn("[tagManager] Failed to parse category mappings:", e);
           categoryMappings = {};
+          return;
+        }
+        categoryMappings = migrateCategoryMappings(parsed, LEGACY_MAPPINGS_ENDPOINT);
+        console.debug("[tagManager] Loaded category mappings for endpoints:", Object.keys(categoryMappings).length);
+        if (JSON.stringify(categoryMappings) !== JSON.stringify(parsed)) {
+          console.info("[tagManager] Migrating category mappings to the per-endpoint shape");
+          const saved = await saveCategoryMappings({ quiet: true });
+          if (!saved) {
+            console.warn("[tagManager] Could not save the migrated category mappings; " +
+              "using them in memory and retrying on the next save.");
+          }
         }
       }
     } catch (e) {
@@ -307,9 +483,10 @@
   }
 
   /**
-   * Save category mappings to plugin settings
+   * Save category mappings to plugin settings. `quiet` skips the error toast
+   * (the load-time migration save, where nothing is lost on failure).
    */
-  async function saveCategoryMappings() {
+  async function saveCategoryMappings({ quiet = false } = {}) {
     const written = { categoryMappings: JSON.stringify(categoryMappings) };
     try {
       await savePluginConfigPatch(written);
@@ -322,7 +499,7 @@
       return true;
     } catch (e) {
       console.error("[tagManager] Failed to save category mappings:", e);
-      if (typeof showToast === "function") {
+      if (!quiet && typeof showToast === "function") {
         showToast("Failed to save category mappings — they may not persist.", "error");
       }
       return false;
@@ -1429,8 +1606,9 @@
    * Resolve parent tags for categories found among selected StashDB tags.
    * Returns: { categoryName: { parentTagId, parentTagName, resolution, description } }
    * resolution is one of: 'saved', 'exact', 'create'
+   * F20: saved mappings are read for `endpoint` (default: the selected stash-box).
    */
-  function resolveCategoryParents(selectedIds) {
+  function resolveCategoryParents(selectedIds, endpoint = selectedStashBox?.endpoint) {
     const result = {};
     const stashdbById = new Map((stashdbTags || []).map(t => [t.id, t]));
 
@@ -1442,7 +1620,7 @@
       if (result[catName]) continue;
 
       // 1. Check saved mapping
-      const savedId = categoryMappings[catName];
+      const savedId = getCategoryMapping(endpoint, catName);
       if (savedId) {
         const savedTag = localTags.find(t => t.id === savedId);
         if (savedTag) {
@@ -1808,7 +1986,7 @@
     // #126: when "leave parent tags alone" is on, import flat — skip the category
     // preview modal and all parent creation/assignment (parentMap stays null).
     if (shouldResolveParents(settings)) {
-      const categoryResolutions = resolveCategoryParents(selectedForImport);
+      const categoryResolutions = resolveCategoryParents(selectedForImport, endpoint);
       const hasCategories = Object.keys(categoryResolutions).length > 0;
 
       if (hasCategories) {
@@ -2009,7 +2187,7 @@
       for (const [catName, info] of Object.entries(resolutions)) {
         const finalId = info.parentTagId || createdParents[catName];
         if (finalId) {
-          categoryMappings[catName] = finalId;
+          setCategoryMapping(endpoint, catName, finalId);
         }
       }
       await saveCategoryMappings();
@@ -2370,7 +2548,7 @@
       `<button class="btn btn-danger btn-sm tm-conflict-reverse" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge "${escapeHtml(t.name)}" into this</button>`
     ).join('');
     const openBtns = tags.map(t =>
-      `<a href="/tags/${escapeHtml(t.id)}" target="_blank" class="btn btn-secondary btn-sm">Open "${escapeHtml(t.name)}"</a>`
+      `<a href="${escapeHtml(stashPath(`/tags/${t.id}`))}" target="_blank" class="btn btn-secondary btn-sm">Open "${escapeHtml(t.name)}"</a>`
     ).join('');
     return `
           <div class="tm-conflict-row" data-i="${i}">
@@ -3148,7 +3326,7 @@
     return `
       <div class="tm-tag-row" data-tag-id="${tag.id}">
         <div class="tm-tag-info">
-          <a href="/tags/${tag.id}" class="tm-tag-name">${escapeHtml(tag.name)}</a>
+          <a ${internalLinkAttrs(`/tags/${tag.id}`)} class="tm-tag-name">${escapeHtml(tag.name)}</a>
           ${tag.aliases?.length ? `<span class="tm-tag-aliases">${escapeHtml(tag.aliases.join(', '))}</span>` : ''}
         </div>
         <div class="tm-tag-match">
@@ -3569,7 +3747,7 @@
 
     // Save the mapping only once the tag itself is saved
     if (rememberMapping && parentTagId) {
-      categoryMappings[categoryName] = parentTagId;
+      setCategoryMapping(endpoint, categoryName, parentTagId);
       await saveCategoryMappings();
     }
 
@@ -3612,10 +3790,12 @@
     const showParentControls = shouldShowParentControls(settings, hasCategory);
     if (hasCategory) {
       const categoryName = stashdbTag.category.name;
-      savedMappingId = categoryMappings[categoryName] || null;
+      // F20: mappings are per endpoint; the same endpoint Apply links to.
+      const mappingEndpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
+      savedMappingId = getCategoryMapping(mappingEndpoint, categoryName) || null;
       if (savedMappingId && !localTags.some(t => t.id === savedMappingId)) {
         // Stale mapping (tag deleted): drop it so it is not offered or re-saved
-        delete categoryMappings[categoryName];
+        deleteCategoryMapping(mappingEndpoint, categoryName);
         savedMappingId = null;
         Promise.resolve(saveCategoryMappings()).catch(e =>
           console.warn('[tagManager] Failed to drop stale category mapping:', e));
@@ -4002,7 +4182,7 @@
             <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
               Keep local name instead
             </button>
-            <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+            <a href="${escapeHtml(stashPath(`/tags/${conflictTag.id}`))}" target="_blank" class="btn btn-secondary btn-sm">
               Edit "${escapeHtml(conflictTag.name)}"
             </a>
           </div>
@@ -4016,7 +4196,7 @@
             <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(err.value)}">
               Remove from aliases
             </button>
-            <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+            <a href="${escapeHtml(stashPath(`/tags/${conflictTag.id}`))}" target="_blank" class="btn btn-secondary btn-sm">
               Edit "${escapeHtml(conflictTag.name)}"
             </a>
           </div>
@@ -4093,7 +4273,7 @@
               <button type="button" class="btn btn-primary btn-sm tm-error-merge-api" data-conflict-id="${conflictTag.id}">
                 Merge into "${escapeHtml(conflictTag.name)}"
               </button>
-              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+              <a href="${escapeHtml(stashPath(`/tags/${conflictTag.id}`))}" target="_blank" class="btn btn-secondary btn-sm">
                 Edit "${escapeHtml(conflictTag.name)}"
               </a>
             ` : ''}
@@ -4158,7 +4338,7 @@
           </div>
           <div class="tm-error-actions">
             ${otherTag ? `
-              <a href="/tags/${otherTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+              <a href="${escapeHtml(stashPath(`/tags/${otherTag.id}`))}" target="_blank" class="btn btn-secondary btn-sm">
                 Edit "${escapeHtml(otherTagName)}"
               </a>
             ` : ''}
@@ -4536,6 +4716,10 @@
 
       init();
 
+      // F16: tag links navigate inside the SPA on a plain left click.
+      const linkRoot = containerRef.current;
+      if (linkRoot) linkRoot.addEventListener('click', handleInternalLinkClick);
+
       // #124: refresh tag data when returning to the tab (e.g. after fixing a
       // conflicting tag elsewhere). Listeners are cleaned up on unmount.
       const onFocus = () => scheduleRefresh();
@@ -4546,6 +4730,7 @@
       document.addEventListener("visibilitychange", onVisibility);
 
       return () => {
+        if (linkRoot) linkRoot.removeEventListener('click', handleInternalLinkClick);
         window.removeEventListener("focus", onFocus);
         document.removeEventListener("visibilitychange", onVisibility);
         if (_refreshTimer) {
@@ -5417,7 +5602,7 @@
           <span class="th-toggle ${hasChildren ? '' : 'th-leaf'}" data-tag-id="${node.id}">${toggleIcon}</span>
           ${imageHtml}
           <div class="th-info">
-            <a href="/tags/${node.id}" class="th-name">${escapeHtml(node.name)}</a>${multiParentBadge}
+            <a ${internalLinkAttrs(`/tags/${node.id}`)} class="th-name">${escapeHtml(node.name)}</a>${multiParentBadge}
             ${metaText ? `<div class="th-meta">${metaText}</div>` : ''}
           </div>
         </div>
@@ -5862,8 +6047,13 @@
 
       init();
 
+      // F16: tag links navigate inside the SPA on a plain left click.
+      const linkRoot = containerRef.current;
+      if (linkRoot) linkRoot.addEventListener('click', handleInternalLinkClick);
+
       // Cleanup: remove keyboard handler when component unmounts
       return () => {
+        if (linkRoot) linkRoot.removeEventListener('click', handleInternalLinkClick);
         document.removeEventListener('keydown', handleHierarchyKeyboard);
         resetHierarchyEditState();
       };
@@ -5931,12 +6121,18 @@
     return svg;
   }
 
+  /** F16: on the Tags list page, under Stash's base path (e.g. /stash/tags). */
+  function isTagsListPage() {
+    const here = String(window.location.pathname || '').replace(/\/+$/, '');
+    return here === stashPath('/tags');
+  }
+
   /**
    * Inject Tag Manager and Tag Hierarchy buttons into Tags list page toolbar
    */
   function injectNavButtons() {
     // Only run on Tags list page
-    if (!window.location.pathname.endsWith('/tags')) {
+    if (!isTagsListPage()) {
       return;
     }
 
@@ -5983,9 +6179,7 @@
     tmBtn.title = 'Tag Matcher';
     tmBtn.style.marginLeft = '0.5rem';
     tmBtn.appendChild(createTagManagerIcon());
-    tmBtn.addEventListener('click', () => {
-      window.location.href = ROUTE_PATH;
-    });
+    tmBtn.addEventListener('click', () => navigateTo(ROUTE_PATH));
 
     // Create Tag Hierarchy button
     const thBtn = document.createElement('button');
@@ -5994,9 +6188,7 @@
     thBtn.title = 'Tag Hierarchy';
     thBtn.style.marginLeft = '0.25rem';
     thBtn.appendChild(createHierarchyIcon());
-    thBtn.addEventListener('click', () => {
-      window.location.href = HIERARCHY_ROUTE_PATH;
-    });
+    thBtn.addEventListener('click', () => navigateTo(HIERARCHY_ROUTE_PATH));
 
     // Insert both buttons after the insertion point
     insertionPoint.parentNode.insertBefore(tmBtn, insertionPoint.nextSibling);
@@ -6005,31 +6197,31 @@
   }
 
   /**
-   * Watch for navigation to Tags page and inject button
+   * F16: at most one pending injection check per animation frame (setTimeout 0
+   * where requestAnimationFrame is missing). The check is cheap and only calls
+   * injectNavButtons when on the Tags page with the button missing.
+   */
+  let _navInjectScheduled = false;
+  function scheduleNavButtonInjection() {
+    if (_navInjectScheduled) return;
+    _navInjectScheduled = true;
+    const run = () => {
+      _navInjectScheduled = false;
+      if (isTagsListPage() && !document.querySelector('#tm-nav-button')) injectNavButtons();
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    else setTimeout(run, 0);
+  }
+
+  /**
+   * Watch for the Tags page toolbar (SPA navigation, late renders) and inject the
+   * buttons: one call now, then one body observer for the page's lifetime whose
+   * callback is debounced to a frame.
    */
   function setupNavButtonInjection() {
-    // Try to inject immediately
     injectNavButtons();
-
-    // Watch for URL changes (SPA navigation)
-    let lastUrl = window.location.href;
-    const observer = new MutationObserver(() => {
-      if (window.location.href !== lastUrl) {
-        lastUrl = window.location.href;
-        // Wait a bit for DOM to update after navigation
-        setTimeout(injectNavButtons, 100);
-        setTimeout(injectNavButtons, 500);
-        setTimeout(injectNavButtons, 1000);
-      }
-    });
-
+    const observer = new MutationObserver(scheduleNavButtonInjection);
     observer.observe(document.body, { childList: true, subtree: true });
-
-    // Also try on initial load with delays (for refresh on Tags page)
-    setTimeout(injectNavButtons, 100);
-    setTimeout(injectNavButtons, 500);
-    setTimeout(injectNavButtons, 1000);
-    setTimeout(injectNavButtons, 2000);
   }
 
   // Initialize
@@ -6088,6 +6280,21 @@
       renderTreeNode,
       handleHierarchyKeyboard,
       shouldHandleHierarchyKey,
+      stashPath,
+      navigateTo,
+      handleInternalLinkClick,
+      injectNavButtons,
+      isTagsListPage,
+      renderTagRow,
+      parseIntSetting,
+      loadSettings,
+      migrateCategoryMappings,
+      getCategoryMapping,
+      setCategoryMapping,
+      deleteCategoryMapping,
+      loadCategoryMappings,
+      saveCategoryMappings,
+      resolveCategoryParents,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,

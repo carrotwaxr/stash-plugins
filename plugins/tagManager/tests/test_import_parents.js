@@ -1,5 +1,6 @@
 /**
- * Unit tests for category parent resolution during import.
+ * Unit tests for category parent resolution during import, against the REAL
+ * tag-manager.js.
  * Run with: node plugins/tagManager/tests/test_import_parents.js
  */
 
@@ -39,81 +40,20 @@ const stashdbTags = [
   { id: 's5', name: 'Oral', category: { id: 'c1', name: 'Action', group: 'ACTION', description: 'Action category' } },
 ];
 
-let categoryMappings = {};
+// The REAL resolveCategoryParents / findLocalParentMatches (F20: mappings are
+// per endpoint, read for the selected stash-box).
+const { loadTagManager } = require('./harness');
+const EP = 'https://stashdb.org/graphql';
+const tm = loadTagManager({});
+tm.setState({ localTags, stashdbTags, selectedStashBox: { endpoint: EP, name: 'StashDB' }, categoryMappings: {} });
 
-// Copy of findLocalParentMatches (same as in tag-manager.js)
-function findLocalParentMatches(categoryName) {
-  if (!categoryName) return [];
-  const lowerCategoryName = categoryName.toLowerCase();
-  const matches = [];
-  for (const tag of localTags) {
-    const isChild = tag.parent_count > 0;
-    if (tag.name.toLowerCase() === lowerCategoryName) {
-      matches.push({ tag, matchType: 'exact', score: isChild ? 95 : 100 });
-      continue;
-    }
-    if (tag.name.toLowerCase().includes(lowerCategoryName)) {
-      matches.push({ tag, matchType: 'contains', score: isChild ? 85 : 90 });
-      continue;
-    }
-    if (tag.aliases?.some(a => a.toLowerCase() === lowerCategoryName)) {
-      matches.push({ tag, matchType: 'alias', score: isChild ? 80 : 85 });
-      continue;
-    }
-  }
-  matches.sort((a, b) => b.score - a.score);
-  return matches.slice(0, 5);
+/** Set this endpoint's saved mappings ({ category: localTagId }). */
+function setMappings(map) {
+  tm.setState({ categoryMappings: Object.keys(map).length ? { [EP]: { ...map } } : {} });
 }
 
-// --- Function under test ---
 function resolveCategoryParents(selectedIds) {
-  const result = {};
-
-  for (const stashdbId of selectedIds) {
-    const tag = stashdbTags.find(t => t.id === stashdbId);
-    if (!tag?.category) continue;
-
-    const catName = tag.category.name;
-    if (result[catName]) continue; // Already resolved
-
-    // 1. Check saved mapping
-    const savedId = categoryMappings[catName];
-    if (savedId) {
-      const savedTag = localTags.find(t => t.id === savedId);
-      if (savedTag) {
-        result[catName] = {
-          parentTagId: savedTag.id,
-          parentTagName: savedTag.name,
-          resolution: 'saved',
-          description: tag.category.description || '',
-        };
-        continue;
-      }
-    }
-
-    // 2. Exact name match from local tags
-    const matches = findLocalParentMatches(catName);
-    const exactMatch = matches.find(m => m.matchType === 'exact');
-    if (exactMatch) {
-      result[catName] = {
-        parentTagId: exactMatch.tag.id,
-        parentTagName: exactMatch.tag.name,
-        resolution: 'exact',
-        description: tag.category.description || '',
-      };
-      continue;
-    }
-
-    // 3. Will create new
-    result[catName] = {
-      parentTagId: null,
-      parentTagName: catName,
-      resolution: 'create',
-      description: tag.category.description || '',
-    };
-  }
-
-  return result;
+  return tm.exports.resolveCategoryParents(selectedIds);
 }
 
 // --- Tests ---
@@ -125,14 +65,14 @@ test('returns empty for tags with no categories', () => {
 });
 
 test('resolves existing local tag by exact name', () => {
-  categoryMappings = {};
+  setMappings({});
   const result = resolveCategoryParents(['s1']);
   assertEqual(result['Action'].parentTagId, '10');
   assertEqual(result['Action'].resolution, 'exact');
 });
 
 test('flags create for category with no local match', () => {
-  categoryMappings = {};
+  setMappings({});
   const result = resolveCategoryParents(['s2']);
   assertEqual(result['Accessories'].parentTagId, null);
   assertEqual(result['Accessories'].resolution, 'create');
@@ -140,28 +80,28 @@ test('flags create for category with no local match', () => {
 });
 
 test('uses saved mapping when available', () => {
-  categoryMappings = { 'Action': '20' }; // Override to Clothing tag
+  setMappings({ 'Action': '20' }); // Override to Clothing tag
   const result = resolveCategoryParents(['s1']);
   assertEqual(result['Action'].parentTagId, '20');
   assertEqual(result['Action'].resolution, 'saved');
 });
 
 test('falls back to match if saved mapping points to deleted tag', () => {
-  categoryMappings = { 'Action': '999' }; // Non-existent
+  setMappings({ 'Action': '999' }); // Non-existent
   const result = resolveCategoryParents(['s1']);
   assertEqual(result['Action'].parentTagId, '10');
   assertEqual(result['Action'].resolution, 'exact');
 });
 
 test('deduplicates categories across multiple tags', () => {
-  categoryMappings = {};
+  setMappings({});
   const result = resolveCategoryParents(['s1', 's5']); // Both are Action
   assertEqual(Object.keys(result).length, 1);
   assertEqual(result['Action'].parentTagId, '10');
 });
 
 test('resolves multiple categories independently', () => {
-  categoryMappings = {};
+  setMappings({});
   const result = resolveCategoryParents(['s1', 's2', 's3']);
   assertEqual(Object.keys(result).length, 3);
   assertEqual(result['Action'].resolution, 'exact');
@@ -171,13 +111,13 @@ test('resolves multiple categories independently', () => {
 });
 
 test('carries category description for create entries', () => {
-  categoryMappings = {};
+  setMappings({});
   const result = resolveCategoryParents(['s2']);
   assertEqual(result['Accessories'].description, 'Wearable accessories');
 });
 
 test('skips tags with null category', () => {
-  categoryMappings = {};
+  setMappings({});
   const result = resolveCategoryParents(['s4', 's1']);
   assertEqual(Object.keys(result).length, 1); // Only Action
 });
@@ -196,7 +136,7 @@ test('handles selection of only uncategorized tags', () => {
 });
 
 test('saved mapping takes priority over exact match', () => {
-  categoryMappings = { 'Action': '20' }; // Mapped to Clothing instead of Action
+  setMappings({ 'Action': '20' }); // Mapped to Clothing instead of Action
   const result = resolveCategoryParents(['s1']);
   assertEqual(result['Action'].parentTagId, '20');
   assertEqual(result['Action'].parentTagName, 'Clothing');
@@ -204,7 +144,7 @@ test('saved mapping takes priority over exact match', () => {
 });
 
 test('handles mixed categorized and uncategorized tags', () => {
-  categoryMappings = {};
+  setMappings({});
   const result = resolveCategoryParents(['s1', 's4', 's2']);
   assertEqual(Object.keys(result).length, 2); // Action + Accessories, not s4
   assertEqual(result['Action'] !== undefined, true);

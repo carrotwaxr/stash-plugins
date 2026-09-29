@@ -1,22 +1,26 @@
 /**
  * Unit tests for category mapping persistence functions.
+ * The serialization/parsing/saved-mapping cases run against the REAL
+ * tag-manager.js (harness) and its per-endpoint shape (F20):
+ *   { endpoint: { categoryName: localTagId } }
  * Run with: node plugins/tagManager/tests/test_category_persistence.js
  */
+const { loadTagManager } = require('./harness');
 
-// Test runner
+const EP = 'https://stashdb.org/graphql';
+const TPDB = 'https://theporndb.net/graphql';
+
+// Test runner (tests run in order; async ones are awaited)
 let passed = 0;
 let failed = 0;
+const queue = [];
 
 function test(name, fn) {
-  try {
-    fn();
-    console.log(`✓ ${name}`);
-    passed++;
-  } catch (e) {
-    console.log(`✗ ${name}`);
-    console.log(`  Error: ${e.message}`);
-    failed++;
-  }
+  queue.push([name, fn]);
+}
+
+function heading(title) {
+  queue.push([title, null]);
 }
 
 function assertEqual(actual, expected, msg = '') {
@@ -25,124 +29,133 @@ function assertEqual(actual, expected, msg = '') {
   }
 }
 
+/** Real plugin instance whose stored plugin config is `config` (mutated by saves). */
+async function pluginWithConfig(config) {
+  const store = { config: { ...config } };
+  const tm = loadTagManager({
+    fetchResponses: {
+      Configuration: () => ({ data: { configuration: { plugins: { tagManager: store.config } } } }),
+      ConfigurePlugin: (body) => { store.config = body.variables.input; return { data: { configurePlugin: store.config } }; },
+    },
+  });
+  await tm.settle();
+  return { tm, store };
+}
+
+/** Load `stored` (the raw plugin setting) through the real loadCategoryMappings. */
+async function loadStored(stored) {
+  const config = stored === undefined ? {} : { categoryMappings: stored };
+  const { tm } = await pluginWithConfig(config);
+  await tm.exports.loadCategoryMappings();
+  await tm.settle();
+  return tm.getState().categoryMappings;
+}
+
+/** Save `mappings` per endpoint with the real code, then load them in a fresh instance. */
+async function roundTrip(mappings) {
+  const a = await pluginWithConfig({});
+  for (const [endpoint, map] of Object.entries(mappings)) {
+    for (const [category, id] of Object.entries(map)) a.tm.exports.setCategoryMapping(endpoint, category, id);
+  }
+  const ok = await a.tm.exports.saveCategoryMappings();
+  if (!ok) throw new Error('save failed');
+  const b = await pluginWithConfig(a.store.config);
+  await b.tm.exports.loadCategoryMappings();
+  return { stored: a.store.config.categoryMappings, loaded: b.tm.getState().categoryMappings };
+}
+
 // ============================================================================
 // Category Mapping Serialization Tests
 // ============================================================================
 
-console.log('\n=== Category Mapping Serialization tests ===\n');
+heading('Category Mapping Serialization tests');
 
-test('serializes empty mappings correctly', () => {
-  const categoryMappings = {};
-  const serialized = JSON.stringify(categoryMappings);
-  assertEqual(serialized, '{}');
-  assertEqual(JSON.parse(serialized), {});
+test('serializes empty mappings correctly', async () => {
+  const { tm, store } = await pluginWithConfig({});
+  await tm.exports.saveCategoryMappings();
+  assertEqual(store.config.categoryMappings, '{}');
 });
 
-test('serializes single mapping correctly', () => {
-  const categoryMappings = { 'Action': '123' };
-  const serialized = JSON.stringify(categoryMappings);
-  const parsed = JSON.parse(serialized);
-  assertEqual(parsed, { 'Action': '123' });
+test('serializes single mapping correctly', async () => {
+  const { stored, loaded } = await roundTrip({ [EP]: { 'Action': '123' } });
+  assertEqual(JSON.parse(stored), { [EP]: { 'Action': '123' } });
+  assertEqual(loaded, { [EP]: { 'Action': '123' } });
 });
 
-test('serializes multiple mappings correctly', () => {
-  const categoryMappings = {
-    'Action': '123',
-    'Comedy': '456',
-    'Drama': '789'
+test('serializes multiple mappings and endpoints correctly', async () => {
+  const mappings = {
+    [EP]: { 'Action': '123', 'Comedy': '456', 'Drama': '789' },
+    [TPDB]: { 'Action': '321' },
   };
-  const serialized = JSON.stringify(categoryMappings);
-  const parsed = JSON.parse(serialized);
-  assertEqual(parsed, categoryMappings);
+  const { loaded } = await roundTrip(mappings);
+  assertEqual(loaded, mappings);
 });
 
-test('handles special characters in category names', () => {
-  const categoryMappings = {
-    'Sci-Fi': '100',
-    'Action/Adventure': '101',
-    'Category "Quoted"': '102',
-    'Category: With Colon': '103'
+test('handles special characters in category names', async () => {
+  const mappings = {
+    [EP]: {
+      'Sci-Fi': '100',
+      'Action/Adventure': '101',
+      'Category "Quoted"': '102',
+      'Category: With Colon': '103',
+    },
   };
-  const serialized = JSON.stringify(categoryMappings);
-  const parsed = JSON.parse(serialized);
-  assertEqual(parsed, categoryMappings);
+  const { loaded } = await roundTrip(mappings);
+  assertEqual(loaded, mappings);
 });
 
-test('handles unicode in category names', () => {
-  const categoryMappings = {
-    'Acción': '200',
-    '日本語': '201',
-    'Émotionnel': '202'
-  };
-  const serialized = JSON.stringify(categoryMappings);
-  const parsed = JSON.parse(serialized);
-  assertEqual(parsed, categoryMappings);
+test('handles unicode in category names', async () => {
+  const mappings = { [EP]: { 'Acción': '200', '日本語': '201', 'Émotionnel': '202' } };
+  const { loaded } = await roundTrip(mappings);
+  assertEqual(loaded, mappings);
 });
 
 // ============================================================================
-// Category Mapping Parsing (simulating load from settings)
+// Category Mapping Parsing (the real loadCategoryMappings)
 // ============================================================================
 
-console.log('\n=== Category Mapping Parsing tests ===\n');
+heading('Category Mapping Parsing tests');
 
-/**
- * Parse category mappings from plugin settings string.
- * This simulates what loadCategoryMappings does.
- */
-function parseCategoryMappings(settingsStr) {
-  if (!settingsStr) return {};
-
-  try {
-    return JSON.parse(settingsStr);
-  } catch (e) {
-    console.warn('Failed to parse category mappings:', e.message);
-    return {};
-  }
-}
-
-test('parses valid JSON string', () => {
-  const input = '{"Action":"123","Comedy":"456"}';
-  const result = parseCategoryMappings(input);
-  assertEqual(result, { 'Action': '123', 'Comedy': '456' });
+test('parses a per-endpoint JSON string', async () => {
+  const stored = JSON.stringify({ [EP]: { 'Action': '123' }, [TPDB]: { 'Comedy': '456' } });
+  assertEqual(await loadStored(stored), { [EP]: { 'Action': '123' }, [TPDB]: { 'Comedy': '456' } });
 });
 
-test('returns empty object for null input', () => {
-  const result = parseCategoryMappings(null);
-  assertEqual(result, {});
+test('migrates a legacy flat JSON string under StashDB', async () => {
+  const result = await loadStored('{"Action":"123","Comedy":"456"}');
+  assertEqual(result, { [EP]: { 'Action': '123', 'Comedy': '456' } });
 });
 
-test('returns empty object for undefined input', () => {
-  const result = parseCategoryMappings(undefined);
-  assertEqual(result, {});
+test('returns empty object for a missing setting', async () => {
+  assertEqual(await loadStored(undefined), {});
 });
 
-test('returns empty object for empty string', () => {
-  const result = parseCategoryMappings('');
-  assertEqual(result, {});
+test('returns empty object for null input', async () => {
+  assertEqual(await loadStored(null), {});
 });
 
-test('handles corrupt JSON gracefully', () => {
-  const result = parseCategoryMappings('{invalid json}');
-  assertEqual(result, {});
+test('returns empty object for empty string', async () => {
+  assertEqual(await loadStored(''), {});
 });
 
-test('handles truncated JSON gracefully', () => {
-  const result = parseCategoryMappings('{"Action":"123"');
-  assertEqual(result, {});
+test('handles corrupt JSON gracefully', async () => {
+  assertEqual(await loadStored('{invalid json}'), {});
 });
 
-test('handles non-object JSON gracefully', () => {
-  // Array instead of object
-  const result = parseCategoryMappings('["Action", "Comedy"]');
-  // JSON.parse succeeds but returns array - caller should handle
-  assertEqual(Array.isArray(result), true);
+test('handles truncated JSON gracefully', async () => {
+  assertEqual(await loadStored('{"Action":"123"'), {});
+});
+
+test('handles non-object JSON gracefully', async () => {
+  // An array is not a mapping: nothing is loaded
+  assertEqual(await loadStored('["Action", "Comedy"]'), {});
 });
 
 // ============================================================================
 // findLocalParentMatches tests (supplemental)
 // ============================================================================
 
-console.log('\n=== Category-to-Parent Matching tests ===\n');
+heading('Category-to-Parent Matching tests');
 
 // Mock local tags
 const localTags = [
@@ -198,26 +211,36 @@ test('deprioritizes tags that have parents', () => {
   assertEqual(actionMovies.score, 85); // 90 - 5 penalty for having parent
 });
 
-test('uses saved mapping when available', () => {
-  // Simulate checking for saved mapping before auto-matching
-  const categoryMappings = { 'Action': '999' };
-  const categoryName = 'Action';
-
-  // If saved mapping exists, use it directly
-  const savedMapping = categoryMappings[categoryName];
-  if (savedMapping) {
-    assertEqual(savedMapping, '999');
-  }
+test('uses the saved mapping for the same endpoint only', async () => {
+  const { tm } = await pluginWithConfig({});
+  tm.setState({ categoryMappings: { [EP]: { 'Action': '999' } } });
+  assertEqual(tm.exports.getCategoryMapping(EP, 'Action'), '999');
+  assertEqual(tm.exports.getCategoryMapping(TPDB, 'Action'), undefined);
 });
 
 // ============================================================================
 // Summary
 // ============================================================================
 
-console.log('\n=== Summary ===\n');
-console.log(`Passed: ${passed}`);
-console.log(`Failed: ${failed}`);
+(async () => {
+  for (const [name, fn] of queue) {
+    if (!fn) { console.log(`\n=== ${name} ===\n`); continue; }
+    try {
+      await fn();
+      console.log(`✓ ${name}`);
+      passed++;
+    } catch (e) {
+      console.log(`✗ ${name}`);
+      console.log(`  Error: ${e.message}`);
+      failed++;
+    }
+  }
 
-if (failed > 0) {
-  process.exit(1);
-}
+  console.log('\n=== Summary ===\n');
+  console.log(`Passed: ${passed}`);
+  console.log(`Failed: ${failed}`);
+
+  if (failed > 0) {
+    process.exit(1);
+  }
+})();

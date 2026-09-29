@@ -7,7 +7,8 @@
  *   await tm.settle();
  *
  * Returns { exports, getState, setState, fetchCalls, confirmCalls, routes, effects,
- *           document, settle, flushTimers, window }.
+ *           document, settle, flushTimers, window, pendingTimers, mutationObservers,
+ *           historyCalls, dispatchedEvents, locationAssignments, logs }.
  * `exports`/`getState`/`setState` come from the hook at the end of tag-manager.js
  * (active only when window.__TAG_MANAGER_TEST__ is set).
  *
@@ -17,6 +18,18 @@
  *
  * DOM: createElement() stubs find nothing (querySelector -> null). To run a real
  * dialog handler, swap in createQueryableElement() (see below) for that test.
+ *
+ * Navigation: `base` is the stubbed <base href>; `pathname` the initial
+ * location.pathname. window.history.pushState(state, title, url) is recorded in
+ * `historyCalls` and moves location (pathname/href) without counting as an
+ * assignment; window.dispatchEvent(evt) is recorded in `dispatchedEvents`;
+ * `PopStateEvent` is a minimal { type, state } class. Direct `location.href = x`
+ * or location.assign/replace(x) is recorded in `locationAssignments`.
+ * There is no requestAnimationFrame, so code that falls back to setTimeout(0)
+ * runs on flushTimers(); pendingTimers() lists the queued { ms }.
+ * Every MutationObserver the file creates is kept in `mutationObservers`
+ * ({ cb, observing }); call `obs.cb([], obs)` to simulate a mutation.
+ * console.warn/error calls are recorded in `logs.warn` / `logs.error` (arg arrays).
  */
 const fs = require("fs");
 const path = require("path");
@@ -90,7 +103,7 @@ function createQueryableElement(tagName, { query, queryAll } = {}) {
   return el;
 }
 
-function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true } = {}) {
+function loadTagManager({ fetchResponses = {}, base = "/", pathname = "/", confirm = () => true } = {}) {
   const defaultSettings = JSON.parse(fs.readFileSync(DEFAULT_SETTINGS_PATH, "utf8"));
 
   // ---- fetch stub: answers by GraphQL operation name, or by URL suffix ----
@@ -133,6 +146,7 @@ function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true 
   let timerQueue = [];
   let timerId = 0;
   const setTimeoutStub = (fn, ms) => { timerQueue.push({ id: ++timerId, fn, ms }); return timerId; };
+  const pendingTimers = () => timerQueue.map((t) => ({ ms: t.ms }));
   const clearTimeoutStub = (id) => { timerQueue = timerQueue.filter((t) => t.id !== id); };
   function flushTimers() {
     // Runs queued callbacks (and any they queue) once each.
@@ -158,17 +172,52 @@ function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true 
     removeEventListener() { listenerCounts.remove++; },
     listenerCounts,
   };
+  // location: pushState moves it silently; direct href/assign/replace is recorded.
+  const locationAssignments = [];
+  let currentHref = new URL(pathname, "http://localhost").href;
+  const location = { origin: "http://localhost", pathname: new URL(currentHref).pathname, search: "", hash: "" };
+  const moveTo = (url) => {
+    const u = new URL(String(url), currentHref);
+    currentHref = u.href;
+    location.pathname = u.pathname; location.search = u.search; location.hash = u.hash;
+  };
+  Object.defineProperty(location, "href", {
+    enumerable: true,
+    get: () => currentHref,
+    set: (v) => { locationAssignments.push(String(v)); moveTo(v); },
+  });
+  location.assign = (v) => { locationAssignments.push(String(v)); moveTo(v); };
+  location.replace = (v) => { locationAssignments.push(String(v)); moveTo(v); };
+
+  const historyCalls = [];
+  const dispatchedEvents = [];
+  const history = {
+    state: null,
+    pushState(state, title, url) {
+      historyCalls.push({ state, title, url: String(url) });
+      history.state = state;
+      moveTo(url);
+    },
+  };
+
   const window = {
     __TAG_MANAGER_TEST__: {},
-    location: { pathname: "/", href: "http://localhost/", origin: "http://localhost", search: "", hash: "" },
+    location,
+    history,
+    dispatchEvent: (evt) => { dispatchedEvents.push(evt); return true; },
     innerWidth: 1280,
     innerHeight: 800,
     confirm,
   };
   const confirmCalls = [];
 
+  class PopStateEvent {
+    constructor(type, init = {}) { this.type = type; this.state = init.state === undefined ? null : init.state; }
+  }
+
+  const mutationObservers = [];
   class MutationObserver {
-    constructor(cb) { this.cb = cb; this.observing = false; }
+    constructor(cb) { this.cb = cb; this.observing = false; mutationObservers.push(this); }
     observe() { this.observing = true; }
     disconnect() { this.observing = false; }
   }
@@ -190,11 +239,17 @@ function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true 
     libraries: { ReactRouterDOM: { useHistory: () => ({ push() {} }), Link: "a" } },
   };
 
-  const consoleStub = { log() {}, info() {}, debug() {}, warn() {}, error() {} };
+  const logs = { warn: [], error: [] };
+  const consoleStub = {
+    log() {}, info() {}, debug() {},
+    warn: (...args) => { logs.warn.push(args); },
+    error: (...args) => { logs.error.push(args); },
+  };
 
   const context = vm.createContext({
     window, document, PluginApi, fetch,
     MutationObserver,
+    PopStateEvent,
     setTimeout: setTimeoutStub,
     clearTimeout: clearTimeoutStub,
     console: consoleStub,
@@ -226,6 +281,12 @@ function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true 
     window,
     settle,
     flushTimers,
+    pendingTimers,
+    mutationObservers,
+    historyCalls,
+    dispatchedEvents,
+    locationAssignments,
+    logs,
   };
 }
 

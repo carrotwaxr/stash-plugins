@@ -136,7 +136,8 @@ function openDialog(tm, { nameChoice, descChoice = "local", remember = true }) {
     check("full parent tag in localTags",
       parent && parent.name === "Hair Color" && Array.isArray(parent.aliases) && Array.isArray(parent.stash_ids)
         && Array.isArray(parent.parents) && typeof parent.description === "string", j(parent));
-    check("mapping saved to the new parent", tm.getState().categoryMappings["Hair Color"] === "50", j(tm.getState().categoryMappings));
+    check("mapping saved to the new parent, under its endpoint",
+      j(tm.getState().categoryMappings) === j({ [EP]: { "Hair Color": "50" } }), j(tm.getState().categoryMappings));
     check("dialog closed", dlg.modal.removed === true);
     check("match result consumed", !("1" in tm.getState().matchResults));
     const t1 = tm.getState().localTags.find((t) => t.id === "1");
@@ -167,7 +168,8 @@ function openDialog(tm, { nameChoice, descChoice = "local", remember = true }) {
     const updates = since(tm, mark, "TagUpdate");
     check("retry update uses the created parent", updates.length === 2 && j(updates[1].body.variables.input.parent_ids) === j(["7", "50"]),
       j(updates.map((c) => c.body.variables.input.parent_ids)));
-    check("mapping saved after the successful retry", tm.getState().categoryMappings["Hair Color"] === "50");
+    check("mapping saved after the successful retry", j(tm.getState().categoryMappings) === j({ [EP]: { "Hair Color": "50" } }),
+      j(tm.getState().categoryMappings));
     check("dialog closed", dlg.modal.removed === true);
   });
 

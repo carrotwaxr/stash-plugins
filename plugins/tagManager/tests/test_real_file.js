@@ -22,7 +22,8 @@ const KEYWORDS = new Set(
 const GLOBALS = new Set(
   ("fetch setTimeout clearTimeout setInterval clearInterval confirm alert parseInt parseFloat isNaN " +
     "Number String Boolean Array Object JSON Promise Math Date Set Map WeakMap RegExp Error TypeError " +
-    "encodeURIComponent decodeURIComponent CSS URL MutationObserver require requestAnimationFrame Symbol")
+    "encodeURIComponent decodeURIComponent CSS URL MutationObserver require requestAnimationFrame Symbol " +
+    "PopStateEvent")
     .split(/\s+/)
 );
 
