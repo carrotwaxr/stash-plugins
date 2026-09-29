@@ -359,6 +359,24 @@
     stashdbLink.onclick = (e) => e.stopPropagation();
     actions.appendChild(stashdbLink);
 
+    // Site links: one per distinct stash-box site
+    const seenSites = new Set();
+    for (const u of Array.isArray(scene.urls) ? scene.urls : []) {
+      if (!u || typeof u.url !== "string" || !/^https?:\/\//i.test(u.url)) continue;
+      const site = String(u.site || "").trim() || u.url;
+      if (seenSites.has(site)) continue;
+      seenSites.add(site);
+      const link = document.createElement("a");
+      link.className = "ms-btn ms-btn-small ms-site-link";
+      link.href = u.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = site;
+      link.title = u.url;
+      link.onclick = (e) => e.stopPropagation();
+      actions.appendChild(link);
+    }
+
     // Whisparr button (if configured)
     if (whisparrConfigured && !isStashdbEndpoint(endpoint || stashdbUrl)) {
       const hint = document.createElement("span");

@@ -129,16 +129,11 @@
     sortControls.innerHTML = `
       <label for="ms-sort-field">Sort by:</label>
       <select id="ms-sort-field" class="ms-sort-select">
-        <option value="DATE">Release Date</option>
-        <option value="TITLE">Title</option>
-        <option value="CREATED_AT">Added to StashDB</option>
-        <option value="UPDATED_AT">Last Updated</option>
+        ${SORT_OPTIONS.map((o) => `<option value="${o.value}">${o.label}</option>`).join("")}
       </select>
-      <select id="ms-sort-direction" class="ms-sort-select">
-        <option value="DESC">Newest First</option>
-        <option value="ASC">Oldest First</option>
-      </select>
+      <select id="ms-sort-direction" class="ms-sort-select"></select>
     `;
+    applyDirectionOptions(sortControls.querySelector("#ms-sort-direction"), sortField, sortDirection);
 
     // Filter controls - show 2 checkboxes for the entity types NOT being searched
     const filterControls = document.createElement("div");
@@ -195,6 +190,35 @@
     return modal;
   }
 
+  const SORT_OPTIONS = [
+    { value: "DATE", label: "Release Date" },
+    { value: "TITLE", label: "Title" },
+    { value: "CREATED_AT", label: "Added to StashDB" },
+    { value: "UPDATED_AT", label: "Last Updated" },
+    { value: "TRENDING", label: "Trending" },
+  ];
+
+  /**
+   * Direction options for a sort. Dates read Newest/Oldest, Title reads
+   * Descending/Ascending. stash-box orders TRENDING by recent fingerprint
+   * count, always descending, and ignores the direction, so that control is hidden.
+   */
+  function directionFor(sort) {
+    if (sort === "TITLE") {
+      return { hidden: false, options: [{ value: "DESC", label: "Descending" }, { value: "ASC", label: "Ascending" }] };
+    }
+    const options = [{ value: "DESC", label: "Newest First" }, { value: "ASC", label: "Oldest First" }];
+    return { hidden: sort === "TRENDING", options };
+  }
+
+  function applyDirectionOptions(selectEl, sort, current) {
+    const { hidden, options } = directionFor(sort);
+    selectEl.innerHTML = options.map((o) => `<option value="${o.value}">${o.label}</option>`).join("");
+    selectEl.value = current;
+    selectEl.style.display = hidden ? "none" : "";
+    selectEl.title = hidden ? "Trending is always most active first" : "";
+  }
+
   /**
    * Handle sort control changes
    */
@@ -202,8 +226,10 @@
     const sortFieldEl = document.getElementById("ms-sort-field");
     const sortDirEl = document.getElementById("ms-sort-direction");
     if (sortFieldEl && sortDirEl) {
+      const fieldChanged = sortFieldEl.value !== sortField;
       sortField = sortFieldEl.value;
-      sortDirection = sortDirEl.value;
+      if (fieldChanged) applyDirectionOptions(sortDirEl, sortField, sortDirection);
+      sortDirection = sortDirEl.value || sortDirection;
       // Reset pagination and re-search
       performSearch(true);
     }
@@ -968,6 +994,8 @@
       showError,
       createModal,
       removeModal,
+      SORT_OPTIONS,
+      directionFor,
     };
   }
 

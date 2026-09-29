@@ -392,7 +392,7 @@ def query_scenes_page(url, api_key, entity_type, entity_stash_id, page=1,
         entity_stash_id: StashDB ID of the entity
         page: Page number (1-indexed)
         per_page: Number of results per page
-        sort: Sort field - "DATE", "TITLE", "CREATED_AT", "UPDATED_AT"
+        sort: Sort field - "DATE", "TITLE", "CREATED_AT", "UPDATED_AT", "TRENDING"
         direction: Sort direction - "ASC" or "DESC"
         plugin_settings: Plugin configuration
 
@@ -408,7 +408,7 @@ def query_scenes_page(url, api_key, entity_type, entity_stash_id, page=1,
         ValueError: an unknown entity_type.
     """
     # Validate sort field
-    valid_sorts = {"DATE", "TITLE", "CREATED_AT", "UPDATED_AT"}
+    valid_sorts = {"DATE", "TITLE", "CREATED_AT", "UPDATED_AT", "TRENDING"}
     if sort not in valid_sorts:
         log.LogWarning(f"Invalid sort field '{sort}', using DATE")
         sort = "DATE"

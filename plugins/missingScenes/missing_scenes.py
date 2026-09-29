@@ -1479,7 +1479,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         endpoint_override: Optional endpoint URL to use
         page_size: Number of missing scenes per page (default 50, max 100)
         cursor: Pagination cursor from previous request (None for first page)
-        sort: Sort field - "DATE", "TITLE", "CREATED_AT", "UPDATED_AT"
+        sort: Sort field - "DATE", "TITLE", "CREATED_AT", "UPDATED_AT", "TRENDING"
         direction: Sort direction - "ASC" or "DESC"
         filter_favorite_performers: If True, only show scenes with favorite performers
         filter_favorite_studios: If True, only show scenes from favorite studios
@@ -1767,8 +1767,13 @@ def format_scene(scene, stash_id):
         }
 
     # Get primary URL
-    urls = scene.get("urls", [])
-    primary_url = urls[0].get("url") if urls else None
+    urls = []
+    for u in scene.get("urls") or []:
+        if not isinstance(u, dict) or not u.get("url"):
+            continue
+        site = (u.get("site") or {}).get("name") if isinstance(u.get("site"), dict) else None
+        urls.append({"url": u["url"], "site": site or (urllib.parse.urlparse(u["url"]).hostname or u["url"])})
+    primary_url = urls[0]["url"] if urls else None
 
     # Format tags
     tags = [
@@ -1789,7 +1794,8 @@ def format_scene(scene, stash_id):
         "studio": studio_info,
         "performers": performers,
         "tags": tags,
-        "url": primary_url
+        "url": primary_url,
+        "urls": urls,
     }
 
 
