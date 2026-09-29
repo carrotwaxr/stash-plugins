@@ -79,12 +79,12 @@ Each enabled source shows a chip above the results. Hover over a chip to see the
 | Chip | Meaning |
 |---|---|
 | pending | The source has not answered yet. |
-| ok (n) | It found n images and nothing went wrong. |
-| empty | The source has nothing for this performer. |
-| partial (n) | It found n images, but some of its pages failed or timed out. |
-| error | The source failed. Hover for the reason. |
+| ok (n) | It found n images (at least 1) and every page loaded. If some results came from unexpected hosts, they were dropped; hover to see how many. |
+| empty | It found no images and nothing failed: the source has nothing for this performer. |
+| partial (n) | It found n images (at least 1), but some of its pages failed or timed out. Hover to see which. |
+| error | The source failed, or it found no images and some of its pages failed, or every image it found came from an unexpected host. Hover for the reason. |
 | blocked | The site refused the request (HTTP 403 or 429, or a Cloudflare challenge). For DuckDuckGo this means it is rate-limiting you. |
-| timeout | The site did not answer in time. |
+| timeout | The site did not answer in time, or none of its pages loaded in time. |
 
 Each source gets 25 seconds on the server. Gallery pages are fetched in parallel. The browser gives up on a source after 45 seconds.
 

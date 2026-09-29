@@ -1260,6 +1260,50 @@ def test_dropped_hosts_add_a_warning(monkeypatch, bad, warning):
     assert outcome["warnings"] == [warning]
 
 
+@pytest.mark.parametrize("bad,error", [
+    (2, "All 2 results came from unexpected hosts"),
+    (1, "The only result came from an unexpected host"),
+])
+def test_all_results_from_unexpected_hosts_is_an_error(monkeypatch, bad, error):
+    results = [_result(f"https://evil.example.com/{i}.jpg") for i in range(bad)]
+    monkeypatch.setattr(image_search, "search_babepedia", lambda *a, **k: SourceResult(results))
+    outcome = image_search.search_single_source("babepedia", NAME, NAME)
+    assert outcome == {"results": [], "status": "error", "error": error}
+
+
+def test_all_results_from_unexpected_hosts_keeps_the_page_warnings(monkeypatch):
+    found = SourceResult([_result("https://evil.example.com/a.jpg")], warnings=["1 of 2 galleries timed out"], partial=True)
+    monkeypatch.setattr(image_search, "search_babepedia", lambda *a, **k: found)
+    outcome = image_search.search_single_source("babepedia", NAME, NAME)
+    assert outcome == {
+        "results": [], "status": "error", "error": "The only result came from an unexpected host",
+        "warnings": ["1 of 2 galleries timed out"],
+    }
+
+
+NO_IMAGES_AFTER_FAILURES = "No images found, and some pages did not load"
+
+
+def test_no_results_after_a_failed_gallery_is_an_error(web):
+    serve_freeones(web)
+    web.routes[FREEONES_GALLERY_1] = SourceHTTPError(500, FREEONES_GALLERY_1)
+    web.routes[FREEONES_GALLERY_2] = "<html>No photos in this one</html>"
+    outcome = image_search.search_single_source("freeones", NAME, NAME)
+    assert outcome == {
+        "results": [], "status": "error", "error": NO_IMAGES_AFTER_FAILURES,
+        "warnings": ["1 of 2 galleries failed to load (www.freeones.com returned HTTP 500)"],
+    }
+
+
+def test_no_results_after_a_failed_page_is_an_error(web):
+    web.routes[JAVDATABASE_URL] = "<html>No pictures yet</html>"
+    web.routes[JAVDATABASE_URL + "?ipage=2"] = SourceTimeout("www.javdatabase.com did not answer in time")
+    outcome = image_search.search_single_source("javdatabase", NAME, NAME)
+    assert outcome["status"] == "error" and outcome["results"] == []
+    assert outcome["error"] == NO_IMAGES_AFTER_FAILURES
+    assert outcome["warnings"] == ["1 of 2 pages timed out"]
+
+
 def test_drop_disallowed_hosts_returns_the_dropped_count():
     kept, dropped = image_search.drop_disallowed_hosts(
         [_result("https://www.babepedia.com/pics/a.jpg"), _result("http://10.0.0.4/b.jpg")], "test"

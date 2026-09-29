@@ -1042,10 +1042,12 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
 
     Returns {"results": [...], "status": ..., "error": ..., "warnings": [...]}, where
     status is one of:
-      ok       results, nothing went wrong
-      empty    the source has nothing for this performer
-      partial  results, but some pages failed (see warnings)
-      error    the source failed (see error)
+      ok       at least one result, and every page loaded (some results from
+               unexpected hosts may have been dropped, see warnings)
+      empty    no results, and nothing failed: the source has nothing for this performer
+      partial  at least one result, but some pages failed (see warnings)
+      error    the source failed; or it found no results and some pages failed; or
+               every result came from an unexpected host (see error and warnings)
       blocked  the site refused the request (403, 429, or a Cloudflare challenge on 403 or 503)
       timeout  the site did not answer in time
     error is present only for error, blocked and timeout; warnings only when there are any.
@@ -1077,7 +1079,11 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
 
     warnings = list(found.warnings)
     results, dropped = drop_disallowed_hosts(list(found), source)
-    if dropped == 1:
+    error = None
+    if dropped and not results:
+        error = ("The only result came from an unexpected host" if dropped == 1
+                 else f"All {dropped} results came from unexpected hosts")
+    elif dropped == 1:
         warnings.append("1 result from an unexpected host was dropped")
     elif dropped:
         warnings.append(f"{dropped} results from unexpected hosts were dropped")
@@ -1094,15 +1100,19 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
     if len(unique_results) != len(results):
         log.LogDebug(f"[{source}] Removed {len(results) - len(unique_results)} duplicates within source")
 
-    if found.partial:
-        status = "partial"
-    elif not unique_results:
-        status = "empty"
+    if unique_results:
+        status = "partial" if found.partial else "ok"
+    elif error:
+        status = "error"
+    elif found.partial:
+        status, error = "error", "No images found, and some pages did not load"
     else:
-        status = "ok"
+        status = "empty"
 
     log.LogInfo(f"[{source}] Returning {len(unique_results)} unique images ({status})")
     outcome = {"results": unique_results, "status": status}
+    if error:
+        outcome["error"] = error
     if warnings:
         outcome["warnings"] = warnings
     return outcome
