@@ -307,6 +307,134 @@ test("browse: stats say missing only for the estimate; final Load More hidden", 
   assert.ok(/of ~120 missing/.test(ce.innerHTML), ce.innerHTML);
 });
 
+// ---------------- no scenes, but not done (partial or capped) ----------------
+
+// (a) owned-first pages were read, then the next stash-box page failed: partial, a cursor, no scenes
+const partialEmpty = (extra = {}) => okPage({
+  partial: true, error: "StashDB request for page 3 failed: timed out", cursor: "c3",
+  has_more: true, is_complete: false, missing_count_estimate: 10, missing_scenes: [], ...extra,
+});
+// (b) 50 pages checked with nothing qualifying (a favorites filter): more pages, a cursor, no scenes
+const cappedEmpty = (extra = {}) => okPage({
+  cursor: "c51", has_more: true, is_complete: false, missing_count_estimate: null,
+  filters_active: true, missing_scenes: [], ...extra,
+});
+const shown = (el) => el.style.display !== "none";
+
+test("modal: a failed page with no scenes yet shows the error and Retry from here, not 'all found'", async () => {
+  const calls = [];
+  const { ms, els, m } = modalSetup({
+    RunPluginOperation: (body) => {
+      calls.push(body.variables.args);
+      return wrap(calls.length === 1 ? partialEmpty() : okPage({ missing_scenes: [scene("c")] }));
+    },
+  });
+  await m.performSearch(true);
+  const t = text(els["ms-results"]) + " " + text(els["ms-status"]);
+  assert.ok(t.includes("page 3 failed"), t);
+  assert.ok(!t.includes("all available scenes"), t);
+  const retry = findButton(els["ms-results"], "Retry from here");
+  assert.ok(retry, "Retry from here");
+  click(retry);
+  await flush(ms);
+  assert.strictEqual(calls[1].cursor, "c3");
+  assert.ok(text(els["ms-results"]).includes("Scene c"), text(els["ms-results"]));
+});
+
+test("modal: capped with no scenes says so and offers Load More from the cursor", async () => {
+  const calls = [];
+  const { ms, els, m } = modalSetup({
+    RunPluginOperation: (body) => {
+      calls.push(body.variables.args);
+      if (calls.length === 1) return wrap(cappedEmpty());
+      if (calls.length === 2) return wrap(failure());  // the next request fails outright
+      return wrap(okPage({ missing_scenes: [scene("z")] }));
+    },
+  });
+  await m.performSearch(true);
+  const t = text(els["ms-results"]) + " " + text(els["ms-status"]);
+  assert.ok(t.includes("No missing scenes in the pages checked so far"), t);
+  assert.ok(!t.includes("all available scenes"), t);
+  const more = els["ms-load-more-btn"];
+  assert.ok(shown(more), "Load More shown");
+  more.onclick({});
+  await flush(ms);
+  assert.strictEqual(calls[1].cursor, "c51");
+  // That request failed: Retry resends the same cursor instead of starting over
+  assert.ok(text(els["ms-results"]).includes("StashDB is down"), text(els["ms-results"]));
+  click(findButton(els["ms-results"], "Retry"));
+  await flush(ms);
+  assert.strictEqual(calls[2].cursor, "c51");
+  assert.ok(text(els["ms-results"]).includes("Scene z"), text(els["ms-results"]));
+});
+
+test("modal: complete with no scenes still says you have them all; a failed first page hides Load More", async () => {
+  const a = modalSetup({ RunPluginOperation: () => wrap(okPage({ missing_scenes: [] })) });
+  await a.m.performSearch(true);
+  assert.ok(text(a.els["ms-results"]).includes("all available scenes"), text(a.els["ms-results"]));
+  assert.ok(!shown(a.els["ms-load-more-btn"]));
+  const b = modalSetup({ RunPluginOperation: () => wrap(failure()) });
+  await b.m.performSearch(true);
+  assert.ok(!shown(b.els["ms-load-more-btn"]), "no cursor, no Load More");
+});
+
+test("browse: a failed page with no scenes yet shows the error; Retry from here resends the cursor", async () => {
+  const calls = [];
+  const ms = loadMissingScenes({
+    fetchResponses: {
+      RunPluginOperation: (body) => {
+        calls.push(body.variables.args);
+        return wrap(calls.length === 1 ? partialEmpty() : okPage({ missing_scenes: [scene("c")] }));
+      },
+    },
+  });
+  const c = browseContainer();
+  await ms.exports.browse.performSearch(c, true);
+  const t = text(c);
+  assert.ok(t.includes("page 3 failed") && t.includes("Retry from here"), t);
+  assert.ok(!t.includes("No missing scenes found"), t);
+  c.els["#ms-retry-btn"].listeners.click[0]({});
+  await flush(ms);
+  assert.strictEqual(calls[1].cursor, "c3");
+});
+
+test("browse: capped with no scenes says so and offers Load More from the cursor", async () => {
+  const calls = [];
+  const ms = loadMissingScenes({
+    fetchResponses: {
+      RunPluginOperation: (body) => {
+        calls.push(body.variables.args);
+        if (calls.length === 1) return wrap(cappedEmpty());
+        if (calls.length === 2) return wrap(failure());
+        return wrap(okPage({ missing_scenes: [scene("z")] }));
+      },
+    },
+  });
+  const c = browseContainer();
+  await ms.exports.browse.performSearch(c, true);
+  const t = text(c);
+  assert.ok(t.includes("No missing scenes in the pages checked so far"), t);
+  assert.ok(!t.includes("No missing scenes found"), t);
+  assert.ok(/id="ms-load-more-btn" style="display: inline-block;"/.test(c.innerHTML), c.innerHTML);
+  c.querySelector("#ms-load-more-btn").listeners.click[0]({});
+  await flush(ms);
+  assert.strictEqual(calls[1].cursor, "c51");
+  assert.ok(text(c).includes("StashDB is down"), text(c));
+  c.querySelector("#ms-retry-btn").listeners.click[0]({});
+  await flush(ms);
+  assert.strictEqual(calls[2].cursor, "c51");
+});
+
+test("browse: complete with no scenes still says none are missing", async () => {
+  const ms = loadMissingScenes({
+    fetchResponses: { RunPluginOperation: () => wrap(okPage({ missing_scenes: [] })) },
+  });
+  const c = browseContainer();
+  await ms.exports.browse.performSearch(c, true);
+  assert.ok(text(c).includes("No missing scenes found"), text(c));
+  assert.ok(/id="ms-load-more-btn" style="display: none;"/.test(c.innerHTML));
+});
+
 // ---------------- fingerprint index (#160) ----------------
 
 /** RunPluginOperation that answers per operation; records every call's args. */

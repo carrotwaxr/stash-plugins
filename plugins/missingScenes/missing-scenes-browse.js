@@ -51,6 +51,7 @@
   let requestToken = 0; // bumped by every new request and when the page is left
   let currentCursor = null;
   let hasMore = true;
+  let isComplete = false; // the last answer checked every stash-box page
   let sortField = "DATE";
   let sortDirection = "DESC";
   let filterFavoritePerformers = false;
@@ -170,6 +171,14 @@
           <button class="ms-btn ms-retry-btn" id="ms-retry-btn">Retry</button>
         </div>
       `;
+    } else if (scenes.length === 0 && warning) {
+      // A page failed before anything qualified: the warning above says what, never "none found"
+      resultsPlaceholder = '';
+    } else if (scenes.length === 0 && !isComplete) {
+      // Pages are left (Load More carries on from the cursor), so nothing is known yet
+      resultsPlaceholder = `
+        <div class="ms-placeholder">No missing scenes in the pages checked so far.${hasMore ? ' Load More checks the next pages.' : ''}</div>
+      `;
     } else if (scenes.length === 0) {
       resultsPlaceholder = `
         <div class="ms-placeholder ms-success">
@@ -181,8 +190,8 @@
       resultsPlaceholder = ''; // Will be filled with DOM elements below
     }
 
-    // Load more button visibility
-    const showLoadMore = hasMore && scenes.length > 0;
+    // Load more button visibility (also with no scenes yet: the pages checked may have had none)
+    const showLoadMore = hasMore && !isComplete && currentCursor !== null && !error;
 
     let loadMoreText = 'Load More';
     if (stats && hasMore && typeof stats.missing_count_estimate === "number") {
@@ -311,6 +320,7 @@
       currentCursor = null;
       missingScenes = [];
       hasMore = true;
+      isComplete = false;
       // The note waits for this browse's answer (the endpoint may have changed)
       fingerprintInfo = null;
       ownedByFingerprint = 0;
@@ -335,9 +345,9 @@
 
       const failureText = describeFailure(result);
       if (failureText && !result.partial) {
-        // Nothing new loaded: keep the scenes we have; cursor and has_more stay as they were
+        // Nothing new loaded: keep the scenes and the cursor, so a retry resends it
         isLoading = false;
-        hasMore = missingScenes.length > 0 && currentCursor !== null;
+        hasMore = currentCursor !== null;
         renderPage(container, {
           loading: false,
           error: missingScenes.length === 0 ? failureText : null,
@@ -350,8 +360,9 @@
 
       const newScenes = result.missing_scenes || [];
       missingScenes = reset ? newScenes : [...missingScenes, ...newScenes];
-      currentCursor = result.cursor;
-      hasMore = result.has_more;
+      currentCursor = result.cursor || null;
+      hasMore = !!result.has_more;
+      isComplete = !!result.is_complete;
       whisparrConfigured = result.whisparr_configured;
       whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
@@ -467,9 +478,9 @@
       performSearch(container, false);
     });
 
-    // Retry: from the returned cursor when scenes are already shown, else from scratch
+    // Retry: from the current cursor when there is one (even with no scenes yet), else from scratch
     container.querySelector('#ms-retry-btn')?.addEventListener('click', () => {
-      performSearch(container, missingScenes.length === 0);
+      performSearch(container, currentCursor === null);
     });
 
     container.querySelector('#ms-build-fp-btn')?.addEventListener('click', () => {
@@ -497,6 +508,7 @@
         missingScenes = [];
         currentCursor = null;
         hasMore = true;
+        isComplete = false;
         isLoading = false;
         fingerprintInfo = null;
         ownedByFingerprint = 0;

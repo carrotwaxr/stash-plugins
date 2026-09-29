@@ -50,6 +50,8 @@
   let totalLocal = 0;
   let sortField = "DATE";
   const TRENDING_NOTE = "Trending only includes scenes with activity on the stash-box in the last 7 days.";
+  // No scenes yet, but the stash-box has pages left (the 50-page cap of one request)
+  const NOT_FOUND_YET = "No missing scenes in the pages checked so far.";
   let sortDirection = "DESC";
 
   // Favorite entity filter state (persists within session)
@@ -565,16 +567,26 @@
     if (!container) return;
 
     if (missingScenes.length === 0) {
-      // Trending leaves out scenes with no recent activity, so an empty list
-      // says nothing about the rest of the catalogue
-      container.innerHTML = sortField === "TRENDING"
-        ? `<div class="ms-placeholder">No missing scenes are trending. ${TRENDING_NOTE}</div>`
-        : `
+      container.innerHTML = "";
+      if (currentWarning) {
+        // A page failed before anything qualified: say what failed, never "all found"
+        container.appendChild(buildWarningBanner(currentWarning.message, currentWarning.retryLabel, currentWarning.onRetry));
+      } else if (!isComplete) {
+        // Pages are left (Load More carries on from the cursor), so nothing is known yet
+        const note = sortField === "TRENDING" ? ` ${TRENDING_NOTE}` : "";
+        container.innerHTML = `<div class="ms-placeholder">${NOT_FOUND_YET}${hasMore ? " Load More checks the next pages." : ""}${note}</div>`;
+      } else if (sortField === "TRENDING") {
+        // Trending leaves out scenes with no recent activity, so an empty list
+        // says nothing about the rest of the catalogue
+        container.innerHTML = `<div class="ms-placeholder">No missing scenes are trending. ${TRENDING_NOTE}</div>`;
+      } else {
+        container.innerHTML = `
         <div class="ms-placeholder ms-success">
           <div class="ms-success-icon">&#10003;</div>
           <div>You have all available scenes!</div>
         </div>
       `;
+      }
       updateLoadMoreButton();
       return;
     }
@@ -633,12 +645,17 @@
     const loadMoreBtn = document.getElementById("ms-load-more-btn");
     if (!loadMoreBtn) return;
 
-    if (hasMore && !isComplete && missingScenes.length > 0) {
+    // Also with no scenes yet: the pages checked so far may just have had none
+    if (hasMore && !isComplete && currentCursor) {
       loadMoreBtn.style.display = "inline-block";
       const estimate = Math.max(0, totalOnStashdb - totalLocal);
-      loadMoreBtn.textContent = estimate > missingScenes.length
-        ? `Load More (${missingScenes.length} of ~${estimate})`
-        : `Load More (${missingScenes.length} loaded)`;
+      if (missingScenes.length === 0) {
+        loadMoreBtn.textContent = "Load More";
+      } else {
+        loadMoreBtn.textContent = estimate > missingScenes.length
+          ? `Load More (${missingScenes.length} of ~${estimate})`
+          : `Load More (${missingScenes.length} loaded)`;
+      }
       loadMoreBtn.onclick = handleLoadMore;
       loadMoreBtn.disabled = isLoading;
     } else {
@@ -859,7 +876,8 @@
     isLoading = true;
     setStatus(reset ? "Searching..." : "Loading more...", "loading");
     const retryFromHere = () => performSearch(false);
-    const retryAll = () => performSearch(true);
+    // With a cursor (a failed Load More), a retry resends it instead of starting over
+    const retryAll = () => performSearch(!currentCursor);
 
     try {
       const result = await findMissingScenes(currentEntityType, currentEntityId, selectedEndpoint, {
@@ -913,12 +931,16 @@
       renderResults();
 
       if (failureText) {
-        setStatus(`Loaded ${missingScenes.length} missing scenes, then failed: ${failureText}`, "error");
+        setStatus(missingScenes.length > 0
+          ? `Loaded ${missingScenes.length} missing scenes, then failed: ${failureText}`
+          : failureText, "error");
       } else if (missingScenes.length > 0) {
         const statusText = isComplete
           ? `Found ${missingScenes.length} missing scenes`
           : `Loaded ${missingScenes.length} missing scenes`;
         setStatus(sortField === "TRENDING" ? `${statusText}. ${TRENDING_NOTE}` : statusText, "success");
+      } else if (!isComplete) {
+        setStatus(NOT_FOUND_YET);
       } else if (sortField === "TRENDING") {
         setStatus(`No missing scenes are trending. ${TRENDING_NOTE}`);
       } else {
