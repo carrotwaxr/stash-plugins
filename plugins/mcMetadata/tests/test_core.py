@@ -193,11 +193,14 @@ class TestReplacers(unittest.TestCase):
     def test_all_truncated(self):
         template = f"$Studios{SEP}$Studio - $StashID - $Title ($ReleaseYear) - $FemalePerformers $MalePerformers $Performers $ReleaseDate [$Quality-$Resolution] $Tags"
         result = get_new_path(MOCK_SCENE, MOCK_BASE_PATH, template, 160)
+        # 25 characters over: only the overflow is cut, from the truncables in order.
+        # FemalePerformers and MalePerformers keep 1 character each, Performers loses 3.
         self.assertEqual(
             result,
-            f"{SEP}data{SEP}tagged{SEP}MindGeek{SEP}Brazzers{SEP}Brazzers - 4562 - Episode Title (2022) - Jayden Jaymes Alec 2022-03-14 [FHD-1080p].mp4",
+            f"{SEP}data{SEP}tagged{SEP}MindGeek{SEP}Brazzers{SEP}Brazzers - 4562 - Episode Title (2022) - J A Jayden Jaymes Alec Knight Untagged Perfor 2022-03-14 [FHD-1080p] Threesome Rough.mp4",
             "The path is wrong",
         )
+        self.assertEqual(len(result), 160)
 
     def test_cannot_truncate(self):
         template = f"$Studios{SEP}$Studio - $StashID - $Title ($ReleaseYear) - $FemalePerformers $MalePerformers $Performers $ReleaseDate [$Quality-$Resolution] $Tags"
@@ -206,119 +209,75 @@ class TestReplacers(unittest.TestCase):
             "Some Incredibly, Like Really Long Title, Too Long To Be Truncated With This Budget"
         )
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 160)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_invalid_settings(self):
         template = f"$Studios{SEP}$Studio - $StashID - $Title ($ReleaseYear) - $FemalePerformers $MalePerformers $Performers $ReleaseDate [$Quality-$Resolution] $Tags"
         result = get_new_path(MOCK_SCENE, MOCK_BASE_PATH, template, 100)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_invalid_scene_file(self):
         template = "$ReleaseDate"
         mock_scene = MOCK_SCENE.copy()
         mock_scene["files"] = None
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 100)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_invalid_scene_release_date(self):
         template = "$ReleaseDate"
         mock_scene = MOCK_SCENE.copy()
         mock_scene["date"] = None
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 100)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_invalid_scene_release_year(self):
         template = "$ReleaseYear"
         mock_scene = MOCK_SCENE.copy()
         mock_scene["date"] = None
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 100)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_invalid_scene_stash_id(self):
         template = "$StashID"
         mock_scene = MOCK_SCENE.copy()
         mock_scene["stash_ids"] = []
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 100)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_invalid_scene_studio(self):
         template = "$Studio"
         mock_scene = MOCK_SCENE.copy()
         mock_scene["studio"] = None
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 100)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_invalid_scene_studios(self):
         template = "$Studios"
         mock_scene = MOCK_SCENE.copy()
         mock_scene["studio"] = None
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 100)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_invalid_scene_title(self):
         template = "$Title"
         mock_scene = MOCK_SCENE.copy()
         mock_scene["title"] = None
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 100)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_height_none(self):
         template = f"$Studios{SEP}$Studio - $StashID - $Title ($ReleaseYear) - $FemalePerformers $MalePerformers $Performers $ReleaseDate [$Quality-$Resolution] $Tags"
         mock_scene = MOCK_SCENE.copy()
         mock_scene["files"][0]["height"] = None
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 500)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_height_quality_none(self):
         template = f"$Studios{SEP}$Studio - $StashID - $Title ($ReleaseYear) - $FemalePerformers $MalePerformers $Performers $ReleaseDate [$Quality] $Tags"
         mock_scene = MOCK_SCENE.copy()
         mock_scene["files"][0]["height"] = None
         result = get_new_path(mock_scene, MOCK_BASE_PATH, template, 500)
-        self.assertEqual(
-            result,
-            False,
-            "Replacer should have returned False when not renaming",
-        )
+        self.assertIsNone(result, "Replacer should have returned None when not renaming")
 
     def test_height_low(self):
         template = f"$Studios{SEP}$Studio - $StashID - $Title ($ReleaseYear) - $FemalePerformers $MalePerformers $Performers $ReleaseDate [$Quality-$Resolution] $Tags"

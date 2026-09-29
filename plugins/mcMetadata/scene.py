@@ -4,6 +4,7 @@ import utils.logger as log
 from performer import process_performer
 from utils.files import download_image, rename_file, replace_file_ext
 from utils.nfo import build_nfo_xml
+from utils.paths import is_inside
 from utils.replacer import get_new_path
 from conditions import should_process, build_scene_filter, format_bulk_summary
 
@@ -11,6 +12,9 @@ SKIP_SAMPLE_LIMIT = 10
 
 BATCH_SIZE = 100
 IMPOSSIBLE_PATH = "$%^&@"
+# stashapi's Studio fragment only has parent_studio { id }, so each level is fetched
+STUDIO_FRAGMENT = "id name parent_studio { id }"
+MAX_STUDIO_DEPTH = 10
 
 
 def process_all_scenes(stash, settings, api_key):
@@ -141,11 +145,43 @@ def __hydrate_scene(scene, stash):
     )
 
     if scene["studio"]:
-        scene["studio"] = stash.find_studio(
-            scene["studio"]["id"], "id name parent_studio { ...Studio }"
-        )
+        scene["studio"] = __fetch_studio_chain(stash, scene["studio"]["id"])
 
     return scene
+
+
+def __fetch_studio_chain(stash, studio_id):
+    """Fetch a studio and its parents by following parent_studio.id, one find_studio per level.
+
+    Stops after MAX_STUDIO_DEPTH levels or at a studio already seen (a loop), so a
+    bad hierarchy can't hang the plugin. Every returned level has a name.
+    """
+    root = stash.find_studio(studio_id, STUDIO_FRAGMENT)
+    node = root
+    seen = {str(studio_id)}
+    depth = 1
+    while node:
+        parent_id = (node.get("parent_studio") or {}).get("id")
+        if not parent_id:
+            node["parent_studio"] = None
+            break
+        if str(parent_id) in seen or depth >= MAX_STUDIO_DEPTH:
+            problem = (
+                f"loops back to studio {parent_id}"
+                if str(parent_id) in seen
+                else f"is deeper than {MAX_STUDIO_DEPTH} levels"
+            )
+            log.warning(
+                f"Studio hierarchy of studio {studio_id} {problem}; "
+                f"ignoring parents above studio {node.get('id')}"
+            )
+            node["parent_studio"] = None
+            break
+        seen.add(str(parent_id))
+        node["parent_studio"] = stash.find_studio(parent_id, STUDIO_FRAGMENT)
+        node = node["parent_studio"]
+        depth += 1
+    return root
 
 
 def __rename_videos(scene, stash, settings):
@@ -216,7 +252,7 @@ def __rename_videos(scene, stash, settings):
             settings.get("renamer_filepath_budget", 250),
         )
 
-        if expected_path is False:
+        if not expected_path:
             if idx == 0:
                 primary_path = video_path
             continue
@@ -233,7 +269,7 @@ def __rename_videos(scene, stash, settings):
         # Check if we should rename this file
         renamer_path = settings.get("renamer_path", IMPOSSIBLE_PATH)
         renamer_ignore_in_path = settings.get("renamer_ignore_files_in_path", False)
-        in_target_dir = video_path.startswith(renamer_path)
+        in_target_dir = is_inside(video_path, renamer_path)
 
         if renamer_ignore_in_path and in_target_dir:
             log.debug(f"Skipping file {idx + 1}: already in target directory")
