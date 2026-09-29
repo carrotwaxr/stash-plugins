@@ -28,7 +28,7 @@ function makeRow(id) {
   };
   // A fresh pill signature on every read, so each sync makes a (uncached) gate query.
   let n = 0;
-  row.querySelectorAll = (sel) => (sel.includes("stash-id-pill") ? [{ getAttribute: () => `e${++n}` }] : []);
+  row.querySelectorAll = (sel) => (sel.includes("stash-id-pill") ? [{ getAttribute: () => `e${++n}` }] : sel.includes("/scenes/") ? [link] : []);
   group.querySelector = () => null;
   return row;
 }
@@ -151,15 +151,16 @@ test("leaving the Tagger stops syncing", async () => {
 });
 
 // ---------------- request tokens ----------------
-function searchSetup() {
+function searchSetup(idA = "A", rows = []) {
   const gates = { fastA: deferred(), fastB: deferred(), slowA: deferred(), slowB: deferred() };
   const sm = load({
+    rows,
     fetchResponses: {
       SceneMatcherConfig: CONFIG,
       RunPluginOperation: (b) => {
         const a = b.variables.args;
-        if (a.operation === "find_matches_fast") return (a.scene_id === "A" ? gates.fastA : gates.fastB).promise;
-        return (a.scene_id === "A" ? gates.slowA : gates.slowB).promise;
+        if (a.operation === "find_matches_fast") return (a.scene_id === idA ? gates.fastA : gates.fastB).promise;
+        return (a.scene_id === idA ? gates.slowA : gates.slowB).promise;
       },
     },
   });
@@ -209,27 +210,30 @@ test("A's late phase 2 is dropped after B starts", async () => {
 });
 
 test("Select after A-then-B uses B's row", async () => {
-  const sm = searchSetup();
-  const rowA = createElement("div"), rowB = createElement("div");
-  const input = createElement("input");
-  let typed = null;
-  rowB.querySelector = () => input;
-  rowB.querySelectorAll = () => [];
-  sm.window.HTMLInputElement.prototype = { set value(v) { typed = v; } };
-  Object.defineProperty(sm.window.HTMLInputElement.prototype, "value", { set(v) { typed = v; }, configurable: true });
-  input.dispatchEvent = () => true;
-  const a = sm.exports.handleMatchClick("A", rowA, STASHDB);
+  // Scenes 1 (A) and 2 (B); each row answers its own scene link.
+  const rowA = makeRow(1), rowB = makeRow(2);
+  const typedInto = [];
+  for (const row of [rowA, rowB]) {
+    const input = createElement("input");
+    input.dispatchEvent = () => true;
+    input.row = row;
+    const linkOnly = row.querySelector;
+    row.querySelector = (sel) => (sel === "input.text-input" ? input : linkOnly(sel));
+  }
+  const sm = searchSetup("1", [rowA, rowB]);
+  Object.defineProperty(sm.window.HTMLInputElement.prototype, "value", {
+    set(v) { typedInto.push([this.row, v]); }, configurable: true,
+  });
+  const a = sm.exports.handleMatchClick("1", rowA, STASHDB);
   await sm.settle();
-  const b = sm.exports.handleMatchClick("B", rowB, STASHDB);
+  const b = sm.exports.handleMatchClick("2", rowB, STASHDB);
   sm.gates.fastB.resolve(out({ results: [scene("b1")] }));
   await b;
   sm.gates.fastA.resolve(out({ results: [scene("a1")] }));
   await a;
   const st = sm.getState();
-  const prevQuery = sm.document.querySelector;
-  sm.document.querySelector = (sel) => (sel.includes('/scenes/B') ? { closest: () => rowB } : prevQuery(sel));
   sm.exports.handleSelectMatch(st.currentSceneId, st.matchResults[0].stash_id);
-  assert.strictEqual(typed, "b1");
+  assert.deepStrictEqual(typedInto, [[rowB, "b1"]]);
 });
 
 test("Match click while a previous search still loads (modal closed) starts the new search", async () => {

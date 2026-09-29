@@ -700,8 +700,10 @@
   function handleSelectMatch(sceneId, stashId) {
     removeModal();
 
-    const link = document.querySelector(`a[href*="/scenes/${sceneId}"]`);
-    const row = link && link.closest(".search-item");
+    // Matched on the row's own scene id, exactly: a substring selector for "/scenes/12"
+    // would also hit "/scenes/123" or a stash-box link ".../scenes/12ab..." in an earlier row.
+    const row = Array.from(document.querySelectorAll(".search-item"))
+      .find((r) => getSceneIdFromElement(r) === String(sceneId));
     if (!row) {
       console.error("[SceneMatcher] Could not find the Tagger row for scene", sceneId);
       showToast("Could not find this scene in the Tagger. Copy the ID and paste it into the search box: " + stashId);
@@ -962,15 +964,29 @@
     }
   }
 
+  // A local scene page: ".../scenes/<numeric id>", optionally followed by "/", "?" or "#".
+  const LOCAL_SCENE_PATH = /\/scenes\/(\d+)(?:[/?#]|$)/;
+
   /**
-   * Extract scene ID from a tagger row: only from its scene link.
+   * The scene id of a Tagger row, from the row's own link to the local scene page.
+   * Stash-box links in the same row (stash-id pills, search results) point to another
+   * origin, like "https://stashdb.org/scenes/<uuid>", and are skipped.
    */
   function getSceneIdFromElement(element) {
-    const sceneLink = element.querySelector('a[href*="/scenes/"]');
-    if (!sceneLink) return null;
-    const href = sceneLink.getAttribute("href") || sceneLink.href || "";
-    const match = href.match(/\/scenes\/(\d+)/);
-    return match ? match[1] : null;
+    const links = element.querySelectorAll ? Array.from(element.querySelectorAll('a[href*="/scenes/"]')) : [];
+    for (const link of links) {
+      const raw = link.getAttribute("href") || link.href || "";
+      let url;
+      try {
+        url = new URL(raw, window.location.href);
+      } catch (e) {
+        continue;
+      }
+      if (url.origin !== window.location.origin) continue;
+      const match = LOCAL_SCENE_PATH.exec(url.pathname + url.search + url.hash);
+      if (match) return match[1];
+    }
+    return null;
   }
 
   const normalizeEndpoint = (url) => (url || "").trim().replace(/\/+$/, "").toLowerCase();

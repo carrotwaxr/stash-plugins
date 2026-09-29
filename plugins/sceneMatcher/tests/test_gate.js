@@ -35,7 +35,7 @@ function makeRow(id, pills = []) {
     if (sel.includes("input-group")) return group;
     return null;
   };
-  row.querySelectorAll = (sel) => (sel.includes("stash-id-pill") ? pillEls() : []);
+  row.querySelectorAll = (sel) => (sel.includes("stash-id-pill") ? pillEls() : sel.includes("/scenes/") ? [link] : []);
   group.querySelector = () => null;
   return row;
 }
@@ -207,6 +207,21 @@ test("row scene id comes from the link only", async () => {
   assert.strictEqual(sm.exports.getSceneIdFromElement(el), null);
   const row = makeRow(42);
   assert.strictEqual(sm.exports.getSceneIdFromElement(row), "42");
+});
+
+test("the gate asks about the row's own scene, not a stash-box link that looks like one", async () => {
+  const row = makeRow(7);
+  const pill = createElement("a");
+  pill.attributes.href = "https://stashdb.org/scenes/12ab34cd-0000-4000-8000-000000000000";
+  const own = row.querySelectorAll('a[href*="/scenes/"]')[0];
+  // The pill comes first in document order, so querySelector returns it, as a browser would
+  const rowQuery = row.querySelector;
+  row.querySelectorAll = (sel) => (sel.includes("/scenes/") ? [pill, own] : []);
+  row.querySelector = (sel) => (sel.includes("/scenes/") ? pill : rowQuery(sel));
+  const sm = setup({ rows: [row], select: sel(`stashbox:${STASHDB}`) });
+  await sm.exports.syncMatchButtons();
+  assert.deepStrictEqual(gateCalls(sm)[0].body.variables.ids, ["7"]);
+  assert.strictEqual(row.buttons.length, 1);
 });
 
 test("Match click sends the endpoint to both ops", async () => {
