@@ -858,4 +858,66 @@
   init();
 
   console.log("[PerformerImageSearch] Plugin loaded");
+
+  // Test hook: only active when a test sets window.__PERFORMER_IMAGE_SEARCH_TEST__
+  if (window.__PERFORMER_IMAGE_SEARCH_TEST__) {
+    const hook = window.__PERFORMER_IMAGE_SEARCH_TEST__;
+    hook.exports = {
+      getPluginSettings,
+      graphqlRequest,
+      searchImages,
+      applyFilters,
+      updateFilterStatus,
+      renderModal,
+      showModal,
+      hideModal,
+      handlePreviewKeydown,
+      addResultsFromSource,
+      searchSource,
+      renderResults,
+      setPerformerImage,
+      showStatus,
+      escapeHtml,
+      addSearchButton,
+    };
+    hook.getState = () => ({
+      SOURCES,
+      modalRoot,
+      currentPerformerId,
+      currentPerformerName,
+      allResults,
+      filteredResults,
+      imageDimensions,
+      loadedCount,
+      isLoading,
+      previewImage,
+      currentPreviewIndex,
+      seenImageUrls,
+      completedSources,
+      pendingSources,
+      sourceErrors,
+    });
+    hook.setState = (patch) => {
+      for (const [k, v] of Object.entries(patch || {})) {
+        switch (k) {
+          case "SOURCES": SOURCES = v; break;
+          case "modalRoot": modalRoot = v; break;
+          case "currentPerformerId": currentPerformerId = v; break;
+          case "currentPerformerName": currentPerformerName = v; break;
+          case "allResults": allResults = v; break;
+          case "filteredResults": filteredResults = v; break;
+          case "imageDimensions": imageDimensions = v; break;
+          case "loadedCount": loadedCount = v; break;
+          case "isLoading": isLoading = v; break;
+          case "previewImage": previewImage = v; break;
+          case "currentPreviewIndex": currentPreviewIndex = v; break;
+          case "seenImageUrls": seenImageUrls = v; break;
+          case "completedSources": completedSources = v; break;
+          case "pendingSources": pendingSources = v; break;
+          case "sourceErrors": sourceErrors = v; break;
+          default: throw new Error("setState: unknown key " + k);
+        }
+      }
+    };
+  }
 })();
