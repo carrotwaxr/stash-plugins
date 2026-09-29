@@ -1,6 +1,6 @@
 name: Tag Manager
 description: Match and sync local tags with stash-box endpoints. Features multi-endpoint support, tag caching, layered search (exact, fuzzy, synonym), and field-by-field merge dialog.
-version: 0.6.1
+version: 0.7.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 ui:
@@ -47,11 +47,11 @@ settings:
     type: BOOLEAN
   categoryMappings:
     displayName: Category Mappings (Internal)
-    description: JSON mapping of StashDB categories to local parent tag IDs. Managed automatically.
+    description: JSON mapping of stash-box categories to local parent tag IDs, kept per stash-box endpoint. Managed automatically.
     type: STRING
   tagBlacklist:
     displayName: Tag Blacklist
-    description: Tags to exclude from matching and sync. One pattern per line. Prefix with / for regex (e.g., /Available$/).
+    description: Tags to exclude from matching and sync. Separate patterns with , or ; (or use the Blacklist button on the Match tab for one per line). Plain text matches the whole tag name. Use /regex/ for a regular expression (e.g., /^\d+p$/).
     type: STRING
 
 exec:
@@ -61,7 +61,7 @@ interface: raw
 
 tasks:
   - name: Sync Scene Tags from StashDB
-    description: Fetch tags from StashDB for all scenes with StashIDs and merge with local tags
+    description: Add missing tags to scenes from each linked stash-box. Tags you removed from a scene are not added back.
     defaultArgs:
       mode: sync_scene_tags
   - name: Reset Scene Tag Sync History

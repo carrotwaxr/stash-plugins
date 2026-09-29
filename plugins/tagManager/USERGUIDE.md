@@ -49,6 +49,8 @@ There are two ways to access Tag Manager:
 - Tag Manager: `/plugins/tag-manager`
 - Tag Hierarchy: `/plugins/tag-hierarchy`
 
+These also work when Stash is served under a sub-path, such as behind a reverse proxy.
+
 ---
 
 ## Tag Matching (Match Tab)
@@ -91,6 +93,10 @@ If the StashDB tag has a category (e.g., "Hair Color" for "Brown Hair"):
 - Or create a new parent tag with the category name
 - Check "Remember this mapping" to auto-apply for future tags in the same category
 
+A saved mapping shows as "&lt;tag&gt; (saved mapping)" and is pre-selected. If the mapped tag was deleted, the mapping is dropped. Mappings are stored per stash-box, so each stash-box has its own. With "Leave Parent Tags Alone" on, the parent controls are hidden.
+
+When there is no existing parent, match or saved mapping, `Create "<category>"` is pre-selected. Apply then creates the category parent tag. Before creating a parent tag or saving a mapping, Apply checks the name and aliases for conflicts. The Apply button is disabled while it runs.
+
 ### Smart Defaults
 
 The dialog automatically selects sensible defaults:
@@ -104,6 +110,13 @@ The dialog automatically selects sensible defaults:
 2. A `stash_id` link is added connecting your tag to StashDB
 3. Parent tag relationship is set if you selected a category
 4. **No scenes are modified** - only the tag itself changes
+
+### Merging Tags
+
+When you merge one tag into another, Tag Manager first asks you to confirm. The confirmation shows how many scenes, child tags and parent tags will move, and says the source tag is deleted. Parents and children of the merged tag carry over to the destination.
+
+- **Stash 0.31 and later**: the merge and the updates to the destination tag (aliases, stash IDs, description, parents and children) happen in one transaction. If anything fails, nothing changes.
+- **Stash 0.30**: Tag Manager merges first, then updates the destination. If the update fails, the merge has already happened. The error explains what to fix by hand.
 
 ---
 
@@ -123,6 +136,10 @@ The Browse tab lets you explore StashDB tags by category and import ones you don
 
 - **Checkbox enabled** - Tag doesn't exist locally, can be imported
 - **Checkbox disabled + "✓ Exists"** - Tag already exists locally (linked by StashDB ID)
+
+### Import Progress and Import All
+
+While tags are imported you see "Importing i / N" and a **Cancel** button. Cancel stops after the current tag. **Import All** skips blacklisted tags and tags that are already linked. Clicks are ignored while an import runs.
 
 ### What Happens When You Import
 
@@ -154,6 +171,15 @@ then a **"Resolve Tag Conflicts"** dialog lists each conflict with these choices
 - **Skip** / **Skip all remaining** - Leave the conflict unresolved. Anything left
   unresolved when you close the dialog is counted as skipped.
 
+Other things to know about this dialog:
+
+- Only one action runs at a time.
+- After each action the other rows are re-checked. A row whose conflict is gone gets an **Import** button.
+- **Strip alias & import** lists the aliases it dropped.
+- If a reverse merge fails, the new tag it created is removed again.
+- If an action would replace an existing stash ID, you are asked first.
+- The dialog stays open with the results and a **Done** button.
+
 The import summary reports how many conflicts were resolved and how many were skipped.
 
 ---
@@ -176,6 +202,8 @@ The Hierarchy view lets you visualize and edit parent/child relationships betwee
 - **Expand All** / **Collapse All** buttons for quick navigation
 - **Show images** toggle to show/hide tag thumbnails
 - **Click a tag name** to select it (for keyboard operations)
+- **Search** finds tags by name or alias
+- Large trees render collapsed branches only when you expand them
 
 ### Statistics Bar
 
@@ -204,6 +232,8 @@ Right-click any tag to see options:
 
 #### Keyboard Shortcuts
 
+These only act when the tree has focus. Copy and paste in text boxes works as normal. Edit mode resets when you leave the page.
+
 | Key | Action |
 |-----|--------|
 | **Ctrl+C** | Copy selected tag |
@@ -218,6 +248,8 @@ When you make changes, a panel appears at the bottom showing:
 - **×** button to remove individual changes
 - **Cancel** to discard all changes
 - **Save Changes** to apply all changes to the database
+
+When you save, Tag Manager re-reads each tag's current parents first. A change that fails stays pending so you can retry it.
 
 ### Circular Reference Protection
 
@@ -243,7 +275,24 @@ Before running Scene Tag Sync:
    - **StashDB link** - If local tag has same `stash_id`
    - **Name match** - If local tag name matches StashDB tag name
    - **Alias match** - If local tag alias matches StashDB tag name
-4. Adds matched tags to the scene (existing tags are preserved)
+4. Skips tags that are blacklisted, tags you removed from the scene earlier, and tags with no local match
+5. Adds the remaining tags to the scene (existing tags are preserved)
+
+### Which Stash-Box Each Scene Uses
+
+A scene can be linked to more than one stash-box. Each scene is synced against every configured stash-box it is linked to that has an API key, not just the first. Log messages name the stash-box. Tag Manager keeps to each stash-box's "max requests per minute" setting, and never sends more than 2 requests per second.
+
+### Removed Tags Stay Removed
+
+Tag Manager remembers which stash-box tags it matched for each scene. If you remove one of those tags from a scene, later syncs don't add it back. Tags the stash-box adds later are still added.
+
+Some tags are not remembered, so they can still be added later:
+- Stash-box tags with no local match are added once you have a matching local tag.
+- Blacklisted tags are added once you take them off the blacklist.
+
+The first live sync after upgrading to 0.7.0 has no history yet. It can add back tags you removed before 0.7.0 one last time.
+
+The history is stored in `sync_history.sqlite` (see [Tag Caching](#tag-caching)). To forget it, run **Settings → Tasks → Plugin Tasks → Tag Manager → Reset Scene Tag Sync History**. The next sync considers every tag again, so it adds back tags you removed. The task also deletes the file, so it fixes a history file that can't be read.
 
 ### Running the Sync
 
@@ -256,7 +305,8 @@ Before running Scene Tag Sync:
 By default, "Dry Run" is enabled in plugin settings. In dry run mode:
 - The sync runs but doesn't save any changes
 - You see a preview of what would happen
-- Limited to 200 scenes for quick preview
+- Checks at most 200 scenes in total
+- The preview takes the history into account, so it shows what a real sync would add now
 - Check Stash logs for detailed output
 
 To run for real:
@@ -266,7 +316,7 @@ To run for real:
 
 ### What Gets Modified
 
-- **Scene tags are ADDED** - StashDB tags are merged with existing scene tags
+- **Scene tags are ADDED** - Missing stash-box tags are added to the scene. Tags added to a scene while a long sync runs are kept
 - **Tags are never removed** - Your existing scene tags stay intact
 - **Only matched tags are added** - StashDB tags without a local match are skipped
 
@@ -278,6 +328,12 @@ After sync completes, check Stash logs for:
 - Tags added total
 - Unmatched tags skipped (tags on StashDB with no local equivalent)
 
+### Sync Errors
+
+If a stash-box answers with HTTP 401 or 403, it rejected the API key. The sync stops with an error naming that stash-box. Check the API key in Settings → Metadata Providers. An HTTP 403 can also come from a stash-box that blocks requests without a `User-Agent`. Tag Manager sends one with every request, so this should not happen.
+
+The task returns an error when every scene failed.
+
 ---
 
 ## Tag Blacklist
@@ -286,34 +342,47 @@ The blacklist filters unwanted tags from matching and sync operations.
 
 ### Configuring the Blacklist
 
-1. Go to **Settings → Plugins → Tag Manager**
-2. Find **Tag Blacklist** setting
-3. Enter patterns, one per line
+There are two ways to edit it:
 
-### Pattern Types
+- **On the Match tab**: click the **Blacklist** button. A text box opens. Click **Save** to store it in the plugin settings.
+- **In Stash**: go to **Settings → Plugins → Tag Manager** and edit **Tag Blacklist**. This is a single-line box, so separate patterns with `,` or `;`.
+
+### Syntax
+
+Write one pattern per line, or separate patterns with `,` or `;`.
 
 #### Literal Strings (Case-Insensitive)
 ```
 Unwanted Tag
 Another Bad Tag
 ```
-Matches tags with exact names (ignoring case).
+Plain text matches the whole tag name, ignoring case.
 
-#### Regex Patterns (Prefix with /)
+#### Regex Patterns (`/regex/`)
 ```
 /^\d+p$/
 /Available$/
-/^Test/i
+/^test/i
 ```
 - `/^\d+p$/` - Matches resolution tags like "720p", "1080p"
 - `/Available$/` - Matches tags ending with "Available"
-- `/^Test/` - Matches tags starting with "Test"
+- `/^test/i` - Matches tags starting with "test"
+
+Rules for regex patterns:
+- Regexes are always case-insensitive.
+- Flags after the closing slash are allowed: `i`, `m` and `s`. Other flags are ignored, with a warning in the log.
+- The older form without a closing slash (`/^\d+p$`) still works. The rest of the line is the regex.
+- Commas and semicolons inside `/.../` don't split the pattern.
+- An invalid regex is skipped, with a warning in the log.
 
 ### Where Blacklist Applies
 
-- **Match tab** - Blacklisted tags hidden from search results
-- **Scene Tag Sync** - Blacklisted StashDB tags are not added to scenes
-- **Browse tab** - Blacklisted tags are still visible (for import flexibility)
+- **Match tab** - Blacklisted tags are not offered as a row's best match or by Accept, and are left out of the "More matches" list, manual searches and backend searches. In "More matches", Select applies the tag you clicked.
+- **Import All** - Blacklisted tags are skipped
+- **Scene Tag Sync** - Blacklisted stash-box tags are not added to scenes
+- **Browse tab** - Blacklisted tags are still visible, so you can import them one by one
+
+The blacklist is read from the saved plugin settings, so save it before you run a search or a sync.
 
 ---
 
@@ -356,7 +425,7 @@ StashDB has 20,000+ tags. To avoid slow fetches every time, Tag Manager caches t
 
 ### Cache Behavior
 
-- **Location**: `plugins/tagManager/cache/` directory
+- **Location**: `<Stash config dir>/plugin_data/tagManager/tag_cache/`. Plugin updates don't wipe it. The old `cache/` folder inside the plugin folder is no longer used and can be deleted
 - **Expiry**: 24 hours
 - **Per-endpoint**: Each stash-box has its own cache file
 
@@ -374,7 +443,11 @@ The cache status shows in the top-right:
 
 ### First-Time Fetch
 
-The initial fetch takes 20-40 seconds depending on your connection. Subsequent loads use the cache and are nearly instant.
+The initial StashDB fetch takes about 5 seconds. Tags are fetched 1,000 per page. If a stash-box rejects that, Tag Manager falls back to 100 per page, which takes longer. A failed or partial fetch is never cached. If the stash-box returns an error, it shows in the UI. Later loads use the cache and are nearly instant.
+
+### Other Stored Data
+
+Scene Tag Sync history is stored in `<Stash config dir>/plugin_data/tagManager/sync_history.sqlite`.
 
 ---
 
@@ -397,9 +470,9 @@ When searching for matches, results are color-coded by match type:
 
 ### Fuzzy Matching Details
 
-Fuzzy matching uses the `thefuzz` library (based on Levenshtein distance):
+Fuzzy matching uses the optional `thefuzz` library (based on Levenshtein distance). Without it, Tag Manager uses basic matching:
 - Catches typos: "Bondge" → "Bondage"
 - Catches plurals: "Tattoo" → "Tattoos"
 - Catches minor variations: "Blow Job" → "Blowjob"
 
-Adjust the threshold in plugin settings (default: 80). Higher = stricter matching.
+Adjust the threshold in plugin settings (0-100, default 80). Higher = stricter matching.
