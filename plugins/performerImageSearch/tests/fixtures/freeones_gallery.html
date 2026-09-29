@@ -1,6 +1,8 @@
 <!-- Synthetic fixture: the parts of a FreeOnes gallery page (https://www.freeones.com/<name>/photos/<gallery>) that matter.
      Unlocked photos link to a width-only resize (/1440x0/) and show a square crop (/350x350/); locked
-     photos show only a crop. The JSON-LD lists every photo with its original size and escaped URLs. -->
+     photos show only a crop. The JSON-LD lists every photo with its original size and escaped URLs;
+     photo 4 is listed only as a square crop. Everything else (the header crop, the sponsor banner,
+     related galleries of other performers) must not be returned. -->
 <section class="dashboard-header-nav js-dashboard-header" data-component="dashboard-header-section">
     <header class="dashboard-header dashboard-header--subject site-max-width flex flex-row">
         <div class="dashboard-image-container ">
@@ -16,7 +18,7 @@
     </header>
 </section>
 <main role="main" class="container site-max-width px-0">
-<script type="application/ld+json">{"@context":"https:\/\/schema.org","@type":"ImageGallery","name":"Jane Example in the garden","associatedMedia":[{"@type":"ImageObject","width":2336,"height":3504,"url":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFull01\/1440x0\/filters:quality(85)\/gg\/hh\/fakePath00011\/photo-0001.jpg","thumbnailUrl":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFit001\/fit-in\/0x230\/center\/top\/filters:upscale():quality(85)\/gg\/hh\/fakePath00011\/photo-0001.jpg"},{"@type":"ImageObject","width":2336,"height":3504,"url":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFull02\/1440x0\/filters:quality(85)\/gg\/hh\/fakePath00012\/photo-0002.jpg","thumbnailUrl":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFit002\/fit-in\/0x230\/center\/top\/filters:upscale():quality(85)\/gg\/hh\/fakePath00012\/photo-0002.jpg"},{"@type":"ImageObject","width":3504,"height":2336,"url":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFull03\/1440x0\/filters:quality(85)\/gg\/hh\/fakePath00013\/photo-0003.jpg","thumbnailUrl":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFit003\/fit-in\/0x230\/center\/top\/filters:upscale():quality(85)\/gg\/hh\/fakePath00013\/photo-0003.jpg"}]}</script>
+<script type="application/ld+json">{"@context":"https:\/\/schema.org","@type":"ImageGallery","publisher":{"@type":"Organization","name":"FreeOnes","logo":{"@type":"ImageObject","width":174,"height":83,"url":"https:\/\/assets.freeones.com\/fake-assets\/logo-example.svg"},"url":"https:\/\/www.freeones.com"},"name":"Jane Example in the garden","associatedMedia":[{"@type":"ImageObject","width":2336,"height":3504,"url":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFull01\/1440x0\/filters:quality(85)\/gg\/hh\/fakePath00011\/photo-0001.jpg","thumbnailUrl":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFit001\/fit-in\/0x230\/center\/top\/filters:upscale():quality(85)\/gg\/hh\/fakePath00011\/photo-0001.jpg"},{"@type":"ImageObject","width":2336,"height":3504,"url":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFull02\/1440x0\/filters:quality(85)\/gg\/hh\/fakePath00012\/photo-0002.jpg","thumbnailUrl":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFit002\/fit-in\/0x230\/center\/top\/filters:upscale():quality(85)\/gg\/hh\/fakePath00012\/photo-0002.jpg"},{"@type":"ImageObject","width":3504,"height":2336,"url":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFull03\/1440x0\/filters:quality(85)\/gg\/hh\/fakePath00013\/photo-0003.jpg","thumbnailUrl":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFit003\/fit-in\/0x230\/center\/top\/filters:upscale():quality(85)\/gg\/hh\/fakePath00013\/photo-0003.jpg"},{"@type":"ImageObject","width":2336,"height":3504,"url":"https:\/\/thumbs.freeones.com\/photo\/fakeSigCrop04\/350x350\/center\/middle\/filters:upscale():quality(85)\/gg\/hh\/fakePath00014\/photo-0004.jpg","thumbnailUrl":"https:\/\/thumbs.freeones.com\/photo\/fakeSigFit004\/fit-in\/0x230\/center\/top\/filters:upscale():quality(85)\/gg\/hh\/fakePath00014\/photo-0004.jpg"}]}</script>
                 <figure class=" flex-col mr-2 flex-1 relative grid-item flex">
                      <a         data-id="1"
                                 href="https://thumbs.freeones.com/photo/fakeSigFull01/1440x0/filters:quality(85)/gg/hh/fakePath00011/photo-0001.jpg"
@@ -61,4 +63,22 @@
     />
                     </div>
                 </div>
+                <figure class="hidden"><div data-type="sponsor"><div class="inline-flex flex-col justify-center items-center text-center sponsor"><a href="https://www.example.com/sponsor?gallery-sponsor-slide=true"
+                           rel="nofollow sponsored"
+                           target="_blank"
+                        ><div class="sponsor-content"><p class="mb-2  sponsor-content__secondary-header">Example Studio</p><div class="mb-2 flex justify-center"><img  decoding="async" alt="Example Studio" title="Example Studio" src="https://thumbs.freeones.com/photo/fakeSigSpon01/1440x0/filters:quality(85)/ss/tt/fakePathSpon1/sponsor-0001.png" class="img-fluid sponsor-image"></div></div></a></div><img src="" alt="Image description" class="hidden"/></figure>
 </main>
+<div data-test="teaser-gallery" class="grid-item js-teaser teaser teaser-gallery">
+            <a  class=" teaser__link"            href="/photos/other-example-in-the-city"
+                        >
+        <div class="image-meta image-wrap-teaser image-link image-placeholder-teaser ratio-1-1 ">
+    <img
+                            loading="lazy"
+                            src="https://thumbs.freeones.com/photo/fakeSigRel001/350x350/center/middle/filters:upscale():quality(85)/rr/ss/fakePathRel01/cover-0101.jpg"
+                            srcset="https://thumbs.freeones.com/photo/fakeSigRel001/350x350/center/middle/filters:upscale():quality(85)/rr/ss/fakePathRel01/cover-0101.jpg 1x, https://thumbs.freeones.com/photo/fakeSigRel002/700x700/center/middle/filters:upscale():quality(85)/rr/ss/fakePathRel01/cover-0101.jpg 2x"
+                        class="image-content "
+                            alt="Other Example in the city"
+    />
+        </div>
+            </a>
+</div>

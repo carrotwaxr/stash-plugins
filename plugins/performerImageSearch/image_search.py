@@ -16,6 +16,7 @@ Sources (configurable in Settings > Plugins):
 Uses only Python standard library - no pip dependencies.
 """
 
+import collections
 import concurrent.futures
 import http.client
 import ipaddress
@@ -422,12 +423,72 @@ def search_babepedia(name, max_results=50, deadline=None):
     return SourceResult(results[:max_results])
 
 
+def _positive_int(value):
+    """value as a positive int (JSON numbers or digit strings), else 0."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, str) and value.isdigit():
+        value = int(value)
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def _json_ld_objects(html):
+    """The top-level objects in a page's JSON-LD script blocks. Blocks that do not parse are skipped."""
+    objects = []
+    for text in re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        objects.extend(data if isinstance(data, list) else [data])
+    return [obj for obj in objects if isinstance(obj, dict)]
+
+
+def _is_freeones_crop(url):
+    """True for a FreeOnes image URL that cuts the photo down rather than just resizing it.
+
+    FreeOnes images are resized by URL: "/350x350/center/middle/" crops to that box,
+    "/290x100:744x554/" cuts out a region, while "/1440x0/" (one side 0) and
+    "/fit-in/0x230/" keep the whole photo.
+    """
+    if re.search(r"/\d+x\d+:\d+x\d+/", url):
+        return True
+    box = re.search(r"/(fit-in/)?(\d+)x(\d+)/", url)
+    return bool(box) and not box.group(1) and "0" not in box.group(2, 3)
+
+
+def _freeones_gallery_photos(html):
+    """(image, thumbnail, width, height) for each photo of a FreeOnes gallery page.
+
+    The page shows only a few photos, as square crops, but its JSON-LD ImageGallery
+    lists every one: url is the whole photo resized to 1440px wide, thumbnailUrl a
+    small uncropped copy, width and height the original size. Photos listed only as
+    a crop are skipped.
+    """
+    photos = []
+    for obj in _json_ld_objects(html):
+        if obj.get("@type") != "ImageGallery":
+            continue
+        for media in obj.get("associatedMedia") or []:
+            if not isinstance(media, dict):
+                continue
+            image = media.get("url")
+            if not isinstance(image, str) or not image or _is_freeones_crop(image):
+                continue
+            thumbnail = media.get("thumbnailUrl")
+            if not isinstance(thumbnail, str) or not thumbnail:
+                thumbnail = image
+            photos.append((image, thumbnail, _positive_int(media.get("width")), _positive_int(media.get("height"))))
+    return photos
+
+
 def search_freeones(name, max_results=200, max_galleries=20, deadline=None):
     """
     Search FreeOnes for performer images.
     FreeOnes has extensive photo galleries for performers.
-    Fetches gallery list, then drills into individual galleries.
-    Note: FreeOnes uses complex CDN URLs - the thumbnails are often already large.
+    Fetches the gallery list, then reads each gallery's photo list (see
+    _freeones_gallery_photos); the rest of a gallery page is other performers,
+    sponsors and crops.
     """
     deadline = _default_deadline(deadline)
     # FreeOnes uses hyphens in URLs
@@ -447,25 +508,18 @@ def search_freeones(name, max_results=200, max_galleries=20, deadline=None):
 
     results = []
     seen_images = set()
-    pattern = r'(https://(?:thumbs|ch-thumbs|img)\.freeones\.com/[^"\']+\.(?:jpg|webp|png))'
     for page in pages:
-        for thumb_url in re.findall(pattern, page):
-            if thumb_url in seen_images or 'favicon' in thumb_url or 'logo' in thumb_url:
+        for image_url, thumb_url, width, height in _freeones_gallery_photos(page):
+            if image_url in seen_images:
                 continue
-            seen_images.add(thumb_url)
-
-            # FreeOnes CDN structure is complex - the thumbs are often already good quality
-            # URLs like /350x350/ or /1440x0/ indicate resize params
-            # Keep original URL as both thumb and full since transformations return 403
-            image_url = thumb_url
-
+            seen_images.add(image_url)
             results.append({
                 "thumbnail": thumb_url,
                 "image": image_url,
                 "title": f"{name} - FreeOnes",
                 "source": "FreeOnes",
-                "width": 0,
-                "height": 0,
+                "width": width,
+                "height": height,
             })
 
     if error and not results:
@@ -540,12 +594,46 @@ def search_pornpics(name, max_results=200, max_galleries=20, deadline=None):
     return SourceResult(results[:max_results], warnings, partial=bool(warnings))
 
 
+# A gallery tile on an EliteBabes model page: a <figure> whose first link is the gallery,
+# https://www.elitebabes.com/<slug>/. The other figures link /model/<name>/ or hold ads.
+ELITEBABES_GALLERY_TILE = re.compile(r'<figure[^>]*>\s*<a href="(https://www\.elitebabes\.com/[a-z0-9-]+/)"')
+
+# A photo on an EliteBabes gallery page: a link to the full-size file under the gallery's
+# content id, with data-width and data-height, around the _w400 copy.
+ELITEBABES_PHOTO_LINK = re.compile(
+    r'<a href="(https://cdn\.elitebabes\.com/content/(\d+)/[^"/]+\.jpg)"([^>]*)>'
+    r'(?:\s*<img\b[^>]*?\ssrc="(https://cdn\.elitebabes\.com/[^"]+)")?'
+)
+
+
+def _elitebabes_gallery_photos(html):
+    """(image, thumbnail, width, height) for each of the gallery's own photos on its page.
+
+    Only photo links with a size count, and only those under the content id most of
+    them share: the page's related galleries, collections and /content/lists/ images
+    are other sets, often of other performers.
+    """
+    links = []
+    for image, content_id, attrs, thumbnail in ELITEBABES_PHOTO_LINK.findall(html):
+        width = re.search(r'\sdata-width="(\d+)"', attrs)
+        height = re.search(r'\sdata-height="(\d+)"', attrs)
+        if width and height:
+            thumbnail = thumbnail or re.sub(r"\.jpg$", "_w400.jpg", image)
+            links.append((content_id, (image, thumbnail, int(width.group(1)), int(height.group(1)))))
+    if not links:
+        return []
+    gallery_id = collections.Counter(content_id for content_id, _ in links).most_common(1)[0][0]
+    return [photo for content_id, photo in links if content_id == gallery_id]
+
+
 def search_elitebabes(name, max_results=100, max_galleries=10, deadline=None):
     """
     Search EliteBabes for performer images.
     EliteBabes has high-quality photosets with multiple size options.
     URL format: https://cdn.elitebabes.com/content/XXXXXX/filename_w400.jpg
     Sizes: _w200, _w400, _w600, _w800, or no suffix for full size (~400KB).
+    Reads the gallery tiles on the model page, then each gallery's own photos
+    (see _elitebabes_gallery_photos).
     """
     deadline = _default_deadline(deadline)
     # EliteBabes uses hyphens and lowercase
@@ -555,46 +643,27 @@ def search_elitebabes(name, max_results=100, max_galleries=10, deadline=None):
     if html is None:
         return SourceResult()
 
-    # Extract gallery links - format: /gallery-name-12345/
-    gallery_pattern = r'href="(https://www\.elitebabes\.com/[^"]+/)"[^>]*class="[^"]*gallery[^"]*"'
-    gallery_matches = re.findall(gallery_pattern, html)
-
-    # Also try simpler pattern for gallery links
-    if not gallery_matches:
-        gallery_pattern2 = r'href="(https://www\.elitebabes\.com/[a-z0-9-]+-\d+/)"'
-        gallery_matches = re.findall(gallery_pattern2, html)
-
+    gallery_links = set(ELITEBABES_GALLERY_TILE.findall(html))
     # Sorted, so the cap always picks the same galleries
-    gallery_urls = sorted(set(gallery_matches))[:max_galleries]
-    log.LogDebug(f"[EliteBabes] Found {len(set(gallery_matches))} gallery links")
+    gallery_urls = sorted(gallery_links)[:max_galleries]
+    log.LogDebug(f"[EliteBabes] Found {len(gallery_links)} gallery links")
 
     pages, warnings, error = _gallery_pages("EliteBabes", gallery_urls, deadline)
 
     results = []
     seen_images = set()
-    # Image URLs - format: cdn.elitebabes.com/content/XXXXXX/filename_wNNN.jpg
-    pattern = r'(https://cdn\.elitebabes\.com/content/[^"\'>\s]+_w(?:200|400|600|800)\.jpg)'
     for page in pages:
-        for img_url in re.findall(pattern, page):
-            # Normalize to base (remove size suffix for full-size)
-            # _w400.jpg -> .jpg (full size)
-            base_img = re.sub(r'_w\d+\.jpg$', '.jpg', img_url)
-
-            if base_img in seen_images:
+        for image_url, thumb_url, width, height in _elitebabes_gallery_photos(page):
+            if image_url in seen_images:
                 continue
-            seen_images.add(base_img)
-
-            # Use _w400 as thumbnail, no suffix for full size
-            thumb_url = base_img.replace('.jpg', '_w400.jpg')
-            image_url = base_img  # Full size has no suffix
-
+            seen_images.add(image_url)
             results.append({
                 "thumbnail": thumb_url,
                 "image": image_url,
                 "title": f"{name} - EliteBabes",
                 "source": "EliteBabes",
-                "width": 0,
-                "height": 0,
+                "width": width,
+                "height": height,
             })
 
     if error and not results:
@@ -662,29 +731,33 @@ def search_boobpedia(name, max_results=50, deadline=None):
     return SourceResult(results)
 
 
-def _parse_javdatabase_page(html, name, seen, results, max_results):
-    """Append the idol images, covers and vertical images on one JavDatabase page to results."""
-    # Extract profile/idol images (webp format)
-    # Pattern: /idolimages/full/name.webp or /idolimages/thumb/name.webp
-    idol_pattern = r'(https://www\.javdatabase\.com/idolimages/(?:full|thumb)/[^"\'>\s]+\.webp)'
-    idol_matches = re.findall(idol_pattern, html)
-    log.LogDebug(f"[JavDatabase] Found {len(idol_matches)} idol image matches")
+# An ad on a JavDatabase page: a rel="sponsored" link, around a /vertical/ image
+JAVDATABASE_SPONSORED_LINK = re.compile(r'<a\b[^>]*\srel="[^"]*\bsponsored\b[^"]*"[^>]*>.*?</a>', re.S)
 
-    for img_url in idol_matches:
-        if img_url in seen:
+
+def _javdatabase_idol_slug(html, fallback):
+    """The idol a JavDatabase page is for, from its canonical link (the site may redirect)."""
+    match = re.search(r'<link rel="canonical"\s+href="https://www\.javdatabase\.com/idols/([^/"]+)/"', html)
+    return match.group(1) if match else fallback
+
+
+def _parse_javdatabase_page(html, name, slug, seen, results, max_results):
+    """Append the idol's own pictures and her movie covers on one JavDatabase page to results.
+
+    Skipped: other idols' pictures (the "related idols" cards), and ads, which are
+    rel="sponsored" links around /vertical/ images. Her own picture is kept even
+    though the portrait links to a sponsor. Covers are returned as the page links
+    them, the /covers/thumb/ file: there is no /covers/full/ copy.
+    """
+    # Her pictures: /idolimages/full/<slug>.webp, and the /thumb/ copy
+    idol_pattern = rf'https://www\.javdatabase\.com/idolimages/(?:full|thumb)/{re.escape(slug)}\.webp'
+    for img_url in re.findall(idol_pattern, html):
+        image_url = img_url.replace("/idolimages/thumb/", "/idolimages/full/")
+        if image_url in seen or len(results) >= max_results:
             continue
-        seen.add(img_url)
-
-        # Use thumb as thumbnail, full as image
-        if '/thumb/' in img_url:
-            thumb_url = img_url
-            image_url = img_url.replace('/thumb/', '/full/')
-        else:
-            image_url = img_url
-            thumb_url = img_url.replace('/full/', '/thumb/')
-
+        seen.add(image_url)
         results.append({
-            "thumbnail": thumb_url,
+            "thumbnail": image_url.replace("/idolimages/full/", "/idolimages/thumb/"),
             "image": image_url,
             "title": f"{name} - JavDatabase",
             "source": "JavDatabase",
@@ -692,47 +765,18 @@ def _parse_javdatabase_page(html, name, seen, results, max_results):
             "height": 0,
         })
 
-        if len(results) >= max_results:
-            break
-
-    # Also extract movie cover thumbnails
-    # Pattern: /covers/thumb/prefix/codeps.webp
+    # Her movies' covers, outside the ads: /covers/thumb/<prefix>/<code>ps.webp
     cover_pattern = r'(https://www\.javdatabase\.com/covers/thumb/[^"\'>\s]+\.webp)'
-    cover_matches = re.findall(cover_pattern, html)
+    cover_matches = re.findall(cover_pattern, JAVDATABASE_SPONSORED_LINK.sub("", html))
     log.LogDebug(f"[JavDatabase] Found {len(cover_matches)} cover matches")
-
     for img_url in cover_matches[:20]:  # Limit covers per page
         if img_url in seen or len(results) >= max_results:
             continue
         seen.add(img_url)
-
-        # Covers: thumb -> full by replacing path
-        thumb_url = img_url
-        image_url = img_url.replace('/covers/thumb/', '/covers/full/')
-
-        results.append({
-            "thumbnail": thumb_url,
-            "image": image_url,
-            "title": f"{name} - JavDatabase Cover",
-            "source": "JavDatabase",
-            "width": 0,
-            "height": 0,
-        })
-
-    # Extract vertical/promotional images
-    vertical_pattern = r'(https://www\.javdatabase\.com/vertical/[^"\'>\s]+\.jpg)'
-    vertical_matches = re.findall(vertical_pattern, html)
-    log.LogDebug(f"[JavDatabase] Found {len(vertical_matches)} vertical matches")
-
-    for img_url in vertical_matches[:10]:
-        if img_url in seen or len(results) >= max_results:
-            continue
-        seen.add(img_url)
-
         results.append({
             "thumbnail": img_url,
             "image": img_url,
-            "title": f"{name} - JavDatabase",
+            "title": f"{name} - JavDatabase Cover",
             "source": "JavDatabase",
             "width": 0,
             "height": 0,
@@ -760,7 +804,8 @@ def search_javdatabase(name, max_results=100, max_pages=5, deadline=None):
     results = []
     seen = set()
     pages = [html]
-    _parse_javdatabase_page(html, name, seen, results, max_results)
+    slug = _javdatabase_idol_slug(html, urllib.parse.quote(url_name))
+    _parse_javdatabase_page(html, name, slug, seen, results, max_results)
 
     for page_url in [f"{base_url}?ipage={i}" for i in range(2, max_pages + 1)]:
         if len(results) >= max_results:
@@ -776,7 +821,7 @@ def search_javdatabase(name, max_results=100, max_pages=5, deadline=None):
             pages.append(e)
             continue
         pages.append(html)
-        _parse_javdatabase_page(html, name, seen, results, max_results)
+        _parse_javdatabase_page(html, name, slug, seen, results, max_results)
 
     warnings, _ = _page_failures(pages, "pages")  # page 1 loaded, so never all failed
     for warning in warnings:

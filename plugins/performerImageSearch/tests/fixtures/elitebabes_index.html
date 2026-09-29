@@ -1,5 +1,8 @@
 <!-- Synthetic fixture: the parts of https://www.elitebabes.com/model/<name>/ that search_elitebabes reads.
-     Each gallery is linked twice (image and overlay caption); tag links must not count as galleries. -->
+     Each gallery tile is a <figure> whose first link is the gallery (linked again by the overlay caption).
+     Most gallery slugs end in a number, but not all (on-the-beach). The links have no class attribute.
+     Not galleries: tag and sort links, the model link in each tile, the ad figure, and the
+     "Onlyfan Models" slider of other models with its /content/lists/ images. -->
 <p><a href="https://www.elitebabes.com/model/jane-example/sort/similar/" class="overlay-b">Similar</a>
 <a href="https://www.elitebabes.com/model-tag/brunette/" title="">Brunette</a></p>
 <ul class="list-gallery has-mobile-menu">
@@ -14,6 +17,23 @@
   			</a>
   			<div class="img-overlay">
   				<p><a href="https://www.elitebabes.com/jane-example-by-the-pool-40003/">Jane Example by the pool</a></p>
+  				<ul class="list-icon">
+            <li><a href="https://www.elitebabes.com/model/jane-example/"><i aria-hidden="true" class="icon-woman"></i> <span>Jane Example</span></a></li>  				</ul>
+  			</div>
+  		</figure>
+  	</li>
+  	<li style="--ratio: 0.6667">
+  		<figure>
+          			<a href="https://www.elitebabes.com/jane-example-on-the-beach/" title="Jane Example on the beach">
+  				<img
+          alt="Jane Example on the beach"
+           data-preview-state="nsfw"          srcset="
+          https://cdn.elitebabes.com/content/540002/40002_masonry_800.jpg 800w, https://cdn.elitebabes.com/content/540002/40002_masonry_400.jpg 400w  				"
+  				src="https://cdn.elitebabes.com/content/540002/40002_masonry_400.jpg"
+  				>
+            			</a>
+  			<div class="img-overlay">
+  				<p><a href="https://www.elitebabes.com/jane-example-on-the-beach/">Jane Example on the beach</a></p>
   			</div>
   		</figure>
   	</li>
@@ -32,3 +52,12 @@
   		</figure>
   	</li>
 </ul>
+<div class="center"><figure class="multi-desktop"><div id="result"></div><ins class="ad-zone" data-zoneid="1" data-keywords="jane example"></ins></figure></div>
+<div class="ofx-slider-area" style="display:none"><h2 class="size-16">Onlyfan Models</h2><ul class="list-gallery static slider slider-strong"><li><figure><a href="https://www.elitebabes.com/model/other-example/" title="Other Example in black."><img alt="Other Example in black."
+             src="https://cdn.elitebabes.com/content/lists/202510/007-001_640.webp"
+             loading="lazy"
+             width="640"
+             height="1137"></a></figure></li><li><figure><a href="https://www.elitebabes.com/model/another-example-2/" title="Another Example in red."><img alt="Another Example in red."
+             srcset="https://cdn.elitebabes.com/content/lists/202510/1000001_w800.jpg 800w, https://cdn.elitebabes.com/content/lists/202510/1000001_w400.jpg 400w"
+             src="https://cdn.elitebabes.com/content/lists/202510/1000001_w400.jpg"
+             loading="lazy"></a></figure></li></ul></div>

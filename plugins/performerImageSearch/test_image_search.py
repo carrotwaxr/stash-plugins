@@ -160,7 +160,9 @@ def test_javdatabase():
             assert "/full/" in result["image"], f"JavDatabase: Idol image should use /full/: {result['image']}"
             assert "/thumb/" not in result["image"], f"JavDatabase: Idol image contains /thumb/: {result['image']}"
         elif "covers" in result["image"]:
-            assert "/full/" in result["image"], f"JavDatabase: Cover should use /full/: {result['image']}"
+            # There is no /covers/full/ copy; the cover is the thumbnail the page links
+            assert result["image"] == result["thumbnail"], f"JavDatabase: Cover should be its thumbnail: {result['image']}"
+            assert "/covers/thumb/" in result["image"], f"JavDatabase: Cover should use /covers/thumb/: {result['image']}"
         print(f"  OK: {result['image'][:60]}...")
 
     results2 = image_search.search_javdatabase("Yua Mikami", max_results=5, max_pages=1)

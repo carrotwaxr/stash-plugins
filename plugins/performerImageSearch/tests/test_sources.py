@@ -56,6 +56,15 @@ def pairs(results):
     return [(r["image"], r["thumbnail"]) for r in results]
 
 
+def photos(results):
+    """(image, thumbnail, width, height) for each result, in order."""
+    return [(r["image"], r["thumbnail"], r["width"], r["height"]) for r in results]
+
+
+def all_urls(results):
+    return [url for r in results for url in (r["image"], r["thumbnail"])]
+
+
 class FakeWeb:
     """Stands in for image_search._fetch: serves pages by URL and records each request.
 
@@ -121,9 +130,39 @@ def serve_pornpics(web, ids):
 
 
 def elitebabes_gallery(url):
-    """The EliteBabes gallery fixture, re-labelled for gallery <slug>-<id>/ (content id 5<id>)."""
-    gid = re.search(r"-(\d+)/$", url).group(1)
+    """The EliteBabes gallery fixture, re-labelled for a gallery URL.
+
+    <slug>-<n>/ gets content id 5<n> (zero-padded to 6 digits); a slug without a
+    number (the fixture's on-the-beach gallery) gets 540002.
+    """
+    number = re.search(r"-(\d+)/$", url)
+    gid = number.group(1) if number else "40002"
     return fixture("elitebabes_gallery.html").replace("500001", "5" + gid.zfill(5))
+
+
+# --- FreeOnes helpers ---
+
+def freeones_gallery_2():
+    """The FreeOnes gallery fixture with its photo paths moved, so it reads as another gallery."""
+    page = fixture("freeones_gallery.html")
+    return page.replace("/gg/hh/", "/jj/kk/").replace("\\/gg\\/hh\\/", "\\/jj\\/kk\\/")  # JSON-LD escapes "/"
+
+
+def serve_freeones(web):
+    web.routes[FREEONES_LIST_URL] = fixture("freeones_list.html")
+    web.routes[FREEONES_GALLERY_1] = fixture("freeones_gallery.html")
+    web.routes[FREEONES_GALLERY_2] = freeones_gallery_2()
+
+
+def freeones_photo(n, width, height, folder="gg/hh"):
+    """What search_freeones returns for photo n of the gallery fixture."""
+    path = f"{folder}/fakePath0001{n}/photo-000{n}.jpg"
+    return (
+        f"https://thumbs.freeones.com/photo/fakeSigFull0{n}/1440x0/filters:quality(85)/{path}",
+        f"https://thumbs.freeones.com/photo/fakeSigFit00{n}/fit-in/0x230/center/top/filters:upscale():quality(85)/{path}",
+        width,
+        height,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -331,32 +370,101 @@ def test_babepedia_fixture(web):
     assert web.urls() == [BABEPEDIA_URL]
 
 
-FREEONES_EXPECTED = [
-    "https://thumbs.freeones.com/photo/fakeSigHead01/290x100:744x554/350x350/center/middle/"
-    "filters:upscale():quality(85)/ee/ff/fakePathHead1/Jane-Example-001.jpg",
-    "https://thumbs.freeones.com/photo/fakeSigFull01/1440x0/filters:quality(85)/gg/hh/fakePath00011/photo-0001.jpg",
-    "https://thumbs.freeones.com/photo/fakeSigCrop01/350x350/center/middle/"
-    "filters:upscale():quality(85)/gg/hh/fakePath00011/photo-0001.jpg",
-    "https://thumbs.freeones.com/photo/fakeSigFull02/1440x0/filters:quality(85)/gg/hh/fakePath00012/photo-0002.jpg",
-    "https://thumbs.freeones.com/photo/fakeSigCrop02/350x350/center/middle/"
-    "filters:upscale():quality(85)/gg/hh/fakePath00012/photo-0002.jpg",
-    "https://thumbs.freeones.com/photo/fakeSigCrop03/350x350/center/middle/"
-    "filters:upscale():quality(85)/gg/hh/fakePath00013/photo-0003.jpg",
-]
+def freeones_gallery_photos(folder):
+    """The photos of one gallery fixture: photo 4 is listed only as a square crop, so it is skipped."""
+    return [
+        freeones_photo(1, 2336, 3504, folder),
+        freeones_photo(2, 2336, 3504, folder),
+        freeones_photo(3, 3504, 2336, folder),
+    ]
+
+
+# Gallery 1 (in the garden) comes first on the list page, then gallery 2 (by the pool)
+FREEONES_EXPECTED = freeones_gallery_photos("gg/hh") + freeones_gallery_photos("jj/kk")
 
 
 def test_freeones_fixture(web):
-    web.routes[FREEONES_LIST_URL] = fixture("freeones_list.html")
-    web.routes[FREEONES_GALLERY_1] = fixture("freeones_gallery.html")
-    web.routes[FREEONES_GALLERY_2] = fixture("freeones_gallery.html")
+    serve_freeones(web)
     found = image_search.search_freeones(NAME)
     # Gallery links are deduplicated and kept in page order
     assert web.urls()[0] == FREEONES_LIST_URL
     assert sorted(web.urls()[1:]) == sorted([FREEONES_GALLERY_1, FREEONES_GALLERY_2])
-    # Current behaviour (Task 2 changes it): every freeones image URL on the page, as found
-    assert pairs(found) == [(url, url) for url in FREEONES_EXPECTED]
+    assert photos(found) == FREEONES_EXPECTED
     assert {r["source"] for r in found} == {"FreeOnes"}
+    assert found[0]["title"] == "Jane Example - FreeOnes"
     assert not found.partial
+
+
+def test_freeones_photos_come_from_the_json_ld_unescaped(web):
+    serve_freeones(web)
+    found = image_search.search_freeones(NAME)
+    for image, thumbnail, width, height in photos(found):
+        assert "\\" not in image + thumbnail
+        assert "/1440x0/" in image  # the full photo, resized only to 1440px wide
+        assert "/fit-in/0x230/" in thumbnail  # small, but not cropped
+        assert (width, height) in ((2336, 3504), (3504, 2336))  # the original size
+
+
+def test_freeones_skips_a_photo_listed_only_as_a_square_crop(web):
+    serve_freeones(web)
+    found = image_search.search_freeones(NAME)
+    assert "fakePath00014" in fixture("freeones_gallery.html")
+    assert not any("fakePath00014" in url for url in all_urls(found))
+    assert not any(image_search._is_freeones_crop(r["image"]) for r in found)
+
+
+def test_freeones_ignores_the_images_around_the_gallery(web):
+    serve_freeones(web)
+    found = image_search.search_freeones(NAME)
+    # Not returned: the header crop, the square crops the page shows, the sponsor banner,
+    # the related gallery (another performer) and its srcset, the publisher logo
+    for marker in ("fakePathHead1", "fakeSigCrop", "fakePathSpon1", "fakePathRel01", "logo"):
+        assert not any(marker in url for url in all_urls(found)), marker
+    # No match ever runs past a URL into the rest of a srcset
+    for url in all_urls(found):
+        assert re.fullmatch(r"https://thumbs\.freeones\.com/\S+\.jpg", url) and "," not in url, url
+
+
+@pytest.mark.parametrize("url,crop", [
+    ("https://thumbs.freeones.com/photo/s/350x350/center/middle/filters:upscale():quality(85)/a/b/c/p.jpg", True),
+    ("https://thumbs.freeones.com/photo/s/290x100:744x554/350x350/center/middle/filters:upscale()/a/p.jpg", True),
+    ("https://thumbs.freeones.com/photo/s/290x100:744x554/1440x0/filters:quality(85)/a/p.jpg", True),
+    ("https://thumbs.freeones.com/photo/s/1440x0/filters:quality(85)/a/b/c/p.jpg", False),
+    ("https://thumbs.freeones.com/photo/s/0x1440/filters:quality(85)/a/b/c/p.jpg", False),
+    ("https://thumbs.freeones.com/photo/s/fit-in/0x230/center/top/filters:upscale():quality(85)/a/p.jpg", False),
+    ("https://img.freeones.com/photos/a/b/p.jpg", False),
+])
+def test_freeones_crop_urls(url, crop):
+    assert image_search._is_freeones_crop(url) is crop
+
+
+def test_freeones_gallery_without_usable_json_ld_gives_nothing_from_that_page(web):
+    serve_freeones(web)
+    # Only the page's square crops, and a JSON-LD block that does not parse
+    web.routes[FREEONES_GALLERY_2] = (
+        '<script type="application/ld+json">{"@type":"ImageGallery","associatedMedia":[</script>\n'
+        '<img src="https://thumbs.freeones.com/photo/x/350x350/center/middle/filters:upscale()/jj/kk/p.jpg">\n'
+    )
+    found = image_search.search_freeones(NAME)
+    assert photos(found) == freeones_gallery_photos("gg/hh")
+    assert not found.partial
+
+
+def test_freeones_photo_without_a_thumbnail_uses_the_image():
+    page = (
+        '<script type="application/ld+json">{"@type":"ImageGallery","associatedMedia":['
+        '{"@type":"ImageObject","width":"1200","height":800,'
+        '"url":"https:\\/\\/thumbs.freeones.com\\/photo\\/s\\/1440x0\\/filters:quality(85)\\/a\\/p.jpg"},'
+        '{"@type":"ImageObject","url":"https:\\/\\/thumbs.freeones.com\\/photo\\/t\\/1440x0\\/a\\/q.jpg",'
+        '"thumbnailUrl":"https:\\/\\/thumbs.freeones.com\\/photo\\/u\\/fit-in\\/0x230\\/a\\/q.jpg","width":null}'
+        ']}</script>'
+    )
+    assert image_search._freeones_gallery_photos(page) == [
+        ("https://thumbs.freeones.com/photo/s/1440x0/filters:quality(85)/a/p.jpg",
+         "https://thumbs.freeones.com/photo/s/1440x0/filters:quality(85)/a/p.jpg", 1200, 800),
+        ("https://thumbs.freeones.com/photo/t/1440x0/a/q.jpg",
+         "https://thumbs.freeones.com/photo/u/fit-in/0x230/a/q.jpg", 0, 0),
+    ]
 
 
 def test_pornpics_fixture(web):
@@ -375,21 +483,57 @@ def test_pornpics_fixture(web):
     assert not found.partial
 
 
-def test_elitebabes_fixture(web):
+# The fixture model page's galleries, sorted, and the content id each one's photos live under
+ELITEBABES_GALLERIES = [
+    ("https://www.elitebabes.com/jane-example-by-the-pool-40003/", "540003"),
+    ("https://www.elitebabes.com/jane-example-in-the-garden-40001/", "540001"),
+    ("https://www.elitebabes.com/jane-example-on-the-beach/", "540002"),
+]
+
+
+def elitebabes_photos(content):
+    """What search_elitebabes returns for one gallery fixture: its two photos, with their sizes."""
+    base = f"https://cdn.elitebabes.com/content/{content}/"
+    return [
+        (base + "0001-01.jpg", base + "0001-01_w400.jpg", 801, 1200),
+        (base + "0001-02.jpg", base + "0001-02_w400.jpg", 1200, 801),
+    ]
+
+
+def serve_elitebabes(web):
     web.routes[ELITEBABES_INDEX_URL] = fixture("elitebabes_index.html")
     web.fallback = lambda url: elitebabes_gallery(url) if url != ELITEBABES_INDEX_URL else None
+
+
+def test_elitebabes_fixture(web):
+    serve_elitebabes(web)
     found = image_search.search_elitebabes(NAME)
-    assert sorted(web.urls()[1:]) == [
-        "https://www.elitebabes.com/jane-example-by-the-pool-40003/",
-        "https://www.elitebabes.com/jane-example-in-the-garden-40001/",
-    ]
-    expected = []
-    for content in ("540003", "540001"):  # gallery URLs sorted: by-the-pool before in-the-garden
-        for photo in ("0001-01", "0001-02"):
-            base = f"https://cdn.elitebabes.com/content/{content}/{photo}"
-            expected.append((base + ".jpg", base + "_w400.jpg"))
-    assert pairs(found) == expected
+    assert sorted(web.urls()[1:]) == [url for url, _ in ELITEBABES_GALLERIES]
+    expected = [photo for _, content in ELITEBABES_GALLERIES for photo in elitebabes_photos(content)]
+    assert photos(found) == expected
     assert {r["source"] for r in found} == {"EliteBabes"}
+    assert found[0]["title"] == "Jane Example - EliteBabes"
+
+
+def test_elitebabes_finds_the_galleries_by_their_tiles(web):
+    # Today's gallery links carry no class attribute, and most but not all slugs end in a number.
+    # Tag, sort and model links, and the other models' slider, are not galleries.
+    serve_elitebabes(web)
+    image_search.search_elitebabes(NAME)
+    assert sorted(web.urls()) == sorted([ELITEBABES_INDEX_URL] + [url for url, _ in ELITEBABES_GALLERIES])
+
+
+def test_elitebabes_returns_only_the_gallerys_own_photos(web):
+    url, content = ELITEBABES_GALLERIES[1]
+    web.routes[ELITEBABES_INDEX_URL] = f'<figure><a href="{url}" title="Jane Example in the garden">x</a></figure>'
+    web.routes[url] = elitebabes_gallery(url)
+    found = image_search.search_elitebabes(NAME)
+    assert photos(found) == elitebabes_photos(content)
+    # Not the related galleries' previews and photo link, the collections, or /content/lists/
+    page = elitebabes_gallery(url)
+    for other in ("/590001/", "/590002/", "/590003/", "/lists/"):
+        assert other in page
+        assert not any(other in u for u in all_urls(found)), other
 
 
 def test_boobpedia_fixture(web):
@@ -409,15 +553,49 @@ def test_javdatabase_fixture_reads_pages_until_a_404(web):
     found = image_search.search_javdatabase(NAME)
     # Page 3 is a 404: the end of the pages, not a failure
     assert web.urls() == [JAVDATABASE_URL, JAVDATABASE_URL + "?ipage=2", JAVDATABASE_URL + "?ipage=3"]
-    cover = "https://www.javdatabase.com/covers/{}/ex/exmp0000{}ps.webp"
+    # There is no /covers/full/ copy, so each cover is the thumbnail the page links
+    cover = "https://www.javdatabase.com/covers/thumb/ex/exmp0000{}ps.webp"
     assert pairs(found) == [
         ("https://www.javdatabase.com/idolimages/full/jane-example.webp",
          "https://www.javdatabase.com/idolimages/thumb/jane-example.webp"),
-        (cover.format("full", 1), cover.format("thumb", 1)),
-        (cover.format("full", 2), cover.format("thumb", 2)),
-        (cover.format("full", 3), cover.format("thumb", 3)),
+        (cover.format(1), cover.format(1)),
+        (cover.format(2), cover.format(2)),
+        (cover.format(3), cover.format(3)),
     ]
+    assert [r["title"] for r in found] == ["Jane Example - JavDatabase"] + ["Jane Example - JavDatabase Cover"] * 3
     assert not found.partial and found.warnings == []
+
+
+def test_javdatabase_skips_other_idols_and_ads(web):
+    web.routes[JAVDATABASE_URL] = fixture("javdatabase_1.html")
+    found = image_search.search_javdatabase(NAME, max_pages=1)
+    page = fixture("javdatabase_1.html")
+    # Related idols (a slug that merely starts with hers too), and the sponsored ad cards
+    for other in ("other-idol", "jane-example-2", "/vertical/", "adxx00001ps"):
+        assert other in page
+        assert not any(other in url for url in all_urls(found)), other
+    assert not any("/covers/full/" in url for url in all_urls(found))
+    assert len(found) == 3  # her picture and the two covers
+
+
+def test_javdatabase_keeps_the_idols_own_picture_inside_a_sponsor_link(web):
+    # The portrait links to a sponsor, but it is her picture: keep it even without the og:image tags
+    page = "\n".join(line for line in fixture("javdatabase_1.html").splitlines() if "og:image" not in line)
+    web.routes[JAVDATABASE_URL] = page
+    found = image_search.search_javdatabase(NAME, max_pages=1)
+    assert found[0]["image"] == "https://www.javdatabase.com/idolimages/full/jane-example.webp"
+
+
+def test_javdatabase_own_idol_is_the_one_the_page_is_for(web):
+    # The site may redirect to another slug for her; the canonical link names the page's idol
+    web.routes[JAVDATABASE_URL] = (
+        '<link rel="canonical" href="https://www.javdatabase.com/idols/jane-example-jp/">\n'
+        '<img src="https://www.javdatabase.com/idolimages/full/jane-example-jp.webp" alt="Jane Example">\n'
+        '<img src="https://www.javdatabase.com/idolimages/thumb/jane-example.webp" alt="Someone else">\n'
+    )
+    found = image_search.search_javdatabase(NAME, max_pages=1)
+    assert pairs(found) == [("https://www.javdatabase.com/idolimages/full/jane-example-jp.webp",
+                             "https://www.javdatabase.com/idolimages/thumb/jane-example-jp.webp")]
 
 
 def ddg_routes(web, vqd_page=None, api=None):
@@ -495,11 +673,10 @@ def test_a_failed_gallery_is_skipped_and_the_source_is_partial(web):
 
 
 def test_freeones_skips_a_blocked_gallery(web):
-    web.routes[FREEONES_LIST_URL] = fixture("freeones_list.html")
+    serve_freeones(web)
     web.routes[FREEONES_GALLERY_1] = SourceBlocked("www.freeones.com blocked the request (HTTP 403)")
-    web.routes[FREEONES_GALLERY_2] = fixture("freeones_gallery.html")
     found = image_search.search_freeones(NAME)
-    assert len(found) == len(FREEONES_EXPECTED)
+    assert photos(found) == freeones_gallery_photos("jj/kk")
     assert found.partial
     assert found.warnings == ["1 of 2 galleries failed to load (www.freeones.com blocked the request (HTTP 403))"]
 
@@ -584,7 +761,7 @@ def test_gallery_ids_are_sorted_before_the_cap(web):
 
 def test_elitebabes_gallery_links_are_sorted_before_the_cap(web):
     slugs = [f"https://www.elitebabes.com/jane-example-set-{n}-{40000 + n}/" for n in (12, 3, 7, 1, 9, 11, 2, 5, 10, 4, 8, 6)]
-    web.routes[ELITEBABES_INDEX_URL] = "".join(f'<a href="{u}" title="x">x</a>\n' for u in slugs)
+    web.routes[ELITEBABES_INDEX_URL] = "".join(f'<figure><a href="{u}" title="x">x</a></figure>\n' for u in slugs)
     web.fallback = lambda url: elitebabes_gallery(url) if url != ELITEBABES_INDEX_URL else None
     image_search.search_elitebabes(NAME, max_galleries=10)
     assert sorted(web.urls()[1:]) == sorted(slugs)[:10]
