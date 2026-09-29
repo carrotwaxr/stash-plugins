@@ -14,11 +14,16 @@ const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
 /**
- * studios: [[id, parent]]. opts: gate (promise holding FindStudios), gateUpdate (promise
- * holding StudioUpdate), failFetch, base, pathname, confirm.
+ * studios: [[id, parent]]. opts: gate (promise holding FindStudios, or function(callIndex)
+ * returning one or null), gateUpdate (promise holding StudioUpdate, or function(input)
+ * returning one or null), fail(input) (an error message fails that update), failFetch,
+ * base, pathname, confirm. The server snapshot is taken when FindStudios is called.
+ * `env.attached` is the container in the document: mount() attaches one, its cleanup
+ * detaches it (React removes the element on unmount).
  */
 function setup(studios, opts = {}) {
   const server = new Map(studios);
+  let findCalls = 0;
   const sm = loadStudioManager({
     base: opts.base, pathname: opts.pathname, confirm: opts.confirm,
     fetchResponses: {
@@ -26,18 +31,27 @@ function setup(studios, opts = {}) {
         const r = opts.failFetch
           ? { errors: [{ message: "boom" }] }
           : { data: { findStudios: { studios: [...server].map(([id, p]) => studio(id, p)) } } };
-        return opts.gate ? opts.gate.then(() => r) : r;
+        const g = typeof opts.gate === "function" ? opts.gate(findCalls++) : opts.gate;
+        return g ? g.then(() => r) : r;
       },
       StudioUpdate: (body) => {
-        const done = () => { server.set(body.variables.input.id, body.variables.input.parent_id); return { data: { studioUpdate: {} } }; };
-        return opts.gateUpdate ? opts.gateUpdate.then(done) : done();
+        const input = body.variables.input;
+        const done = () => {
+          const msg = opts.fail && opts.fail(input);
+          if (msg) return { errors: [{ message: msg }] };
+          server.set(input.id, input.parent_id);
+          return { data: { studioUpdate: {} } };
+        };
+        const g = typeof opts.gateUpdate === "function" ? opts.gateUpdate(input) : opts.gateUpdate;
+        return g ? g.then(done) : done();
       },
     },
   });
   const container = createQueryableElement("div");
   const panel = createQueryableElement("div");
+  const env = { sm, x: sm.exports, container, server, panel, attached: container };
   sm.document.querySelector = (sel) => {
-    if (sel === ".studio-hierarchy-container") return container;
+    if (sel === ".studio-hierarchy-container") return env.attached;
     if (sel === ".sh-changes-panel") return panel;
     if (sel === "base") return { getAttribute: () => opts.base || "/" };
     return null;
@@ -49,17 +63,41 @@ function setup(studios, opts = {}) {
     hierarchyStats: sm.exports.getTreeStats(list), expandedNodes: new Set(),
     pendingChanges: [], isEditMode: false, originalParentMap: new Map(),
   });
-  return { sm, x: sm.exports, container, server };
+  return env;
 }
 
-/** Run the component as React would: render, hand it the container, run the effect. */
-function mount(env) {
-  const { sm, container } = env;
+/**
+ * Run the component as React would: render, hand it the container, run the effect.
+ * Returns the unmount: the container leaves the document, then the effect cleanup runs.
+ */
+function mount(env, container = env.container) {
+  const { sm } = env;
   const before = sm.effects.length;
   const el = sm.routes[0].component();
   el.props.ref.current = container;
+  env.attached = container;
   const cleanup = sm.effects[before]();
-  return cleanup;
+  return () => {
+    if (env.attached === container) env.attached = null;
+    cleanup();
+  };
+}
+
+const pendingIds = (sm) => plain(sm.getState().pendingChanges.map((c) => c.studioId));
+const rootIds = (sm) => plain(sm.getState().hierarchyTree.map((n) => n.id));
+/** Texts of every toast shown (each toast makes its own container: none is found). */
+const toastTexts = (sm) => sm.document.body.children
+  .filter((c) => c.className === "sh-toast-container")
+  .flatMap((c) => c.children.map((t) => t.textContent));
+/** Promises released by hand: gates.open(key) resolves gates.get(key). */
+function gateSet() {
+  const promises = new Map();
+  const resolvers = new Map();
+  const make = (k) => { if (!promises.has(k)) promises.set(k, new Promise((r) => resolvers.set(k, r))); };
+  return {
+    get: (k) => { make(k); return promises.get(k); },
+    open: (k) => { make(k); resolvers.get(k)(); },
+  };
 }
 
 const listenerTotal = (el) => Object.values(el.listeners).reduce((n, a) => n + a.length, 0);
@@ -284,6 +322,88 @@ test("unmount during a save: no toast or panel, state still consistent", async (
   assert.strictEqual(sm.getState().pendingChanges.length, 0, "saved change is no longer pending");
   x.setParent("3", "2");
   assert.strictEqual(sm.getState().pendingChanges.length, 1, "lock released");
+});
+
+test("returning to the page while a save runs keeps its failures, panel and leave guard", async () => {
+  const gates = gateSet();
+  const env = setup([["1"], ["2"], ["3"], ["4"]], {
+    gateUpdate: (input) => gates.get(input.id),
+    fail: (input) => (input.id === "3" ? "nope" : null),
+  });
+  const { sm, x, panel } = env;
+  const leave = mount(env);
+  await sm.settle();
+  x.setParent("1", "4");
+  x.setParent("2", "4");
+  x.setParent("3", "4");
+  const saving = x.savePendingChanges();
+  await sm.settle();
+  gates.open("1");
+  await sm.settle(); // 1 saved, 2 in flight
+  leave(); // Back
+  const second = createQueryableElement("div");
+  const leave2 = mount(env, second); // return while the save runs
+  await sm.settle();
+  assert.ok(/Saving…/.test(panel.innerHTML), "the running save is shown");
+  assert.deepStrictEqual(pendingIds(sm), ["1", "2", "3"]);
+  gates.open("2");
+  gates.open("3");
+  await saving;
+  await sm.settle();
+  assert.deepStrictEqual(pendingIds(sm), ["3"], "the failed change is kept");
+  assert.ok(/nope/.test(sm.getState().pendingChanges[0].error));
+  assert.ok(/1 pending change\b/.test(panel.innerHTML), panel.innerHTML);
+  assert.ok(!/Saving…|disabled/.test(panel.innerHTML), "panel unlocked");
+  assert.strictEqual((sm.window.listeners.beforeunload || []).length, 1, "leave guard on");
+  assert.ok(toastTexts(sm).some((t) => t.startsWith("2 saved, 1 failed")), toastTexts(sm).join("|"));
+  assert.deepStrictEqual(rootIds(sm), ["4"], "1, 2 saved and 3 pending, all under 4");
+  assert.ok(second.innerHTML.includes('data-studio-id="3"'), "the new page is rendered");
+  leave2();
+});
+
+test("a page fetch that started during a save does not undo what the save loaded", async () => {
+  const gates = gateSet();
+  const env = setup([["1"], ["2"], ["3"]], {
+    gateUpdate: (input) => gates.get("u" + input.id),
+    gate: (call) => (call === 1 ? gates.get("page") : null), // the fetch of the second mount
+  });
+  const { sm, x } = env;
+  const leave = mount(env);
+  await sm.settle();
+  x.setParent("1", "3");
+  x.setParent("2", "3");
+  const saving = x.savePendingChanges();
+  await sm.settle();
+  gates.open("u1");
+  await sm.settle();
+  leave();
+  const second = createQueryableElement("div");
+  mount(env, second); // its fetch sees only 1 saved, and is slow
+  await sm.settle();
+  gates.open("u2");
+  await saving; // the save's own reload sees both
+  await sm.settle();
+  gates.open("page");
+  await sm.settle();
+  assert.deepStrictEqual(pendingIds(sm), []);
+  assert.deepStrictEqual(rootIds(sm), ["3"], "1 and 2 stay under 3");
+  assert.ok(!second.innerHTML.includes("restored"));
+});
+
+test("leaving while a save runs says the changes are being saved", async () => {
+  let release;
+  const gateUpdate = new Promise((r) => { release = r; });
+  const env = setup([["1"], ["2"], ["3"]], { gateUpdate, confirm: () => false });
+  const { sm, x } = env;
+  x.setParent("1", "2");
+  x.setParent("3", "2");
+  const saving = x.savePendingChanges();
+  await sm.settle();
+  x.navigateTo("/studios/2");
+  assert.deepStrictEqual(sm.confirmCalls,
+    ["2 changes are still being saved. Leave anyway? Saving carries on, and any that fail are kept for when you return."]);
+  release();
+  await saving;
 });
 
 test("title timeouts are cleared on unmount", async () => {

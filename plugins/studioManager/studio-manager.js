@@ -26,6 +26,7 @@
   // Lifecycle: bumped on every mount and unmount; async work started under an
   // older value must not render, toast or touch the page.
   let mountToken = 0;
+  let savesFinished = 0;          // bumped when a save ends (it has loaded newer data)
   let restoredCount = 0;          // changes re-applied on the last mount (banner)
   let titleTimers = [];
   let leaveGuardOn = false;
@@ -63,7 +64,16 @@
   }
 
   function unsavedMessage(n) {
+    if (isSaving) {
+      return `${n} change${n === 1 ? ' is' : 's are'} still being saved. Leave anyway? ` +
+        'Saving carries on, and any that fail are kept for when you return.';
+    }
     return `You have ${n} unsaved change${n === 1 ? '' : 's'}. Leave anyway?`;
+  }
+
+  /** The hierarchy page's container while the page is in the document, else null. */
+  function pageContainer() {
+    return document.querySelector('.studio-hierarchy-container');
   }
 
   /**
@@ -469,7 +479,7 @@
     const studios = derivedStudios();
     hierarchyTree = buildStudioTree(studios);
     hierarchyStats = getTreeStats(studios);
-    const container = document.querySelector('.studio-hierarchy-container');
+    const container = pageContainer();
     if (container) renderHierarchyPage(container);
   }
 
@@ -804,13 +814,14 @@
   /**
    * Save pending changes in a safe order (see orderForSave). Editing is locked
    * meanwhile. Failed changes stay pending with their error; the data is then
-   * refetched and the failures re-applied on top of it.
+   * refetched and the failures re-applied on top of it. The page may be left
+   * and re-entered while this runs: results are shown on whichever hierarchy
+   * page is there when it ends, and none if there is none.
    */
   async function savePendingChanges() {
     if (isSaving || pendingChanges.length === 0) return;
     isSaving = true;
-    const token = mountToken;
-    const live = () => token === mountToken; // false once the page was unmounted
+    const onPage = () => !!pageContainer();
     renderChangesPanel();
 
     const total = pendingChanges.length;
@@ -837,7 +848,7 @@
         }
       }
 
-      if (live()) {
+      if (onPage()) {
         if (failed.length === 0) {
           showToast(`${saved} saved`, 'success');
         } else {
@@ -846,13 +857,16 @@
         }
       }
 
-      pendingChanges = pendingChanges.filter(c => failed.includes(c));
+      const failedById = new Map(failed.map(c => [c.studioId, c]));
+      pendingChanges = pendingChanges
+        .filter(c => failedById.has(c.studioId))
+        .map(c => ({ ...c, error: failedById.get(c.studioId).error }));
       const reloaded = await reloadHierarchy();
       if (!reloaded) {
         // No fresh data: the successes become the server state and the baseline
         hierarchyStudios = withParents(hierarchyStudios, running);
         originalParentMap = running;
-        if (live()) {
+        if (onPage()) {
           showToast(pendingChanges.length > 0
             ? "Couldn't reload the hierarchy; the failed changes are still pending"
             : "Saved, but the hierarchy couldn't be reloaded", 'error');
@@ -864,7 +878,8 @@
       }
     } finally {
       isSaving = false;
-      if (live()) {
+      savesFinished++;
+      if (onPage()) {
         renderChangesPanel();
         refreshView();
       } else {
@@ -1306,14 +1321,22 @@
         container.innerHTML = '<div class="studio-hierarchy"><div class="sh-loading">Loading studios...</div></div>';
 
         try {
+          const saves = savesFinished;
           const studios = await fetchAllStudiosWithHierarchy();
           if (!live()) return;
+          // A save that ended meanwhile loaded newer data and rendered this page
+          if (saves !== savesFinished) return;
           hierarchyStudios = studios;
           console.debug(`[studioManager] Loaded ${hierarchyStudios.length} studios`);
 
           expandedNodes.clear();
           selectedStudioId = null;
-          restorePendingChanges();
+          if (isSaving) {
+            // Left and re-entered mid-save: show it running; it re-renders when done
+            restoredCount = 0;
+          } else {
+            restorePendingChanges();
+          }
           renderChangesPanel();
           refreshView();
         } catch (e) {
