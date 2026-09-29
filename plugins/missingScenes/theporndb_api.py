@@ -22,10 +22,8 @@ import urllib.parse
 import log
 import stashbox_api
 
-# SSL context (reuse pattern from stashbox_api)
-SSL_CONTEXT = ssl.create_default_context()
-SSL_CONTEXT.check_hostname = False
-SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+# api.theporndb.net is a public host; verify its certificate
+SSL_CONTEXT = stashbox_api.SSL_CONTEXT
 
 # TPDB REST API base URL
 TPDB_API_BASE = "https://api.theporndb.net"
@@ -116,6 +114,11 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
 
         except urllib.error.URLError as e:
             last_error = e
+
+            # A bad certificate won't fix itself on retry
+            if isinstance(e.reason, ssl.SSLCertVerificationError):
+                log.LogError(f"TPDB TLS certificate verification failed: {e.reason}")
+                return None
 
             if attempt < max_retries:
                 log.LogWarning(

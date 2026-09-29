@@ -14,8 +14,10 @@ Called via runPluginOperation from JavaScript UI.
 import hashlib
 import json
 import os
+import ssl
 import sys
 import time
+import urllib.request
 
 import log
 from stashdb_api import search_tags_by_name, query_all_tags
@@ -41,7 +43,7 @@ def load_default_settings():
     Returns:
         Dict with default plugin settings.
     """
-    defaults_path = os.path.join(get_plugin_dir(), "default_settings.json")
+    defaults_path = os.path.join(get_plugin_dir(), "assets", "default_settings.json")
     try:
         with open(defaults_path, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -243,6 +245,90 @@ def resolve_sync_dry_run(stash_config):
         return DEFAULT_PLUGIN_SETTINGS["syncDryRun"]
 
 
+# Stash runs on this host. With HTTPS its cert names a public host while we connect
+# via localhost, so hostname checks would fail. Don't verify.
+STASH_SSL_CONTEXT = ssl.create_default_context()
+STASH_SSL_CONTEXT.check_hostname = False
+STASH_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+
+
+def stash_graphql(server_connection, query, variables=None):
+    """Query the Stash server that launched this plugin, using its session cookie."""
+    host = server_connection.get("Host", "localhost")
+    if host == "0.0.0.0":
+        host = "localhost"
+    url = f"{server_connection.get('Scheme', 'http')}://{host}:{server_connection.get('Port', 9999)}/graphql"
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    cookie = (server_connection.get("SessionCookie") or {}).get("Value")
+    if cookie:
+        headers["Cookie"] = f"session={cookie}"
+
+    data = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=30, context=STASH_SSL_CONTEXT) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    if result.get("errors"):
+        raise RuntimeError(f"Stash GraphQL errors: {result['errors']}")
+    return result.get("data") or {}
+
+
+STASHBOX_CONFIG_QUERY = """
+query TagManagerStashBoxes {
+    configuration {
+        general { stashBoxes { endpoint api_key name } }
+        plugins
+    }
+}
+"""
+
+
+def _normalize_endpoint(url):
+    return (url or "").strip().rstrip("/").lower()
+
+
+def resolve_stashbox(requested_url, stash_config):
+    """
+    Find the stash-box URL and API key to use, from Stash's own configuration.
+
+    The UI picks the endpoint, but the URL we call and its key always come from
+    Stash's config. Trusting both from the client would let any caller make this
+    server POST to an arbitrary host.
+
+    Args:
+        requested_url: Endpoint selected in the UI (may be empty)
+        stash_config: Stash `configuration` object (general.stashBoxes, plugins)
+
+    Returns:
+        (url, api_key) tuple
+
+    Raises:
+        ValueError: If no configured endpoint matches
+    """
+    config = stash_config or {}
+    boxes = (config.get("general") or {}).get("stashBoxes") or []
+    candidates = [(b.get("endpoint"), b.get("api_key") or "") for b in boxes if b.get("endpoint")]
+
+    # Legacy plugin-level credentials, which the UI falls back to when Stash has no stash-boxes
+    plugin_config = (config.get("plugins") or {}).get(PLUGIN_ID) or {}
+    if plugin_config.get("stashdbApiKey"):
+        candidates.append((
+            plugin_config.get("stashdbEndpoint") or "https://stashdb.org/graphql",
+            plugin_config["stashdbApiKey"],
+        ))
+
+    if not candidates:
+        raise ValueError("No stash-box endpoints configured. Go to Settings > Metadata Providers to add StashDB.")
+    if not requested_url:
+        return candidates[0]
+
+    wanted = _normalize_endpoint(requested_url)
+    for url, api_key in candidates:
+        if _normalize_endpoint(url) == wanted:
+            return url, api_key
+    raise ValueError(f"Stash-box endpoint is not configured in Stash: {requested_url}")
+
+
 def get_settings_from_config(stash_config):
     """
     Extract plugin settings from Stash configuration.
@@ -256,10 +342,8 @@ def get_settings_from_config(stash_config):
     config = stash_config or {}
 
     return {
-        # Legacy plugin-level stashdbEndpoint/stashdbApiKey are intentionally
-        # not part of YAML defaults. Stash-box endpoints are preferred.
-        "stashdb_url": config.get("stashdbEndpoint", "https://stashdb.org/graphql"),
-        "stashdb_api_key": config.get("stashdbApiKey", ""),
+        # Stash-box URL and API key are not read from here: resolve_stashbox()
+        # takes them from Stash's config.
         "enable_fuzzy": config.get("enableFuzzySearch", DEFAULT_PLUGIN_SETTINGS["enableFuzzySearch"]),
         "enable_synonyms": config.get("enableSynonymSearch", DEFAULT_PLUGIN_SETTINGS["enableSynonymSearch"]),
         "fuzzy_threshold": safe_int(config.get("fuzzyThreshold", DEFAULT_PLUGIN_SETTINGS["fuzzyThreshold"]), DEFAULT_PLUGIN_SETTINGS["fuzzyThreshold"]),
@@ -538,25 +622,25 @@ def main():
     # For now, settings come from args (JS passes them)
     settings = get_settings_from_config(args.get("settings", {}))
 
-    # Stash-box URL and API key can come from args (for multi-endpoint support)
-    stashdb_url = args.get("stashdb_url") or settings["stashdb_url"]
-    stashdb_api_key = args.get("stashdb_api_key") or settings["stashdb_api_key"]
-
-    log.LogDebug(f"Using endpoint: {stashdb_url}")
+    # The UI says which stash-box it has selected; the URL we use (also the cache key)
+    # and its API key come from Stash's config. Scene sync resolves its own below.
+    if mode != "sync_scene_tags":
+        try:
+            stash_config = stash_graphql(server_connection, STASHBOX_CONFIG_QUERY).get("configuration") or {}
+            stashdb_url, stashdb_api_key = resolve_stashbox(args.get("stashdb_url"), stash_config)
+        except Exception as e:
+            log.LogError(f"Could not resolve stash-box endpoint: {e}")
+            print(json.dumps({"output": {"error": str(e)}}))
+            return
+        log.LogDebug(f"Using endpoint: {stashdb_url}")
 
     # Cache status doesn't require API key
     if mode == "get_cache_status":
-        if not stashdb_url:
-            print(json.dumps({"output": {"error": "No endpoint URL provided"}}))
-            return
         result = handle_get_cache_status(stashdb_url)
         print(json.dumps({"output": result}))
         return
 
     if mode == "clear_cache":
-        if not stashdb_url:
-            print(json.dumps({"output": {"error": "No endpoint URL provided"}}))
-            return
         result = handle_clear_cache(stashdb_url)
         print(json.dumps({"output": result}))
         return

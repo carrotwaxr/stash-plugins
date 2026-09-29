@@ -5,9 +5,16 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, abort, jsonify, render_template, request
 
 from stash_client import StashClient
+
+PORT = 5001
+
+# Only answer requests addressed to this machine by a loopback name. Checking Host
+# blocks DNS rebinding; checking Origin on POST blocks cross-site requests.
+ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+ALLOWED_ORIGINS = {f"http://{host}" for host in ALLOWED_HOSTS}
 
 
 def create_app() -> Flask:
@@ -41,6 +48,13 @@ def create_app() -> Flask:
     all_tags = client.get_all_tags()
     print(f"Loaded {len(all_tags)} tags for autocomplete")
 
+    @app.before_request
+    def check_host_and_origin():
+        if request.host not in ALLOWED_HOSTS:
+            abort(403)
+        if request.method != "GET" and request.headers.get("Origin") not in ALLOWED_ORIGINS:
+            abort(403)
+
     @app.route("/")
     def index():
         """Serve the scene file deduper page."""
@@ -68,18 +82,17 @@ def create_app() -> Flask:
         scene_id = data.get("scene_id")
         file_ids_to_delete = data.get("file_ids_to_delete", [])
         keep_file_id = data.get("keep_file_id")
-        all_file_ids = data.get("all_file_ids", [])
 
         # Validate required fields exist
-        if not scene_id or not file_ids_to_delete or not keep_file_id or not all_file_ids:
+        if not scene_id or not file_ids_to_delete or not keep_file_id:
             return jsonify({"success": False, "error": "Missing required fields"}), 400
 
         # Validate field types
         if not isinstance(scene_id, str) or not isinstance(keep_file_id, str):
             return jsonify({"success": False, "error": "scene_id and keep_file_id must be strings"}), 400
-        if not isinstance(file_ids_to_delete, list) or not isinstance(all_file_ids, list):
-            return jsonify({"success": False, "error": "file_ids_to_delete and all_file_ids must be arrays"}), 400
-        if not all(isinstance(f, str) for f in file_ids_to_delete + all_file_ids):
+        if not isinstance(file_ids_to_delete, list):
+            return jsonify({"success": False, "error": "file_ids_to_delete must be an array"}), 400
+        if not all(isinstance(f, str) for f in file_ids_to_delete):
             return jsonify({"success": False, "error": "All file IDs must be strings"}), 400
 
         try:
@@ -87,9 +100,10 @@ def create_app() -> Flask:
                 scene_id=scene_id,
                 file_ids_to_delete=file_ids_to_delete,
                 keep_file_id=keep_file_id,
-                all_file_ids=all_file_ids,
             )
             return jsonify({"success": result})
+        except ValueError as e:
+            return jsonify({"success": False, "error": str(e)}), 400
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
 
@@ -98,5 +112,5 @@ def create_app() -> Flask:
 
 if __name__ == "__main__":
     app = create_app()
-    print("Open http://localhost:5001 in your browser")
-    app.run(host="127.0.0.1", port=5001, debug=False)
+    print(f"Open http://localhost:{PORT} in your browser")
+    app.run(host="127.0.0.1", port=PORT, debug=False)

@@ -8,13 +8,18 @@ Configure environment variables:
   - STASH_URL (default: http://localhost:9999)
   - STASH_API_KEY (optional)
 
-Run with: python -m pytest tests/test_integration_sync.py -v
+Run with: STASH_PLUGINS_INTEGRATION=1 python -m pytest tests/test_integration_sync.py -v
 """
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Live integration tests. Require an explicit opt-in, checked before any .env is
+# loaded: ~/code/.env may point STASH_URL at a production Stash.
+if os.environ.get("STASH_PLUGINS_INTEGRATION") != "1":
+    raise unittest.SkipTest("set STASH_PLUGINS_INTEGRATION=1 to run live integration tests")
 
 from dotenv import load_dotenv
 

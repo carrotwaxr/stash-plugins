@@ -1,6 +1,6 @@
 name: Tag Manager
 description: Match and sync local tags with stash-box endpoints. Features multi-endpoint support, tag caching, layered search (exact, fuzzy, synonym), and field-by-field merge dialog.
-version: 0.6.0
+version: 0.6.1
 url: https://github.com/carrotwaxr/stash-plugins
 
 ui:
@@ -8,8 +8,9 @@ ui:
     - tag-manager.js
   css:
     - tag-manager.css
+  # Served under /plugin/tagManager/assets/. Keep this to files the UI fetches.
   assets:
-    /: .
+    /: assets
 
 settings:
   enableFuzzySearch:

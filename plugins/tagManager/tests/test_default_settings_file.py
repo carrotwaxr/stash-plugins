@@ -16,7 +16,7 @@ import yaml
 def _defaults_path():
     tests_dir = os.path.dirname(os.path.abspath(__file__))
     plugin_dir = os.path.dirname(tests_dir)
-    return os.path.join(plugin_dir, "default_settings.json")
+    return os.path.join(plugin_dir, "assets", "default_settings.json")
 
 
 def _plugin_yml_path():

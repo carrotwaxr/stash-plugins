@@ -16,6 +16,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Live integration tests. Require an explicit opt-in, checked before any .env is
+# loaded: ~/code/.env may point STASH_URL at a production Stash.
+if os.environ.get("STASH_PLUGINS_INTEGRATION") != "1":
+    raise unittest.SkipTest("set STASH_PLUGINS_INTEGRATION=1 to run live integration tests")
+
 from stashdb_api import query_all_tags, search_tags_by_name
 from matcher import TagMatcher
 

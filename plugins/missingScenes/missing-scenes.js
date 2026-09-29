@@ -379,16 +379,17 @@
     }
 
     // Build stats HTML - when filters are active, indicate filtered results
-    let stashdbLabel = `On ${data.stashdb_name || "StashDB"}:`;
-    let stashdbValue = `${data.total_on_stashdb || 0}`;
+    const stashdbName = escapeHtml(data.stashdb_name || "StashDB");
+    let stashdbLabel = `On ${stashdbName}:`;
+    let stashdbValue = escapeHtml(data.total_on_stashdb || 0);
     if (filtersActive) {
-      stashdbLabel = `Total on ${data.stashdb_name || "StashDB"}:`;
+      stashdbLabel = `Total on ${stashdbName}:`;
     }
 
     statsEl.innerHTML = `
       <div class="ms-stat">
         <span class="ms-stat-label">${entityLabel}:</span>
-        <span class="ms-stat-value">${data.entity_name || "Unknown"}</span>
+        <span class="ms-stat-value">${escapeHtml(data.entity_name || "Unknown")}</span>
       </div>
       <div class="ms-stat">
         <span class="ms-stat-label">${stashdbLabel}</span>
@@ -396,11 +397,11 @@
       </div>
       <div class="ms-stat">
         <span class="ms-stat-label">You Have:</span>
-        <span class="ms-stat-value">${data.total_local || 0}</span>
+        <span class="ms-stat-value">${escapeHtml(data.total_local || 0)}</span>
       </div>
       <div class="ms-stat ms-stat-highlight">
         <span class="ms-stat-label">Missing${filtersActive ? " (filtered)" : ""}:</span>
-        <span class="ms-stat-value">${missingDisplay}</span>
+        <span class="ms-stat-value">${escapeHtml(missingDisplay)}</span>
       </div>
     `;
 

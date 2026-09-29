@@ -113,30 +113,53 @@ class StashClient:
         data = self._execute(query, {"ids": file_ids})
         return data["deleteFiles"]
 
+    def get_scene_file_ids(self, scene_id: str) -> list[str]:
+        """Return a scene's file IDs, primary first."""
+        query = """
+        query SceneFiles($id: ID!) {
+          findScene(id: $id) {
+            files {
+              id
+            }
+          }
+        }
+        """
+        data = self._execute(query, {"id": scene_id})
+        scene = data.get("findScene")
+        if not scene:
+            raise ValueError(f"Scene {scene_id} not found")
+        return [f["id"] for f in scene["files"]]
+
     def delete_scene_files(
         self,
         scene_id: str,
         file_ids_to_delete: list[str],
         keep_file_id: str,
-        all_file_ids: list[str],
     ) -> bool:
         """
-        Delete specified files from a scene, handling primary file logic.
+        Delete files from a scene, keeping keep_file_id.
 
-        If the primary file (first in list) is being deleted, we first set
-        the keep_file_id as primary, then delete the others.
+        The scene's file list comes from Stash, not the caller. Every file to
+        delete and the kept file must belong to the scene, and the kept file
+        can't be in the delete list. If the primary file is being deleted,
+        keep_file_id becomes primary first.
 
-        Args:
-            scene_id: The scene ID
-            file_ids_to_delete: File IDs to delete
-            keep_file_id: The file ID to keep (will be set as primary if needed)
-            all_file_ids: All file IDs in order (first is primary)
+        Raises:
+            ValueError: If the request doesn't match the scene's files
         """
-        primary_file_id = all_file_ids[0] if all_file_ids else None
+        scene_file_ids = self.get_scene_file_ids(scene_id)
+        to_delete = list(dict.fromkeys(file_ids_to_delete))
+
+        if keep_file_id not in scene_file_ids:
+            raise ValueError("The file to keep does not belong to this scene")
+        if keep_file_id in to_delete:
+            raise ValueError("The file to keep is also in the delete list")
+        strays = [f for f in to_delete if f not in scene_file_ids]
+        if strays:
+            raise ValueError(f"Files do not belong to this scene: {', '.join(strays)}")
 
         # If we're deleting the primary file, set the keep file as primary first
-        if primary_file_id in file_ids_to_delete:
+        if scene_file_ids[0] in to_delete:
             self.set_scene_primary_file(scene_id, keep_file_id)
 
-        # Now delete the files
-        return self.delete_files(file_ids_to_delete)
+        return self.delete_files(to_delete)

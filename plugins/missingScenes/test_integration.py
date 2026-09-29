@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Integration tests for Missing Scenes plugin.
-Run with: python test_integration.py
+Run with: STASH_PLUGINS_INTEGRATION=1 python test_integration.py
 
 These tests require a real Stash instance with favorites configured.
 Configuration is loaded from .env file in this directory.
@@ -18,6 +18,19 @@ import unittest
 import json
 from pathlib import Path
 
+# These scripts hit live services. Require an explicit opt-in, checked before .env is
+# read so that a .env file can't opt in on its own (it may point at a production Stash).
+def _skip(reason):
+    """Skip under pytest or unittest; exit with a message when run as a script."""
+    if __name__ == "__main__":
+        print(reason)
+        sys.exit(2)
+    raise unittest.SkipTest(reason)
+
+
+if os.environ.get("STASH_PLUGINS_INTEGRATION") != "1":
+    _skip("Live integration script: set STASH_PLUGINS_INTEGRATION=1 to run it.")
+
 # Load environment variables from .env file
 env_path = Path(__file__).parent / ".env"
 if env_path.exists():
@@ -26,7 +39,8 @@ if env_path.exists():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
-                os.environ[key.strip()] = value.strip()
+                # Values already in the environment win over .env
+                os.environ.setdefault(key.strip(), value.strip())
 
 # Check required environment variables
 STASH_URL = os.environ.get("STASH_URL")

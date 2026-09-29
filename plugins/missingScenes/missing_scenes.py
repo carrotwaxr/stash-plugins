@@ -25,10 +25,19 @@ import log
 import stashbox_api
 import theporndb_api
 
-# Create SSL context that doesn't verify certificates (for self-signed certs)
-SSL_CONTEXT = ssl.create_default_context()
-SSL_CONTEXT.check_hostname = False
-SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+# The plugin's own Stash server runs on this host. With HTTPS its cert names a public
+# host while we connect via localhost, so hostname checks would fail. Don't verify.
+STASH_SSL_CONTEXT = stashbox_api.create_ssl_context(verify=False)
+
+# Whisparr: verified unless the user opts out (whisparrSkipTlsVerify) for a self-signed cert
+WHISPARR_SSL_CONTEXT = stashbox_api.create_ssl_context()
+
+
+def configure_tls(plugin_settings):
+    """Apply TLS-related plugin settings."""
+    global WHISPARR_SSL_CONTEXT
+    if plugin_settings.get("whisparrSkipTlsVerify"):
+        WHISPARR_SSL_CONTEXT = stashbox_api.create_ssl_context(verify=False)
 
 
 # ============================================================================
@@ -122,44 +131,6 @@ def decode_cursor(cursor: str) -> dict | None:
 
 
 # ============================================================================
-# GraphQL Helpers (for local Stash and Whisparr - not StashDB)
-# ============================================================================
-
-def graphql_request(url, query, variables=None, api_key=None, timeout=30):
-    """Make a GraphQL request to the specified endpoint (local Stash only)."""
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-
-    if api_key:
-        headers["ApiKey"] = api_key
-
-    data = json.dumps({
-        "query": query,
-        "variables": variables or {}
-    }).encode("utf-8")
-
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
-            result = json.loads(response.read().decode("utf-8"))
-            if "errors" in result:
-                log.LogWarning(f"GraphQL errors: {result['errors']}")
-            return result.get("data")
-    except urllib.error.HTTPError as e:
-        log.LogError(f"HTTP error {e.code}: {e.reason}")
-        raise
-    except urllib.error.URLError as e:
-        log.LogError(f"URL error: {e.reason}")
-        raise
-    except Exception as e:
-        log.LogError(f"Request error: {e}")
-        raise
-
-
-# ============================================================================
 # Local Stash API
 # ============================================================================
 
@@ -228,7 +199,7 @@ def stash_graphql(query, variables=None):
     req = urllib.request.Request(conn["url"], data=data, headers=headers, method="POST")
 
     try:
-        with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as response:
+        with urllib.request.urlopen(req, timeout=30, context=STASH_SSL_CONTEXT) as response:
             result = json.loads(response.read().decode("utf-8"))
             if "errors" in result:
                 log.LogWarning(f"Stash GraphQL errors: {result['errors']}")
@@ -723,7 +694,7 @@ def whisparr_request(whisparr_url, api_key, endpoint, method="GET", payload=None
 
     log.LogDebug(f"[Whisparr] Starting {method} request to {endpoint}...")
     try:
-        with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as response:
+        with urllib.request.urlopen(req, timeout=30, context=WHISPARR_SSL_CONTEXT) as response:
             body = response.read().decode("utf-8")
             log.LogDebug(f"[Whisparr] {method} {endpoint} completed successfully")
             # DELETE requests return empty body on success
@@ -733,6 +704,16 @@ def whisparr_request(whisparr_url, api_key, endpoint, method="GET", payload=None
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") if e.fp else ""
         log.LogError(f"Whisparr HTTP error {e.code}: {e.reason} - {body}")
+        raise
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ssl.SSLCertVerificationError):
+            log.LogError(
+                f"Whisparr TLS certificate verification failed: {e.reason}. "
+                "If Whisparr uses a self-signed certificate, enable "
+                "'Whisparr: Skip TLS Verification' in the plugin settings."
+            )
+        else:
+            log.LogError(f"Whisparr request error: {e}")
         raise
     except Exception as e:
         log.LogError(f"Whisparr request error: {e}")
@@ -2544,6 +2525,8 @@ def main():
             plugin_settings = plugins_config.get("missingScenes", {})
     except Exception as e:
         log.LogWarning(f"Could not load plugin settings: {e}")
+
+    configure_tls(plugin_settings)
 
     # Check if this is a hook call
     hook_context = input_data.get("args", {}).get("hookContext")
