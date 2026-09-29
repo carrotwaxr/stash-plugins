@@ -22,6 +22,7 @@
   let isLoading = false;
   let isCacheLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
+  let matchErrors = {}; // tag_id -> error text of its last failed search (no matchResults entry then)
   let fuzzyHintShown = false; // the "fuzzy matching unavailable" hint shows once per page visit
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
   let categoryMappingsLoaded = false; // true once the stored mappings were read (or found empty)
@@ -3451,6 +3452,12 @@
           <button class="btn btn-secondary btn-sm tm-more" data-tag-id="${tag.id}">More</button>
         </div>
       `;
+    } else if (matchErrors[tag.id]) {
+      // The Find Match handler (.tm-search) retries the search
+      matchContent = `
+        <span class="tm-no-match tm-search-failed">Search failed: ${escapeHtml(matchErrors[tag.id])}</span>
+        <button class="btn btn-primary btn-sm tm-search" data-tag-id="${tag.id}">Retry</button>
+      `;
     } else if (matches !== undefined) {
       const hidden = (matches?.length || 0);
       matchContent = `
@@ -3609,6 +3616,7 @@
         // Clear cached data for previous endpoint
         stashdbTags = null;
         matchResults = {};
+        matchErrors = {};
         cacheStatus = null;
         selectedForImport = new Set();
         // Load cache status for new endpoint
@@ -3744,12 +3752,15 @@
           tag_name: tag.name,
         });
         matchResults[tag.id] = result.matches || [];
+        delete matchErrors[tag.id];
         if (result.fuzzy_unavailable) fuzzyUnavailable = true;
       } catch (e) {
         console.error(`[tagManager] Error searching for ${tag.name}:`, e);
-        matchResults[tag.id] = [];
+        const text = backendErrorText(e);
+        delete matchResults[tag.id];
+        matchErrors[tag.id] = text;
         if (!searchError) {
-          searchError = backendErrorText(e);
+          searchError = text;
         }
       }
     }
@@ -3772,11 +3783,16 @@
         tag_name: tag.name,
       });
       matchResults[tagId] = result.matches || [];
+      delete matchErrors[tagId];
       renderPage(container);
       if (result.fuzzy_unavailable) showFuzzyUnavailableHint();
     } catch (e) {
       console.error(`[tagManager] Error searching for ${tag.name}:`, e);
-      showStatus(`Error: ${backendErrorText(e)}`, 'error');
+      const text = backendErrorText(e);
+      delete matchResults[tagId];
+      matchErrors[tagId] = text;
+      renderPage(container);
+      showStatus(`Error: ${text}`, 'error');
     }
   }
 
@@ -4753,6 +4769,7 @@
           tag_name: term,
         });
         matchResults[tagId] = result.matches || [];
+        delete matchErrors[tagId];
         if (result.fuzzy_unavailable) showFuzzyUnavailableHint();
 
         // Re-render matches list
@@ -6469,7 +6486,7 @@
       searchSingleTag,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
-      localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,
+      localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults, matchErrors,
       categoryMappings, tagBlacklist, isImporting, pendingChanges, isEditMode, cacheStatus,
       selectedForImport, hierarchyTags, hierarchyTree, expandedNodes, selectedTagId, copiedTagId,
       originalParentMap, blacklistDraft, blacklistPanelOpen, tagBlacklistRaw,
@@ -6481,6 +6498,7 @@
       if ("selectedStashBox" in patch) selectedStashBox = patch.selectedStashBox;
       if ("stashdbTags" in patch) stashdbTags = patch.stashdbTags;
       if ("matchResults" in patch) matchResults = patch.matchResults;
+      if ("matchErrors" in patch) matchErrors = patch.matchErrors;
       if ("categoryMappings" in patch) categoryMappings = patch.categoryMappings;
       if ("tagBlacklist" in patch) tagBlacklist = patch.tagBlacklist;
       if ("isImporting" in patch) isImporting = patch.isImporting;

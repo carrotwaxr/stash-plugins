@@ -1,12 +1,13 @@
 /**
- * Backend error formatting, tag loading without fuzzy search, and the
- * once-per-visit hint when a search reports fuzzy matching unavailable.
+ * Backend error formatting, tag loading without fuzzy search, the
+ * once-per-visit hint when a search reports fuzzy matching unavailable, and
+ * failed searches shown as failures (not as "no matches").
  * Run with: node plugins/tagManager/tests/test_backend_errors.js
  */
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
-const { loadTagManager } = require("./harness");
+const { loadTagManager, createElement, createQueryableElement } = require("./harness");
 
 const RPO = (out) => ({ data: { runPluginOperation: out } });
 const BOX = { endpoint: "https://stashdb.org/graphql", name: "StashDB" };
@@ -122,6 +123,64 @@ const HINT = /Fuzzy matching is unavailable until the stash-box tags are cached\
       await tm.exports.searchSingleTag("1", container);
       assert.ok(!statuses.some((s) => HINT.test(s)), JSON.stringify([out, patch, statuses]));
     }
+  }
+
+  // A failed search shows as a failure (with a retry), not as "No matches found"
+  {
+    const failing = new Set(["Two"]);
+    const tm = loadTagManager({
+      fetchResponses: {
+        RunPluginOperation: (body) => {
+          const a = body.variables.args;
+          if (a.mode === "get_cache_status") return RPO({ exists: false });
+          if (failing.has(a.tag_name)) return RPO({ error: "HTTP 502" });
+          return RPO({ matches: [{ tag: { id: "sb-" + a.tag_name, name: a.tag_name }, match_type: "exact", score: 100 }] });
+        },
+      },
+    });
+    await tm.settle();
+    const statuses = recordStatuses(tm);
+    matchPage(tm, TAGS3);
+    const container = { innerHTML: "", querySelector: () => null, querySelectorAll: () => [] };
+    await tm.exports.searchAllOnPage(container);
+    let st = tm.getState();
+    assert.deepStrictEqual(Object.keys(st.matchResults).sort(), ["1", "3"], JSON.stringify(st.matchResults));
+    assert.strictEqual(JSON.stringify(st.matchErrors), JSON.stringify({ "2": "HTTP 502" }));
+    assert.ok(statuses.some((s) => /HTTP 502/.test(s)), JSON.stringify(statuses));
+    let row = tm.exports.renderTagRow(TAGS3[1]);
+    assert.ok(/Search failed: HTTP 502/.test(row), row);
+    assert.ok(!/No matches/.test(row), row);
+    assert.ok(/class="[^"]*\btm-search\b[^"]*" data-tag-id="2"/.test(row), "retry uses the Find Match handler: " + row);
+    assert.ok(/tm-match-name">One</.test(tm.exports.renderTagRow(TAGS3[0])));
+
+    // the retry succeeds: error cleared, results shown
+    failing.clear();
+    await tm.exports.searchSingleTag("2", container);
+    st = tm.getState();
+    assert.ok(!("2" in st.matchErrors), JSON.stringify(st.matchErrors));
+    assert.strictEqual(st.matchResults["2"].length, 1);
+    assert.ok(!/Search failed/.test(tm.exports.renderTagRow(TAGS3[1])));
+
+    // a failed single-tag search is recorded the same way (old results dropped)
+    failing.add("One");
+    await tm.exports.searchSingleTag("1", container);
+    st = tm.getState();
+    assert.ok(!("1" in st.matchResults), JSON.stringify(st.matchResults));
+    assert.strictEqual(st.matchErrors["1"], "HTTP 502");
+    assert.ok(/Search failed: HTTP 502/.test(tm.exports.renderTagRow(TAGS3[0])));
+
+    // a page search that succeeds for it clears the error as well
+    failing.clear();
+    await tm.exports.searchAllOnPage(container);
+    assert.strictEqual(JSON.stringify(tm.getState().matchErrors), "{}");
+
+    // switching stash-box drops the errors along with the results
+    tm.setState({ matchErrors: { "3": "HTTP 502" }, stashBoxes: [{ ...BOX }, { endpoint: "https://tpdb/graphql", name: "TPDB" }] });
+    const select = createElement("select");
+    const page = createQueryableElement("div", { query: (sel) => (sel === "#tm-stashbox" ? select : undefined) });
+    tm.exports.renderPage(page);
+    await select.listeners.change[0]({ target: { value: "https://tpdb/graphql" } });
+    assert.strictEqual(JSON.stringify(tm.getState().matchErrors), "{}");
   }
 
   // Init path (React component, not reachable via harness): source-level guards
