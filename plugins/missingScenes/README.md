@@ -57,9 +57,12 @@ ThePornDB endpoints work like a stash-box. Differences:
 ### Errors and partial results
 
 - A stash-box failure is shown as an error, not as "you have everything".
-- When a request fails part-way, or the page limit (50 stash-box pages per request) is reached, the scenes found so far are shown with a **Retry from here** button that continues from where it stopped.
+- When a request fails part-way, the scenes found so far stay, with the error and a **Retry from here** button that continues from the failed page. If no missing scene had turned up yet, you get the error and **Retry from here**, never "You have all available scenes!".
+- One request reads at most 50 stash-box pages (5000 scenes). If the page isn't full by then (you own most scenes, or a favorites filter matches few), the scenes found so far are shown with **Load More**, which continues from the next page. With none found yet the view says "No missing scenes in the pages checked so far" and still offers **Load More**.
+- Listings stop at the stash-box's page limit (page 1000, 100,000 scenes). **Load More** there says the limit was reached; narrow the search with a favorites filter or another sort.
+- With a favorites filter and no favorites of that type linked to the stash-box, the view says "You have no favorite ... linked to ..." instead of "all found".
 - A rejected key shows a hint to check the API key in Settings > Metadata Providers.
-- On rate limits (HTTP 429) the plugin waits for the stash-box's `Retry-After` (within a 60 second budget per request), or 10 seconds when none is given, then tells you to try again shortly if it is still limited. Raise **Request Delay** if this happens often.
+- On rate limits (HTTP 429) the plugin waits for the stash-box's `Retry-After` (within a 60 second budget per request), or 10 seconds when none is given, then tells you to try again shortly if it is still limited. ThePornDB requests follow the same rules. Raise **Request Delay** if this happens often.
 
 ## Fingerprint Index
 
@@ -227,7 +230,7 @@ The stash-box failed or rate-limited the request. Use **Retry from here**, and c
 They probably have no stash ID for this stash-box. Run **Build Fingerprint Index** (and leave **Ignore Fingerprint Matches** off), or tag them with the Tagger.
 
 ### Results seem incomplete
-One request reads up to 50 stash-box pages (5000 scenes). If that limit is reached the plugin says so and offers **Retry from here** to continue. It never reports "all found" for a truncated list.
+One request reads up to 50 stash-box pages (5000 scenes). If the page isn't full by then, **Load More** continues from the next page; when nothing was found yet the view says "No missing scenes in the pages checked so far". A failed page shows the error with **Retry from here**. Neither reports "all found" for a truncated list. Listings end at the stash-box's page limit (page 1000), and **Load More** there says so.
 
 ## Technical Details
 

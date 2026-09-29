@@ -5,7 +5,7 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 ## Missing Scenes
 
 ### 1.5.0
-- Stash-box failures, rate limits and truncated results now show as errors or partial results with **Retry from here**. Missing Scenes no longer says you have everything when a request failed or hit the page limit.
+- Stash-box and ThePornDB failures and rate limits now show as errors or partial results with **Retry from here**, and a search that stops at the 50-page limit offers **Load More**. Missing Scenes no longer says you have everything when a request failed or stopped early, even before any missing scene turned up.
 - The scene index is kept in Stash's config dir (`plugin_data/missingScenes/`), so it survives plugin updates.
 - ThePornDB responses are parsed tolerantly, and browsing several favorites merges up to 10 requests. Excluded tags are not applied to ThePornDB.
 - Whisparr: v3 only, and only for StashDB scenes (other boxes show a hint instead of the Add button). The URL accepts `host:port` and a URL Base. New **Test Whisparr Connection** task, clearer errors, and a banner when Whisparr can't be read. Auto-cleanup never deletes an entry that is downloading or whose ID doesn't match. **Search on Add** is off by default.
