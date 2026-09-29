@@ -3,13 +3,18 @@ Unit tests for blacklist module.
 Run with: python -m pytest plugins/tagManager/tests/test_blacklist.py -v
 """
 
+import contextlib
+import io
+import json
 import pytest
 import sys
 import os
+from unittest.mock import patch
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import blacklist
 from blacklist import Blacklist
 
 
@@ -117,3 +122,30 @@ class TestBlacklistFilter:
         filtered, hidden = bl.filter_tags(tags)
         assert len(filtered) == 0
         assert hidden == 2
+
+
+CASES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'blacklist_cases.json')
+
+
+def test_cases_file():
+    with open(CASES_PATH, encoding='utf-8') as f:
+        cases = json.load(f)
+    assert cases
+    with patch('blacklist.log.LogWarning'):
+        for case in cases:
+            bl = Blacklist(case['input'])
+            for name, expected in case['matches'].items():
+                assert bl.is_blacklisted(name) is expected, (case['input'], name)
+
+
+def test_bad_regex_warns_not_stdout():
+    buf = io.StringIO()
+    with patch('blacklist.log.LogWarning') as warn, contextlib.redirect_stdout(buf):
+        bl = Blacklist('/[/')
+    assert buf.getvalue() == ''
+    assert warn.called
+    assert bl.count == 0
+
+
+def test_split_patterns_raw_tokens():
+    assert blacklist.split_patterns('/a{1,3}b/i, Foo ;Bar\n/^x') == ['/a{1,3}b/i', 'Foo', 'Bar', '/^x']
