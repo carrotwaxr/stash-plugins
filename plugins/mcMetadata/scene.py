@@ -3,7 +3,7 @@ from collections import Counter
 import utils.logger as log
 from performer import process_performer
 from utils.files import download_image, find_sidecars, rename_file, replace_file_ext
-from utils.nfo import _is_plex, build_nfo_xml
+from utils.nfo import _is_plex, _count_videos, artwork_filenames, artwork_templates, build_nfo_xml, is_folder_level, _render
 from utils.paths import is_inside
 from utils.replacer import get_new_path
 from utils.self_updates import consume, mark
@@ -130,9 +130,12 @@ def process_scene(scene, stash, settings, api_key):
     # if not, function will just return the current path and we'll proceed with that
     target_video_path = __rename_videos(scene, stash, settings)
 
-    # overwrite nfo named after file, at file location (use renamed path if applicable)
-    nfo_path = replace_file_ext(target_video_path, "nfo")
-    __write_nfo(scene, nfo_path, settings, target_video_path, api_key)
+    names = artwork_filenames(settings, target_video_path)
+    folder = os.path.dirname(target_video_path)
+
+    # overwrite the nfo at file location (use renamed path if applicable)
+    if names["nfo"]:
+        __write_nfo(scene, os.path.join(folder, names["nfo"]), settings, target_video_path, api_key)
 
     # copy any performer images to people directory
     for performer in scene["performers"] or []:
@@ -141,18 +144,14 @@ def process_scene(scene, stash, settings, api_key):
         except Exception as err:
             log.error(f"Error processing performer image for {performer.get('name', 'unknown')}: {err}")
 
-    # download any missing artwork images from stash into path
-    poster_path = replace_file_ext(target_video_path, "jpg", "-poster")
-    if not os.path.exists(poster_path):
-        screenshot_url = f"{scene['paths']['screenshot']}&apikey={api_key}"
-        download_image(screenshot_url, poster_path, settings)
-
-    # Plex reads <stem>-fanart.jpg as the movie background (plex mode only)
-    if _is_plex(settings):
-        fanart_path = replace_file_ext(target_video_path, "jpg", "-fanart")
-        if not os.path.exists(fanart_path):
+    # download any missing artwork images from stash into path (poster, then backdrop)
+    for key in ("poster", "backdrop"):
+        if not names[key]:
+            continue
+        image_path = os.path.join(folder, names[key])
+        if not os.path.exists(image_path):
             screenshot_url = f"{scene['paths']['screenshot']}&apikey={api_key}"
-            download_image(screenshot_url, fanart_path, settings)
+            download_image(screenshot_url, image_path, settings)
 
 
 def __hydrate_scene(scene, stash):
@@ -258,6 +257,11 @@ def __rename_videos(scene, stash, settings):
     original_primary_path = files_to_process[0]["path"]  # Store before loop
     used_paths = set()  # Track paths we've used to detect conflicts
     files_moved = False  # Track if any files were actually moved
+    # Videos per source folder before anything moves: folder-level files (movie.nfo,
+    # poster.jpg ...) only travel from a folder that held just this one video
+    folder_video_counts = {
+        os.path.dirname(f["path"]): _count_videos(os.path.dirname(f["path"])) for f in files_to_process
+    }
 
     for idx, file_info in enumerate(files_to_process):
         video_path = file_info["path"]
@@ -322,6 +326,7 @@ def __rename_videos(scene, stash, settings):
             log.info(f"[DRY RUN] Would move file {idx + 1}: {video_path}")
             log.info(f"[DRY RUN]                    To: {expected_path}")
             __relocate_sidecars(video_path, expected_path, __collect_sidecars(video_path, settings), settings)
+            __relocate_folder_level(video_path, expected_path, folder_video_counts, settings)
             if idx == 0:
                 primary_path = video_path
             continue
@@ -347,6 +352,7 @@ def __rename_videos(scene, stash, settings):
             # Runs before the organized update: that update fires the Scene.Update.Post
             # hook, which must find the NFO and poster already at their new paths.
             __relocate_sidecars(video_path, expected_path, sidecars, settings)
+            __relocate_folder_level(video_path, expected_path, folder_video_counts, settings)
 
         except Exception as err:
             log.error(f"Error moving file {idx + 1} for Scene {scene['id']}: {err}")
@@ -366,10 +372,7 @@ def __collect_sidecars(video_path, settings):
     sidecars = find_sidecars(video_path)
     if settings.get("renamer_move_sidecars", True):
         return sidecars
-    stem = os.path.splitext(os.path.basename(video_path))[0]
-    keep = (stem + ".nfo", stem + "-poster.jpg")
-    if _is_plex(settings):
-        keep += (stem + "-fanart.jpg",)
+    keep = tuple(_render(t, video_path) for t in artwork_templates(settings) if t and not is_folder_level(t))
     return [p for p in sidecars if os.path.basename(p) in keep]
 
 
@@ -386,6 +389,25 @@ def __relocate_sidecars(video_path, new_video_path, sidecars, settings):
             continue
         log.debug(f"Relocating sidecar: {sidecar}")
         rename_file(sidecar, dest, settings)
+
+
+def __relocate_folder_level(video_path, new_video_path, folder_video_counts, settings):
+    """Move folder-level files (movie.nfo, poster.jpg ...) with a video that was alone in its folder."""
+    old_folder = os.path.dirname(video_path)
+    new_folder = os.path.dirname(new_video_path)
+    if old_folder == new_folder or folder_video_counts.get(old_folder) != 1:
+        return
+    for template in artwork_templates(settings):
+        if not template or not is_folder_level(template):
+            continue
+        source = os.path.join(old_folder, template)
+        if not os.path.isfile(source):
+            continue
+        dest = os.path.join(new_folder, template)
+        if settings["dry_run"]:
+            log.info(f"[DRY RUN] Would move folder-level file: {source} -> {dest}")
+            continue
+        rename_file(source, dest, settings)
 
 
 def __mark_organized(scene_id, stash, settings):

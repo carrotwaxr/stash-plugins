@@ -1,5 +1,6 @@
 import os
 import re
+from urllib.parse import urlparse
 from xml.sax.saxutils import escape
 
 import utils.logger as log
@@ -65,6 +66,116 @@ def _is_plex(settings):
     return bool(settings) and str(settings.get("media_server") or "").strip().lower() == "plex"
 
 
+# --- configurable NFO / artwork filenames -------------------------------------------
+
+DEFAULT_NFO_NAME = "{basename}.nfo"
+DEFAULT_POSTER_NAME = "{basename}-poster.jpg"
+PLEX_FANART_NAME = "{basename}-fanart.jpg"
+BASENAME_PLACEHOLDER = "{basename}"
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
+RATING_FIELD_CHOICES = ("both", "rating", "userrating")
+_VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".webm", ".flv", ".ts", ".m2ts")
+_warned = set()
+
+
+def _warn_once(message):
+    if message not in _warned:
+        _warned.add(message)
+        log.warning(message)
+
+
+def _valid_name(value, setting, extensions, default):
+    """A filename template if it is usable, else `default` (with a warning).
+
+    Usable: no path separator, ends in one of `extensions`. Empty means unset.
+    """
+    value = str(value or "").strip()
+    if not value:
+        return default
+    if "/" in value or "\\" in value:
+        _warn_once(f"Ignoring {setting} {value!r}: it must be a file name, not a path")
+        return default
+    if not value.lower().endswith(extensions):
+        _warn_once(f"Ignoring {setting} {value!r}: it must end in {' or '.join(extensions)}")
+        return default
+    return value
+
+
+def _render(template, video_path):
+    stem = os.path.splitext(os.path.basename(video_path))[0]
+    return template.replace(BASENAME_PLACEHOLDER, stem)
+
+
+def is_folder_level(template):
+    """A name without {basename} is shared by every video in the folder."""
+    return BASENAME_PLACEHOLDER not in template
+
+
+def _count_videos(folder):
+    try:
+        return sum(
+            1 for n in os.listdir(folder)
+            if n.lower().endswith(_VIDEO_EXTENSIONS) and os.path.isfile(os.path.join(folder, n))
+        )
+    except OSError:
+        return 0
+
+
+def artwork_templates(settings):
+    """(nfo, poster, backdrop) filename templates from settings; backdrop may be None.
+
+    In plex mode the backdrop falls back to `{basename}-fanart.jpg`; elsewhere it is
+    off unless backdropFilename is set.
+    """
+    settings = settings or {}
+    nfo = _valid_name(settings.get("nfo_filename"), "nfoFilename", (".nfo",), DEFAULT_NFO_NAME)
+    poster = _valid_name(
+        settings.get("poster_filename"), "posterFilename", IMAGE_EXTENSIONS, DEFAULT_POSTER_NAME
+    )
+    backdrop = _valid_name(settings.get("backdrop_filename"), "backdropFilename", IMAGE_EXTENSIONS, None)
+    if backdrop is None and _is_plex(settings):
+        backdrop = PLEX_FANART_NAME
+    return nfo, poster, backdrop
+
+
+def artwork_filenames(settings, video_path, warn=True):
+    """Rendered {"nfo", "poster", "backdrop"} file names for a video (None = don't write).
+
+    Folder-level names (no {basename}: movie.nfo, poster.jpg, folder.jpg ...) are only
+    safe when the folder holds a single video, so they are None otherwise.
+    """
+    nfo, poster, backdrop = artwork_templates(settings)
+    result = {}
+    folder = os.path.dirname(video_path) if video_path else ""
+    for key, template in (("nfo", nfo), ("poster", poster), ("backdrop", backdrop)):
+        if template is None:
+            result[key] = None
+        elif is_folder_level(template) and _count_videos(folder) > 1:
+            if warn:
+                _warn_once(
+                    f"Skipping {template} in {folder}: a folder-level file name needs exactly "
+                    f"one video per folder, and this folder has more"
+                )
+            result[key] = None
+        else:
+            result[key] = _render(template, video_path)
+    return result
+
+
+def _endpoint_type(endpoint):
+    """uniqueid type for a stash-box endpoint URL: stashdb, theporndb, fansdb, else the host."""
+    host = (urlparse(endpoint or "").hostname or "").lower()
+    if not host:
+        return ""
+    if host == "stashdb.org" or host.endswith(".stashdb.org"):
+        return "stashdb"
+    if host == "theporndb.net" or host.endswith(".theporndb.net"):
+        return "theporndb"
+    if host.startswith("fansdb."):
+        return "fansdb"
+    return host
+
+
 def _plex_actor_thumb_url(performer, settings, api_key):
     """Stash performer image URL for a Plex actor <thumb>, or None.
 
@@ -99,6 +210,17 @@ def build_nfo_xml(scene, settings=None, video_path=None, api_key=None):
                 f"Valid: {', '.join(sorted(EXCLUDABLE_FIELDS))}"
             )
 
+    rating_field = str((settings or {}).get("nfo_rating_field") or "both").strip().lower()
+    if rating_field not in RATING_FIELD_CHOICES:
+        _warn_once(
+            f"Ignoring nfoRatingField {rating_field!r}: use one of {', '.join(RATING_FIELD_CHOICES)}"
+        )
+        rating_field = "both"
+    if rating_field == "rating":
+        exclude.add("userrating")
+    elif rating_field == "userrating":
+        exclude.add("rating")
+
     id = scene["id"]
     details = xml_safe(scene["details"]).strip()
 
@@ -123,6 +245,8 @@ def build_nfo_xml(scene, settings=None, video_path=None, api_key=None):
     if scene["studio"] is not None:
         studio = escape_xml(scene["studio"]["name"]).strip()
 
+    director = escape_xml(scene.get("director")).strip()
+
     # A CDATA section cannot contain "]]>": split it across two sections
     plot_cdata = details.replace("]]>", "]]]]><![CDATA[>")
 
@@ -141,6 +265,7 @@ def build_nfo_xml(scene, settings=None, video_path=None, api_key=None):
         "releasedate": (date, f"    <releasedate>{date}</releasedate>"),
         "year": (year, f"    <year>{year}</year>"),
         "studio": (studio, f"    <studio>{studio}</studio>"),
+        "director": (director, f"    <director>{director}</director>"),
     }
 
     for field_name, (value, line) in field_lines.items():
@@ -149,9 +274,9 @@ def build_nfo_xml(scene, settings=None, video_path=None, api_key=None):
 
     # Poster thumb (needs video_path)
     if video_path and not exclude & {"thumb", "poster"}:
-        base = os.path.splitext(os.path.basename(video_path))[0]
-        poster_filename = f"{base}-poster.jpg"
-        lines.append(f'    <thumb aspect="poster">{escape_xml(poster_filename)}</thumb>')
+        poster_filename = artwork_filenames(settings, video_path, warn=False)["poster"]
+        if poster_filename:
+            lines.append(f'    <thumb aspect="poster">{escape_xml(poster_filename)}</thumb>')
 
     # Performers
     for i, p in enumerate([] if "actor" in exclude else scene["performers"]):
@@ -179,7 +304,18 @@ def build_nfo_xml(scene, settings=None, video_path=None, api_key=None):
             lines.append(f"    <tag>{escape_xml(t['name'])}</tag>")
 
     if "uniqueid" not in exclude:
-        lines.append(f'    <uniqueid type="stash">{id}</uniqueid>')
+        lines.append(f'    <uniqueid type="stash" default="true">{id}</uniqueid>')
+        theporndb_ids = []
+        for sid in scene.get("stash_ids") or []:
+            box = _endpoint_type(sid.get("endpoint"))
+            value = escape_xml(sid.get("stash_id")).strip()
+            if not box or not value:
+                continue
+            lines.append(f'    <uniqueid type="{escape_xml(box)}">{value}</uniqueid>')
+            if box == "theporndb":
+                theporndb_ids.append(value)
+        for value in theporndb_ids[:1]:
+            lines.append(f"    <theporndbid>{value}</theporndbid>")
 
     lines.append("</movie>")
 

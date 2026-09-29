@@ -146,3 +146,18 @@ def get_actor_image_path(performer_name, settings):
     except PathEscapeError as err:
         log.warning(f"Skipping performer image for {performer_name!r}: {err}")
         return None
+
+
+def process_performer_hook(stash, performer_id, settings, api_key):
+    """Performer.Update.Post: re-export that performer's image when actor images are on."""
+    if not settings.get("enable_actor_images", False):
+        log.debug(f"Performer {performer_id}: actor images are disabled, skipping")
+        return
+    performer = stash.find_performer(performer_id, False, "id name image_path")
+    if not performer:
+        log.warning(f"Performer {performer_id} not found")
+        return
+    if settings.get("dry_run", False):
+        log.info(f"[DRY RUN] Would re-export image for performer {performer.get('name', performer_id)}")
+        return
+    process_performer(performer, settings, api_key, overwrite=True)

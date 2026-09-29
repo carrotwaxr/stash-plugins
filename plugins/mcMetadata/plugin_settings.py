@@ -58,6 +58,10 @@ def map_settings(plugin_config):
             for f in (plugin_config.get("nfoExcludeFields") or "").split(",")
             if f.strip()
         ],
+        "nfo_filename": plugin_config.get("nfoFilename") or "{basename}.nfo",
+        "poster_filename": plugin_config.get("posterFilename") or "{basename}-poster.jpg",
+        "backdrop_filename": plugin_config.get("backdropFilename") or "",
+        "nfo_rating_field": (plugin_config.get("nfoRatingField") or "both").strip().lower(),
         # Actor images
         "enable_actor_images": plugin_config.get("enableActorImages", False),
         "media_server": plugin_config.get("mediaServer", "jellyfin"),

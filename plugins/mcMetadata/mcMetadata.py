@@ -12,7 +12,7 @@ import sys
 from stashapi.stashapp import StashInterface
 from utils.logger import init_file_logger, close_file_logger
 import utils.logger as log
-from performer import process_all_performers
+from performer import process_all_performers, process_performer_hook
 from scene import process_all_scenes, process_scene
 from conditions import should_process, describe_active_conditions
 from plugin_settings import map_settings
@@ -150,6 +150,10 @@ def main():
             log.info("Starting bulk performer update")
             process_all_performers(stash, SETTINGS, api_key)
             log.info("Bulk performer update completed")
+
+        elif mode == "Performer.Update.Post":
+            # Gated by Enable Actor Images (not Enable Scene Update Hook)
+            process_performer_hook(stash, PLUGIN_ARGS["hookContext"]["id"], SETTINGS, api_key)
 
         elif mode == "Scene.Update.Post":
             if not SETTINGS.get("enable_hook", False):

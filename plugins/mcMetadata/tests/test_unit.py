@@ -101,7 +101,7 @@ class TestBuildNfoXml(unittest.TestCase):
         self.assertIn("<name>John Smith</name>", nfo)
         self.assertIn("<tag>Tag1</tag>", nfo)
         self.assertIn("<tag>Tag2</tag>", nfo)
-        self.assertIn('<uniqueid type="stash">123</uniqueid>', nfo)
+        self.assertIn('<uniqueid type="stash" default="true">123</uniqueid>', nfo)
 
     def test_nfo_escapes_ampersand_in_title(self):
         """Ampersands in title should be escaped (Issue #9)."""

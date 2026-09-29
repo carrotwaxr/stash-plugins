@@ -114,7 +114,7 @@ class TestNFO(unittest.TestCase):
     <originaltitle>someFile.mp4</originaltitle>
     <sorttitle>someFile.mp4</sorttitle>
     <genre>Adult</genre>
-    <uniqueid type="stash">1337</uniqueid>
+    <uniqueid type="stash" default="true">1337</uniqueid>
 </movie>""",
             "The generated XML is wrong",
         )
@@ -159,7 +159,7 @@ class TestNFO(unittest.TestCase):
     <genre>Adult</genre>
     <tag>Threesome</tag>
     <tag>Rough</tag>
-    <uniqueid type="stash">1337</uniqueid>
+    <uniqueid type="stash" default="true">1337</uniqueid>
 </movie>""",
             "The generated XML is wrong",
         )
