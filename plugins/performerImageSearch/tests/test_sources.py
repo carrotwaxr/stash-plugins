@@ -538,6 +538,63 @@ def test_freeones_gallery_without_usable_json_ld_gives_nothing_from_that_page(we
     assert not found.partial
 
 
+def freeones_json_ld(page):
+    """The gallery fixture's JSON-LD block, parsed."""
+    return json.loads(re.search(r'<script type="application/ld\+json">(.*?)</script>', page, re.S).group(1))
+
+
+def with_json_ld(page, data):
+    """page with its JSON-LD block replaced by data."""
+    return re.sub(r'(<script type="application/ld\+json">).*?(</script>)',
+                  lambda m: m.group(1) + json.dumps(data) + m.group(2), page, flags=re.S)
+
+
+def test_freeones_json_ld_gallery_inside_a_graph(web):
+    serve_freeones(web)
+    gallery = freeones_json_ld(fixture("freeones_gallery.html"))
+    del gallery["@context"]
+    graph = {"@context": "https://schema.org", "@graph": [{"@type": "WebPage", "name": "x"}, gallery]}
+    web.routes[FREEONES_GALLERY_1] = with_json_ld(fixture("freeones_gallery.html"), graph)
+    found = image_search.search_freeones(NAME)
+    assert photos(found) == FREEONES_EXPECTED
+
+
+def test_freeones_json_ld_type_as_a_list(web):
+    serve_freeones(web)
+    gallery = freeones_json_ld(fixture("freeones_gallery.html"))
+    gallery["@type"] = ["ImageGallery", "CreativeWork"]
+    web.routes[FREEONES_GALLERY_1] = with_json_ld(fixture("freeones_gallery.html"), gallery)
+    found = image_search.search_freeones(NAME)
+    assert photos(found) == FREEONES_EXPECTED
+
+
+def test_freeones_gallery_without_json_ld_uses_the_unlocked_photo_links(web):
+    serve_freeones(web)
+    page = re.sub(r'<script type="application/ld\+json">.*?</script>', "", fixture("freeones_gallery.html"), flags=re.S)
+    web.routes[FREEONES_GALLERY_1] = page
+    found = image_search.search_freeones(NAME)
+    # Photos 1 and 2 are linked full size (data-size is the linked copy's size); photo 3 is locked
+    linked = [freeones_photo(n, 1440, 2160)[0] for n in (1, 2)]
+    assert photos(found)[:2] == [(url, url, 1440, 2160) for url in linked]
+    assert photos(found)[2:] == freeones_gallery_photos("jj/kk")
+    assert not found.partial
+
+
+def test_freeones_photo_links_skip_crops_and_other_links():
+    page = (
+        '<a data-id="1" href="https://thumbs.freeones.com/photo/s/350x350/center/middle/a/p.jpg" data-size="350x350">x</a>\n'
+        '<a data-id="2" data-type="video" href="https://thumbs.freeones.com/photo/v/1440x0/a/v.jpg" data-size="1440x810">x</a>\n'
+        '<a href="https://thumbs.freeones.com/photo/n/1440x0/a/n.jpg" data-size="1440x960">no data-id</a>\n'
+        '<a data-size="1440x960" href="https://thumbs.freeones.com/photo/q/1440x0/a/q.jpg?x=1&amp;y=2" data-id="3">x</a>\n'
+        '<a data-id="4" href="https://thumbs.freeones.com/photo/r/1440x0/a/r.jpg">no size</a>\n'
+    )
+    assert image_search._freeones_gallery_photos(page) == [
+        ("https://thumbs.freeones.com/photo/q/1440x0/a/q.jpg?x=1&y=2",
+         "https://thumbs.freeones.com/photo/q/1440x0/a/q.jpg?x=1&y=2", 1440, 960),
+        ("https://thumbs.freeones.com/photo/r/1440x0/a/r.jpg", "https://thumbs.freeones.com/photo/r/1440x0/a/r.jpg", 0, 0),
+    ]
+
+
 def test_freeones_photo_without_a_thumbnail_uses_the_image():
     page = (
         '<script type="application/ld+json">{"@type":"ImageGallery","associatedMedia":['

@@ -420,15 +420,30 @@ def _positive_int(value):
 
 
 def _json_ld_objects(html):
-    """The top-level objects in a page's JSON-LD script blocks. Blocks that do not parse are skipped."""
+    """The objects in a page's JSON-LD script blocks: each top-level object, and each one
+    listed in an "@graph". Blocks that do not parse are skipped."""
     objects = []
+
+    def add(data):
+        if isinstance(data, list):
+            for item in data:
+                add(item)
+        elif isinstance(data, dict):
+            objects.append(data)
+            add(data.get("@graph"))
+
     for text in re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S):
         try:
-            data = json.loads(text)
+            add(json.loads(text))
         except ValueError:
             continue
-        objects.extend(data if isinstance(data, list) else [data])
-    return [obj for obj in objects if isinstance(obj, dict)]
+    return objects
+
+
+def _json_ld_is(obj, type_name):
+    """True when a JSON-LD object's @type is type_name, or a list that holds it."""
+    types = obj.get("@type")
+    return type_name in types if isinstance(types, list) else types == type_name
 
 
 def _is_freeones_crop(url):
@@ -444,17 +459,44 @@ def _is_freeones_crop(url):
     return bool(box) and not box.group(1) and "0" not in box.group(2, 3)
 
 
+# An unlocked photo on a FreeOnes gallery page: <a data-id href=".../1440x0/..." data-size="WxH">
+# around a square crop. Other links (sponsors, related galleries) have no data-id.
+FREEONES_PHOTO_LINK = re.compile(r'<a\b(?=[^>]*\sdata-id=)[^>]*>')
+
+
+def _freeones_linked_photos(html):
+    """(image, image, width, height) for each unlocked photo the page links full size.
+
+    width and height are the linked copy's (data-size); there is no small uncropped
+    copy to use as the thumbnail. Crops and links to other media are skipped.
+    """
+    photos = []
+    for tag in FREEONES_PHOTO_LINK.findall(html):
+        href = re.search(r'\shref="([^"]+)"', tag)
+        kind = re.search(r'\sdata-type="([^"]*)"', tag)
+        if not href or (kind and kind.group(1) != "photo"):
+            continue
+        image = unescape(href.group(1))
+        if not image.startswith(("https://", "http://")) or _is_freeones_crop(image):
+            continue
+        size = re.search(r'\sdata-size="(\d+)x(\d+)"', tag)
+        width, height = (int(size.group(1)), int(size.group(2))) if size else (0, 0)
+        photos.append((image, image, width, height))
+    return photos
+
+
 def _freeones_gallery_photos(html):
     """(image, thumbnail, width, height) for each photo of a FreeOnes gallery page.
 
     The page shows only a few photos, as square crops, but its JSON-LD ImageGallery
     lists every one: url is the whole photo resized to 1440px wide, thumbnailUrl a
     small uncropped copy, width and height the original size. Photos listed only as
-    a crop are skipped.
+    a crop are skipped. A page without a usable ImageGallery falls back to the
+    unlocked photos it links (see _freeones_linked_photos).
     """
     photos = []
     for obj in _json_ld_objects(html):
-        if obj.get("@type") != "ImageGallery":
+        if not _json_ld_is(obj, "ImageGallery"):
             continue
         for media in obj.get("associatedMedia") or []:
             if not isinstance(media, dict):
@@ -466,7 +508,7 @@ def _freeones_gallery_photos(html):
             if not isinstance(thumbnail, str) or not thumbnail:
                 thumbnail = image
             photos.append((image, thumbnail, _positive_int(media.get("width")), _positive_int(media.get("height"))))
-    return photos
+    return photos or _freeones_linked_photos(html)
 
 
 def search_freeones(name, max_results=200, max_galleries=20, deadline=None):
