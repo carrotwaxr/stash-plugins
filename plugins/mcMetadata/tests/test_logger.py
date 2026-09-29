@@ -28,6 +28,46 @@ class TestLogFile(unittest.TestCase):
             self.assertIn("second-run", text)
             self.assertEqual(text.count("===== mcMetadata run "), 2)
 
+    def test_one_header_line_per_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "mc.log")
+            for marker in ("first-run", "second-run"):
+                logger.init_file_logger(path)
+                logger._write_to_file("INFO", marker)
+                logger.close_file_logger()
+            lines = open(path, encoding="utf-8").read().splitlines()
+            self.assertNotIn("mcMetadata Log -", "\n".join(lines))
+            headers = [i for i, line in enumerate(lines) if line.startswith("===== mcMetadata run ")]
+            self.assertEqual(len(headers), 2)
+            for i, marker in zip(headers, ("first-run", "second-run")):
+                self.assertTrue(lines[i + 1].endswith(f"[INFO] {marker}"), lines[i:i + 3])
+
+    def test_log_over_5mb_is_rotated(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "mc.log")
+            with open(path + ".1", "w") as f:
+                f.write("oldest")
+            with open(path, "w") as f:
+                f.write("x" * (5 * 1024 * 1024 + 1))
+            logger.init_file_logger(path)
+            logger._write_to_file("INFO", "fresh")
+            logger.close_file_logger()
+            self.assertEqual(os.path.getsize(path + ".1"), 5 * 1024 * 1024 + 1)
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("fresh", text)
+            self.assertLess(len(text), 1000)
+            self.assertEqual(sorted(os.listdir(d)), ["mc.log", "mc.log.1"])
+
+    def test_log_at_5mb_is_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "mc.log")
+            with open(path, "w") as f:
+                f.write("x" * (5 * 1024 * 1024))
+            logger.init_file_logger(path)
+            logger.close_file_logger()
+            self.assertFalse(os.path.exists(path + ".1"))
+            self.assertGreater(os.path.getsize(path), 5 * 1024 * 1024)
+
 
 class TestDisabledHook(unittest.TestCase):
     def test_disabled_hook_logs_nothing_and_leaves_log_file(self):
