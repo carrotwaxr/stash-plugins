@@ -52,10 +52,10 @@ jobs:
           node-version: "22"
       - name: Syntax-check plugin JavaScript
         run: find plugins -name '*.js' -not -path '*/tests/*' -not -path '*/node_modules/*' -print0 | xargs -0 -n1 -t node --check
-      - name: tagManager JS tests
+      - name: JS tests
         run: |
           status=0
-          for f in plugins/tagManager/tests/test_*.js; do
+          for f in plugins/*/tests/test_*.js; do
             echo "::group::$f"
             node "$f" || { echo "::error file=$f::failed"; status=1; }
             echo "::endgroup::"

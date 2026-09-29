@@ -134,52 +134,195 @@
   }
 
   /**
-   * Build tree structure from flat studio list
-   * Simpler than Tag Manager since studios have single parent
+   * Effective parent map: original parents with pending changes applied.
+   * Returns a new Map of studio id -> parent id (or null). Never mutates its inputs.
+   * @param {Map} originalParentMap studio id -> parent id or null (see enterEditMode)
+   * @param {Array} pending items {type: 'set-parent'|'remove-parent', studioId, parentId, ...}
+   */
+  function effectiveParentMap(originalParentMap, pending) {
+    const effective = new Map(originalParentMap);
+    for (const change of pending || []) {
+      if (change.type === 'set-parent') {
+        effective.set(change.studioId, change.parentId);
+      } else if (change.type === 'remove-parent') {
+        effective.set(change.studioId, null);
+      }
+    }
+    return effective;
+  }
+
+  /**
+   * Ids from the parent of `id` up to the root. Stops at a cycle (no id repeats,
+   * and `id` itself only appears if it is on a cycle).
+   */
+  function ancestorsOf(id, parentMap) {
+    const result = [];
+    const visited = new Set([id]);
+    let current = parentMap.get(id);
+    while (current && !visited.has(current)) {
+      result.push(current);
+      visited.add(current);
+      current = parentMap.get(current);
+    }
+    return result;
+  }
+
+  /**
+   * True if making newParentId the parent of studioId is unsafe: newParentId is the
+   * studio itself or one of its descendants, or the walk up from newParentId meets an
+   * existing cycle (Stash's own check would recurse forever on that).
+   */
+  function wouldCreateCycle(studioId, newParentId, parentMap) {
+    if (!newParentId) return false;
+    const visited = new Set();
+    let current = newParentId;
+    while (current) {
+      if (current === studioId) return true;
+      if (visited.has(current)) return true; // existing cycle upstream
+      visited.add(current);
+      current = parentMap.get(current);
+    }
+    return false;
+  }
+
+  /**
+   * Find the cycles in a studio list. Returns arrays of ids, one per cycle
+   * (a self-parent is a cycle of one).
+   */
+  function findCycles(parentOf) {
+    const state = new Map(); // id -> 1 (on current path) | 2 (done)
+    const cycles = [];
+    for (const start of parentOf.keys()) {
+      if (state.has(start)) continue;
+      const path = [];
+      let current = start;
+      while (current && parentOf.has(current) && !state.has(current)) {
+        state.set(current, 1);
+        path.push(current);
+        current = parentOf.get(current);
+      }
+      if (current && state.get(current) === 1) {
+        cycles.push(path.slice(path.indexOf(current)));
+      }
+      path.forEach(id => state.set(id, 2));
+    }
+    return cycles;
+  }
+
+  /** studio id -> parent id, only for parents present in the list (else null). */
+  function parentsInList(studios) {
+    const ids = new Set(studios.map(s => s.id));
+    const parentOf = new Map();
+    for (const s of studios) {
+      const p = s.parent_studio?.id || null;
+      parentOf.set(s.id, p && ids.has(p) ? p : null);
+    }
+    return parentOf;
+  }
+
+  /**
+   * Ids of studios on a parent cycle, plus all their descendants. Returns a Set.
+   */
+  function findCycleMembers(studios) {
+    const parentOf = parentsInList(studios);
+    const members = new Set();
+    findCycles(parentOf).forEach(cycle => cycle.forEach(id => members.add(id)));
+    if (members.size === 0) return members;
+    const memo = new Map();
+    function reaches(id) {
+      const path = [];
+      let current = id;
+      let result = false;
+      while (current) {
+        if (members.has(current)) { result = true; break; }
+        if (memo.has(current)) { result = memo.get(current); break; }
+        path.push(current);
+        current = parentOf.get(current);
+      }
+      path.forEach(p => memo.set(p, result));
+      return result;
+    }
+    for (const id of parentOf.keys()) {
+      if (reaches(id)) members.add(id);
+    }
+    return members;
+  }
+
+  /** Compare ids numerically when both are numeric, else as strings. */
+  function compareIds(a, b) {
+    const na = Number(a), nb = Number(b);
+    if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+    return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
+  }
+
+  /**
+   * Build tree structure from flat studio list.
+   * Returns the array of root nodes ({...studio, childNodes, inCycle}); the array also
+   * carries a non-enumerable `totalStudios` (number of nodes reachable from the roots).
+   * An orphan whose parent is missing is a root. Each parent cycle is broken at its
+   * smallest id, which becomes a pseudo-root; cycle members and their descendants are
+   * flagged inCycle, so no studio disappears.
    */
   function buildStudioTree(studios) {
-    const studioMap = new Map();
+    const parentOf = parentsInList(studios);
+    const inCycle = findCycleMembers(studios);
+    const breakAt = new Set();
+    for (const cycle of findCycles(parentOf)) {
+      breakAt.add(cycle.slice().sort(compareIds)[0]);
+    }
 
-    // First pass: create nodes
+    const studioMap = new Map();
     studios.forEach(studio => {
       studioMap.set(studio.id, {
         ...studio,
-        childNodes: []
+        childNodes: [],
+        inCycle: inCycle.has(studio.id)
       });
     });
 
-    // Second pass: build parent-child relationships
     const roots = [];
     studios.forEach(studio => {
       const node = studioMap.get(studio.id);
-      const parentId = studio.parent_studio?.id;
-
-      if (!parentId) {
-        // Root studio
+      const parentId = parentOf.get(studio.id);
+      if (!parentId || breakAt.has(studio.id)) {
         roots.push(node);
       } else {
-        // Add to parent's children
-        const parentNode = studioMap.get(parentId);
-        if (parentNode) {
-          parentNode.childNodes.push(node);
-        } else {
-          // Parent not found, treat as root
-          roots.push(node);
-        }
+        studioMap.get(parentId).childNodes.push(node);
       }
     });
 
     // Sort roots and children by name
-    const sortByName = (a, b) => a.name.localeCompare(b.name);
+    const sortByName = (a, b) => (a.name || '').localeCompare(b.name || '');
     roots.sort(sortByName);
 
+    let total = 0;
     function sortChildren(node) {
+      total++;
       node.childNodes.sort(sortByName);
       node.childNodes.forEach(sortChildren);
     }
     roots.forEach(sortChildren);
 
+    Object.defineProperty(roots, 'totalStudios', { value: total, enumerable: false });
     return roots;
+  }
+
+  /**
+   * Order pending changes for saving: every remove-parent first, then set-parent
+   * changes by the studio's depth in the final tree, shallowest first (ties keep
+   * insertion order). `parentMap` is the final effective map (or the original map;
+   * pending is applied on top either way). Returns a new array.
+   */
+  function orderForSave(pending, parentMap) {
+    const finalMap = effectiveParentMap(parentMap, pending);
+    const removes = pending.filter(c => c.type === 'remove-parent');
+    const depth = c => ancestorsOf(c.studioId, finalMap).length;
+    const sets = pending
+      .map((c, index) => ({ c, index }))
+      .filter(({ c }) => c.type === 'set-parent')
+      .sort((a, b) => depth(a.c) - depth(b.c) || a.index - b.index)
+      .map(({ c }) => c);
+    return [...removes, ...sets];
   }
 
   /**
@@ -221,36 +364,11 @@
    * Check if adding parentId as parent of studioId would create a cycle
    */
   function wouldCreateCircularRef(potentialParentId, studioId) {
-    if (potentialParentId === studioId) return true;
-
-    // Build effective parent map considering pending changes
-    const effectiveParent = new Map();
-
+    const base = new Map();
     for (const studio of hierarchyStudios) {
-      effectiveParent.set(studio.id, studio.parent_studio?.id || null);
+      base.set(studio.id, studio.parent_studio?.id || null);
     }
-
-    // Apply pending changes
-    for (const change of pendingChanges) {
-      if (change.type === 'set-parent') {
-        effectiveParent.set(change.studioId, change.parentId);
-      } else if (change.type === 'remove-parent') {
-        effectiveParent.set(change.studioId, null);
-      }
-    }
-
-    // Walk up from potentialParentId, check if we hit studioId
-    let current = potentialParentId;
-    const visited = new Set();
-
-    while (current) {
-      if (current === studioId) return true;
-      if (visited.has(current)) break; // Existing cycle, stop
-      visited.add(current);
-      current = effectiveParent.get(current);
-    }
-
-    return false;
+    return wouldCreateCycle(studioId, potentialParentId, effectiveParentMap(base, pendingChanges));
   }
 
   /**
@@ -1142,4 +1260,26 @@
   setupNavButtonInjection();
 
   console.log('[studioManager] Plugin loaded');
+
+  // Test hook: only active when a test harness sets window.__STUDIO_MANAGER_TEST__.
+  if (typeof window !== 'undefined' && window.__STUDIO_MANAGER_TEST__) {
+    window.__STUDIO_MANAGER_TEST__.exports = {
+      effectiveParentMap, ancestorsOf, wouldCreateCycle, findCycleMembers,
+      buildStudioTree, orderForSave, wouldCreateCircularRef, getTreeStats,
+    };
+    window.__STUDIO_MANAGER_TEST__.getState = () => ({
+      hierarchyStudios, hierarchyTree, hierarchyStats, expandedNodes, selectedStudioId,
+      pendingChanges, isEditMode, originalParentMap,
+    });
+    window.__STUDIO_MANAGER_TEST__.setState = (patch) => {
+      if ('hierarchyStudios' in patch) hierarchyStudios = patch.hierarchyStudios;
+      if ('hierarchyTree' in patch) hierarchyTree = patch.hierarchyTree;
+      if ('hierarchyStats' in patch) hierarchyStats = patch.hierarchyStats;
+      if ('expandedNodes' in patch) expandedNodes = patch.expandedNodes;
+      if ('selectedStudioId' in patch) selectedStudioId = patch.selectedStudioId;
+      if ('pendingChanges' in patch) pendingChanges = patch.pendingChanges;
+      if ('isEditMode' in patch) isEditMode = patch.isEditMode;
+      if ('originalParentMap' in patch) originalParentMap = patch.originalParentMap;
+    };
+  }
 })();
