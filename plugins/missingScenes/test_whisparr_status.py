@@ -4,22 +4,34 @@ Test script for Whisparr status integration.
 Tests the new whisparr_get_status_map() function against a live Whisparr instance.
 
 Usage:
-    python test_whisparr_status.py
+    STASH_PLUGINS_INTEGRATION=1 WHISPARR_URL=http://host:6969 WHISPARR_API_KEY=... \
+        python test_whisparr_status.py
 """
 
 import json
+import os
+import sys
+import unittest
 import urllib.request
 import urllib.parse
-import ssl
 
-# Test configuration - update these for your environment
-WHISPARR_URL = "http://10.0.0.4:6968"
-WHISPARR_API_KEY = "b311570632a647dea63baf212adbc5be"
+# These scripts hit live services. Require an explicit opt-in, checked before .env is
+# read so that a .env file can't opt in on its own (it may point at a production Stash).
+def _skip(reason):
+    """Skip under pytest or unittest; exit with a message when run as a script."""
+    if __name__ == "__main__":
+        print(reason)
+        sys.exit(2)
+    raise unittest.SkipTest(reason)
 
-# Create SSL context
-SSL_CONTEXT = ssl.create_default_context()
-SSL_CONTEXT.check_hostname = False
-SSL_CONTEXT.verify_mode = ssl.CERT_NONE
+
+if os.environ.get("STASH_PLUGINS_INTEGRATION") != "1":
+    _skip("Live integration script: set STASH_PLUGINS_INTEGRATION=1 to run it.")
+
+WHISPARR_URL = os.environ.get("WHISPARR_URL")
+WHISPARR_API_KEY = os.environ.get("WHISPARR_API_KEY")
+if not WHISPARR_URL or not WHISPARR_API_KEY:
+    _skip("Set WHISPARR_URL and WHISPARR_API_KEY in the environment.")
 
 
 def whisparr_request(endpoint, method="GET", payload=None):
@@ -37,7 +49,7 @@ def whisparr_request(endpoint, method="GET", payload=None):
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
 
-    with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as response:
+    with urllib.request.urlopen(req, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
