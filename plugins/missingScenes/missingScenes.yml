@@ -91,6 +91,10 @@ tasks:
     description: Remove scenes from Whisparr that are now tagged in Stash. Prevents duplicate downloads.
     defaultArgs:
       mode: cleanup
+  - name: Test Whisparr Connection
+    description: Check the Whisparr URL, API key, version, root folder and quality profile, and log what is wrong.
+    defaultArgs:
+      mode: test_whisparr
 
 # Hook to automatically cleanup Whisparr when a scene is tagged
 hooks:

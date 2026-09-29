@@ -290,3 +290,131 @@ def test_cleanup_task_reports_error(monkeypatch):
     res = ms.task_cleanup_whisparr({"whisparrUrl": URL, "whisparrApiKey": KEY})
     assert res["success"] is False
     assert "500" in res["message"]
+
+
+# ---- test_whisparr_connection ------------------------------------------------
+
+GOOD_STATUS = {"appName": "Whisparr", "version": "3.0.0.100"}
+ROOTS = [{"path": "/data/a"}, {"path": "/data/b"}]
+PROFILES = [{"id": 1, "name": "Any"}, {"id": 4, "name": "HD"}]
+
+
+def conn_handler(status=GOOD_STATUS, roots=ROOTS, profiles=PROFILES):
+    def h(req):
+        u = req.full_url
+        if u.endswith("/system/status"):
+            return status
+        if u.endswith("/rootfolder"):
+            return roots
+        if u.endswith("/qualityprofile"):
+            return profiles
+        return http_error(404)
+    return h
+
+
+def settings(**kw):
+    s = {"whisparrUrl": URL, "whisparrApiKey": KEY}
+    s.update(kw)
+    return s
+
+
+def test_connection_ok(monkeypatch):
+    seen = install(monkeypatch, conn_handler())
+    r = ms.test_whisparr_connection(settings(whisparrUrl=" h:6969/api/v3/ "))
+    assert r["ok"] is True and r["problems"] == []
+    assert r["app"] == "Whisparr" and r["version"] == "3.0.0.100"
+    assert r["url"] == "http://h:6969"
+    assert r["root_folders"] == ["/data/a", "/data/b"]
+    assert r["quality_profiles"] == [{"id": 1, "name": "Any"}, {"id": 4, "name": "HD"}]
+    assert [q.full_url.rsplit("/", 1)[1] for q in seen] == ["status", "rootfolder", "qualityprofile"]
+    assert KEY not in json.dumps(r)
+
+
+@pytest.mark.parametrize("app", ["Radarr", "Sonarr"])
+def test_connection_wrong_app(monkeypatch, app):
+    seen = install(monkeypatch, conn_handler(status={"appName": app, "version": "5.0"}))
+    r = ms.test_whisparr_connection(settings())
+    assert not r["ok"] and len(r["problems"]) == 1
+    assert "wrong service" in r["problems"][0] and app in r["problems"][0]
+    assert len(seen) == 1
+
+
+def test_connection_html_is_wrong_service(monkeypatch):
+    seen = install(monkeypatch, lambda req: b"<!doctype html><html></html>")
+    r = ms.test_whisparr_connection(settings())
+    assert not r["ok"] and "wrong service" in r["problems"][0]
+    assert len(seen) == 1
+
+
+def test_connection_v2(monkeypatch):
+    install(monkeypatch, conn_handler(status={"appName": "Whisparr", "version": "2.2.0.108"}))
+    r = ms.test_whisparr_connection(settings())
+    assert not r["ok"]
+    assert any("Whisparr v3 is required" in p for p in r["problems"])
+
+
+def test_connection_404(monkeypatch):
+    seen = install(monkeypatch, lambda req: http_error(404))
+    r = ms.test_whisparr_connection(settings())
+    assert r["problems"] == [r["problems"][0]] and "check URL Base" in r["problems"][0]
+    assert len(seen) == 1
+
+
+def test_connection_401(monkeypatch):
+    seen = install(monkeypatch, lambda req: http_error(401))
+    r = ms.test_whisparr_connection(settings())
+    assert len(r["problems"]) == 1 and "API key rejected" in r["problems"][0]
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("exc", [urllib.error.URLError("refused"), TimeoutError("timed out")])
+def test_connection_unreachable(monkeypatch, exc):
+    seen = install(monkeypatch, lambda req: exc)
+    r = ms.test_whisparr_connection(settings())
+    assert len(r["problems"]) == 1 and "can't reach" in r["problems"][0].lower()
+    assert len(seen) == 1
+    assert KEY not in json.dumps(r)
+
+
+def test_connection_bad_root_folder(monkeypatch):
+    install(monkeypatch, conn_handler())
+    r = ms.test_whisparr_connection(settings(whisparrRootFolder="  /nope  "))
+    assert not r["ok"] and len(r["problems"]) == 1
+    p = r["problems"][0]
+    assert "/nope" in p and "/data/a" in p and "/data/b" in p
+
+
+def test_connection_good_root_folder(monkeypatch):
+    install(monkeypatch, conn_handler())
+    assert ms.test_whisparr_connection(settings(whisparrRootFolder=" /data/b "))["ok"]
+
+
+def test_connection_bad_quality_profile(monkeypatch):
+    install(monkeypatch, conn_handler())
+    r = ms.test_whisparr_connection(settings(whisparrQualityProfile=9))
+    assert not r["ok"] and len(r["problems"]) == 1
+    p = r["problems"][0]
+    assert "9" in p and "1: Any" in p and "4: HD" in p
+
+
+def test_connection_good_quality_profile(monkeypatch):
+    install(monkeypatch, conn_handler())
+    assert ms.test_whisparr_connection(settings(whisparrQualityProfile=4))["ok"]
+
+
+@pytest.mark.parametrize("s,name", [
+    ({"whisparrApiKey": KEY}, "Whisparr URL"),
+    ({"whisparrUrl": "  ", "whisparrApiKey": KEY}, "Whisparr URL"),
+    ({"whisparrUrl": URL}, "Whisparr API Key"),
+])
+def test_connection_missing_settings(monkeypatch, s, name):
+    seen = install(monkeypatch, conn_handler())
+    r = ms.test_whisparr_connection(s)
+    assert not r["ok"] and any(name in p and "empty" in p for p in r["problems"])
+    assert seen == []
+
+
+def test_task_test_whisparr_logs_and_returns(monkeypatch):
+    install(monkeypatch, conn_handler())
+    r = ms.task_test_whisparr(settings(whisparrRootFolder="/nope"))
+    assert r["ok"] is False and r["problems"]

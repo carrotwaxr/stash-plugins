@@ -2258,6 +2258,97 @@ def task_scan_for_new_scenes(plugin_settings):
         return {"success": False, "message": str(e)}
 
 
+def test_whisparr_connection(settings):
+    """Check the Whisparr settings against the real service.
+
+    Returns {ok, app, version, url, root_folders, quality_profiles, problems}. `ok` is true only
+    when `problems` is empty. `url` is the normalized base URL (never the API key).
+    """
+    settings = settings or {}
+    raw_url = str(settings.get("whisparrUrl") or "").strip()
+    api_key = str(settings.get("whisparrApiKey") or "").strip()
+    result = {"ok": False, "app": None, "version": None, "url": normalize_whisparr_url(raw_url),
+              "root_folders": [], "quality_profiles": [], "problems": []}
+    problems = result["problems"]
+
+    if not raw_url:
+        problems.append("Whisparr URL is empty. Set it in the plugin settings.")
+    if not api_key:
+        problems.append("Whisparr API Key is empty. Set it in the plugin settings.")
+    if problems:
+        return result
+    url = result["url"]
+
+    try:
+        status = whisparr_request(url, api_key, "system/status")
+    except WhisparrError as e:
+        if e.status == 401:
+            problems.append("API key rejected (HTTP 401). Copy it from Whisparr Settings > General > Security.")
+        elif e.status == 404:
+            problems.append(f"Not found at {url}/api/v3 (HTTP 404); check URL Base and include it in the "
+                            "Whisparr URL if Whisparr uses one.")
+        elif e.status is None and e.body:
+            problems.append(f"{url} is the wrong service: it did not answer with JSON. Use the address "
+                            "of Whisparr itself.")
+        elif e.status is None:
+            problems.append(f"Can't reach Whisparr at {url}. Check the address, port and that Whisparr is running.")
+        else:
+            problems.append(f"Whisparr answered HTTP {e.status} at {url}.")
+        return result
+
+    if not isinstance(status, dict):
+        problems.append(f"{url} is the wrong service: unexpected answer from system/status.")
+        return result
+    app = str(status.get("appName") or "")
+    result["app"] = app or None
+    result["version"] = status.get("version")
+    if app and app.lower() != "whisparr":
+        problems.append(f"{url} is the wrong service: it is {app}, not Whisparr.")
+        return result
+    if str(result["version"] or "").startswith("2."):
+        problems.append(f"Whisparr v3 is required; this is v{result['version']}. Use the v3 (eros) image.")
+
+    try:
+        roots = whisparr_request(url, api_key, "rootfolder")
+        profiles = whisparr_request(url, api_key, "qualityprofile")
+    except WhisparrError as e:
+        problems.append(str(e))
+        return result
+    result["root_folders"] = [r.get("path") for r in roots or [] if isinstance(r, dict) and r.get("path")]
+    result["quality_profiles"] = [{"id": q.get("id"), "name": q.get("name")}
+                                  for q in profiles or [] if isinstance(q, dict)]
+
+    root = str(settings.get("whisparrRootFolder") or "").strip()
+    if root and root not in result["root_folders"]:
+        problems.append(f"Root folder '{root}' is not in Whisparr. Valid: "
+                        f"{', '.join(result['root_folders']) or 'none configured'}.")
+    profile = settings.get("whisparrQualityProfile")
+    if profile not in (None, ""):
+        try:
+            profile_id = int(profile)
+        except (TypeError, ValueError):
+            profile_id = None
+        if profile_id not in [q["id"] for q in result["quality_profiles"]]:
+            valid = ", ".join(f"{q['id']}: {q['name']}" for q in result["quality_profiles"])
+            problems.append(f"Quality profile {profile} does not exist in Whisparr. Valid: {valid or 'none'}.")
+
+    result["ok"] = not problems
+    return result
+
+
+def task_test_whisparr(plugin_settings):
+    """Task: test the Whisparr connection and log a readable summary."""
+    result = test_whisparr_connection(plugin_settings)
+    if result["ok"]:
+        log.LogInfo(f"Whisparr OK: {result['app']} {result['version']} at {result['url']}; "
+                    f"{len(result['root_folders'])} root folder(s), "
+                    f"{len(result['quality_profiles'])} quality profile(s)")
+    else:
+        for problem in result["problems"]:
+            log.LogWarning(f"Whisparr: {problem}")
+    return result
+
+
 def task_cleanup_whisparr(plugin_settings):
     """Task: Remove scenes from Whisparr that are now tagged in Stash."""
     whisparr_url = plugin_settings.get("whisparrUrl", "")
@@ -2394,6 +2485,12 @@ def main():
         print(json.dumps({"output": output}))
         return
 
+    if mode == "test_whisparr":
+        log.LogInfo("Running task: Test Whisparr Connection")
+        output = task_test_whisparr(plugin_settings)
+        print(json.dumps({"output": output}))
+        return
+
     # Handle regular operations (from UI plugin)
     operation = args.get("operation", "")
     output = {"error": "Unknown operation"}
@@ -2502,6 +2599,9 @@ def main():
                         "available_endpoints": available,
                         "default_endpoint": default_endpoint,
                     }
+
+        elif operation == "test_whisparr":
+            output = test_whisparr_connection(plugin_settings)
 
         elif operation == "refresh_index":
             endpoint = args.get("endpoint")
