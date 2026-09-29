@@ -1,7 +1,8 @@
 /**
  * Backend error formatting, tag loading without fuzzy search, the
  * once-per-visit hint when a search reports fuzzy matching unavailable, and
- * failed searches shown as failures (not as "no matches").
+ * failed searches shown as failures (not as "no matches"), and the page
+ * init that renders before the stash-box tags finish loading.
  * Run with: node plugins/tagManager/tests/test_backend_errors.js
  */
 const assert = require("assert");
@@ -183,14 +184,84 @@ const HINT = /Fuzzy matching is unavailable until the stash-box tags are cached\
     assert.strictEqual(JSON.stringify(tm.getState().matchErrors), "{}");
   }
 
-  // Init path (React component, not reachable via harness): source-level guards
+  // Init: the page renders before the stash-box tags arrive (fetch_all runs in
+  // the background). Never await init here: a pending fetch_all would hang it.
+  /** A plugin whose fetch_all answers `out` only after release(). */
+  function gatedInit(out, config = {}) {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const tm = loadTagManager({
+      fetchResponses: {
+        Configuration: { data: { configuration: { plugins: { tagManager: config }, general: { stashBoxes: [BOX] } } } },
+        FindTags: { data: { findTags: { count: 1, tags: [{ id: "1", name: "LocalOne", aliases: [], stash_ids: [], parents: [] }] } } },
+        RunPluginOperation: (body) => (body.variables.args.mode === "fetch_all"
+          ? gate.then(() => RPO(out))
+          : RPO({ exists: true, count: 1, age_hours: 2, expired: false })),
+      },
+    });
+    return { tm, release };
+  }
+  const TAGS_OUT = { tags: [{ id: "a", name: "A" }], count: 1, from_cache: true, cache_age_hours: 2 };
+  {
+    const { tm, release } = gatedInit(TAGS_OUT, { enableFuzzySearch: false });
+    await tm.settle();
+    tm.setState({ stashdbTags: [{ id: "old", name: "From an earlier visit" }] });
+    const container = { innerHTML: "", querySelector: () => null, querySelectorAll: () => [] };
+    let rendered = null;
+    tm.exports.initTagManagerPage(container).then((ok) => { rendered = ok; });
+    await tm.settle();
+    assert.ok(tm.fetchCalls.some((c) => c.op === "RunPluginOperation" && c.body.variables.args.mode === "fetch_all"),
+      "init loads the stash-box tags even with fuzzy search off");
+    assert.strictEqual(rendered, true, "init resolves while fetch_all is still running");
+    assert.strictEqual(tm.getState().stashdbTags, null, "an earlier visit's tags are not shown meanwhile");
+    assert.ok(/LocalOne/.test(container.innerHTML), "local tag list rendered: " + container.innerHTML.slice(0, 300));
+    assert.ok(/Loading tags/.test(container.innerHTML), "cache badge shows the load");
+    tm.setState({ activeTab: "browse" });
+    tm.exports.renderPage(container);
+    assert.ok(/Loading stash-box tags/.test(container.innerHTML), "Browse shows its own loading state");
+
+    release();
+    await tm.settle();
+    assert.strictEqual(tm.getState().stashdbTags.length, 1);
+    assert.ok(/1 tags \(2h old\)/.test(container.innerHTML), "badge updated when done");
+    assert.ok(!/Loading stash-box tags/.test(container.innerHTML) && /1 total/.test(container.innerHTML),
+      "Browse shows the tags once loaded");
+  }
+  {
+    // a failed background load still reports through cacheStatus.error
+    const { tm, release } = gatedInit({ error: "HTTP 403", auth_error: true });
+    await tm.settle();
+    const statuses = recordStatuses(tm);
+    const container = { innerHTML: "", querySelector: () => null, querySelectorAll: () => [] };
+    tm.exports.initTagManagerPage(container);
+    await tm.settle();
+    assert.ok(/LocalOne/.test(container.innerHTML));
+    release();
+    await tm.settle();
+    assert.strictEqual(tm.getState().stashdbTags, null);
+    assert.ok(/Metadata Providers/.test(tm.getState().cacheStatus.error));
+    assert.ok(statuses.some((s) => /Metadata Providers/.test(s)), JSON.stringify(statuses));
+    assert.ok(/No cache/.test(container.innerHTML) && !/Loading tags/.test(container.innerHTML));
+  }
+  {
+    // switching stash-box while the load runs: its result is dropped
+    const { tm, release } = gatedInit(TAGS_OUT);
+    await tm.settle();
+    const select = createElement("select");
+    const container = createQueryableElement("div", { query: (sel) => (sel === "#tm-stashbox" ? select : undefined) });
+    tm.exports.initTagManagerPage(container);
+    await tm.settle();
+    tm.setState({ stashBoxes: [{ ...BOX }, { endpoint: "https://tpdb/graphql", name: "TPDB" }] });
+    const onChange = select.listeners.change[select.listeners.change.length - 1];
+    await onChange({ target: { value: "https://tpdb/graphql" } });
+    assert.ok(!/Loading tags/.test(container.innerHTML), "the new stash-box is not shown as loading");
+    release();
+    await tm.settle();
+    assert.strictEqual(tm.getState().stashdbTags, null, "the previous stash-box's tags are not kept");
+    assert.strictEqual(tm.getState().selectedStashBox.name, "TPDB");
+  }
   {
     const src = fs.readFileSync(path.join(__dirname, "..", "tag-manager.js"), "utf8");
-    const init = src.slice(src.indexOf("// Load cache status for selected endpoint"));
-    const callIdx = init.indexOf("await loadTagsFromCache(containerRef.current)");
-    assert.ok(callIdx > -1, "init calls loadTagsFromCache");
-    assert.ok(!/if \(settings\.enableFuzzySearch\)[^]{0,40}$/.test(init.slice(0, callIdx)),
-      "init must not gate loadTagsFromCache on enableFuzzySearch");
     assert.ok(!/loadStashdbTags/.test(src));
   }
 

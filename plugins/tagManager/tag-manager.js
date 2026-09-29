@@ -16,6 +16,7 @@
   let stashBoxes = []; // Configured stash-box endpoints from Stash
   let selectedStashBox = null; // Currently selected stash-box
   let stashdbTags = null; // Cached tags for selected endpoint
+  let stashdbTagsLoad = null; // The page's background load of stashdbTags while it runs
   let cacheStatus = null; // Cache status for selected endpoint
   let localTags = []; // Local Stash tags
   let currentPage = 1;
@@ -1032,10 +1033,12 @@
    */
   async function loadTagsFromCache(container) {
     if (!selectedStashBox) return;
+    const box = selectedStashBox; // a slow load must not land on another stash-box
 
     try {
       console.debug("[tagManager] Loading tags for", selectedStashBox.endpoint);
       const result = await callBackend('fetch_all', { force_refresh: false });
+      if (selectedStashBox !== box) return;
 
       stashdbTags = result.tags || [];
       cacheStatus = {
@@ -1053,6 +1056,7 @@
       }
     } catch (e) {
       console.error("[tagManager] Failed to load tags:", e);
+      if (selectedStashBox !== box) return;
       stashdbTags = null;
       cacheStatus = { exists: false, error: backendErrorText(e) };
     }
@@ -2016,6 +2020,9 @@
   function renderCacheStatus() {
     if (isCacheLoading) {
       return '<span class="tm-cache-status tm-cache-loading">Building cache...</span>';
+    }
+    if (stashdbTagsLoad) {
+      return '<span class="tm-cache-status tm-cache-loading">Loading tags...</span>';
     }
     if (!cacheStatus) {
       return '<span class="tm-cache-status tm-cache-unknown">Cache unknown</span>';
@@ -3189,6 +3196,13 @@
    * Render the browse/import view
    */
   function renderBrowseView() {
+    if (!stashdbTags && stashdbTagsLoad) {
+      return `
+        <div class="tm-browse-empty">
+          <p>Loading stash-box tags...</p>
+        </div>
+      `;
+    }
     if (!stashdbTags || stashdbTags.length === 0) {
       return `
         <div class="tm-browse-empty">
@@ -3613,8 +3627,9 @@
       if (newStashBox && newStashBox.endpoint !== selectedStashBox?.endpoint) {
         console.debug("[tagManager] Switching to stash-box:", newStashBox.name);
         selectedStashBox = newStashBox;
-        // Clear cached data for previous endpoint
+        // Clear cached data for previous endpoint (a background load for it is dropped)
         stashdbTags = null;
+        stashdbTagsLoad = null;
         matchResults = {};
         matchErrors = {};
         cacheStatus = null;
@@ -4837,6 +4852,75 @@
   }
 
   /**
+   * Start the Tag Manager page in `container`: settings, blacklist, local tags
+   * and cache status, then the page. The stash-box tags (fetch_all, which can
+   * take tens of seconds on a cold cache) load in the background; the Browse
+   * tab and the cache badge show that until they arrive. Resolves true once the
+   * page is rendered, false when it stopped at an error screen.
+   */
+  async function initTagManagerPage(container) {
+    console.debug("[tagManager] Initializing...");
+    setPageTitle("Tag Matcher | Stash");
+    fuzzyHintShown = false;
+    container.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
+
+    // Ensure defaults are loaded/backfilled before reading settings, so
+    // loadSettings sees a populated DEFAULTS and the backfill can't race.
+    await ensureDefaultsInitialized();
+    await loadSettings();
+    await loadCategoryMappings();
+    await loadBlacklist();
+
+    // Check if any stash-box is configured
+    if (stashBoxes.length === 0) {
+      console.warn("[tagManager] No stash-boxes configured");
+      container.innerHTML = `
+        <div class="tag-manager">
+          <div class="tag-manager-error">
+            <h3>No Stash-Box Configured</h3>
+            <p>Please configure a stash-box endpoint in Settings → Metadata Providers → Stash-Box Endpoints</p>
+            <p>Or configure a StashDB endpoint in Settings → Plugins → Tag Manager</p>
+          </div>
+        </div>
+      `;
+      return false;
+    }
+
+    // Fetch local tags
+    container.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading local tags...</div></div>';
+    try {
+      localTags = await fetchLocalTags();
+      console.debug(`[tagManager] Loaded ${localTags.length} local tags`);
+    } catch (e) {
+      console.error("[tagManager] Failed to load local tags:", e);
+      container.innerHTML = `<div class="tag-manager"><div class="tag-manager-error">Error loading tags: ${escapeHtml(e.message)}</div></div>`;
+      return false;
+    }
+
+    // Load cache status for selected endpoint
+    await loadCacheStatus();
+
+    // Load tags from cache (or fetch if no cache) in the background; Browse
+    // needs them even without fuzzy search. An earlier visit's tags may be for
+    // another stash-box, so they are not shown meanwhile.
+    stashdbTags = null;
+    const load = loadTagsFromCache(container);
+    stashdbTagsLoad = load;
+    load.then(() => {
+      if (stashdbTagsLoad !== load) return; // stash-box switched (or page re-opened) meanwhile
+      stashdbTagsLoad = null;
+      if (_activeContainer !== container) return;
+      renderPage(container);
+      if (cacheStatus?.error) showStatus(cacheStatus.error, 'error');
+    });
+
+    console.debug("[tagManager] Initialization complete");
+    _activeContainer = container;
+    renderPage(container);
+    return true;
+  }
+
+  /**
    * Main page component
    */
   function TagManagerPage() {
@@ -4845,62 +4929,11 @@
     const [initialized, setInitialized] = React.useState(false);
 
     React.useEffect(() => {
-      async function init() {
-        if (!containerRef.current) return;
-
-        console.debug("[tagManager] Initializing...");
-        setPageTitle("Tag Matcher | Stash");
-        fuzzyHintShown = false;
-        containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
-
-        // Ensure defaults are loaded/backfilled before reading settings, so
-        // loadSettings sees a populated DEFAULTS and the backfill can't race.
-        await ensureDefaultsInitialized();
-        await loadSettings();
-        await loadCategoryMappings();
-        await loadBlacklist();
-
-        // Check if any stash-box is configured
-        if (stashBoxes.length === 0) {
-          console.warn("[tagManager] No stash-boxes configured");
-          containerRef.current.innerHTML = `
-            <div class="tag-manager">
-              <div class="tag-manager-error">
-                <h3>No Stash-Box Configured</h3>
-                <p>Please configure a stash-box endpoint in Settings → Metadata Providers → Stash-Box Endpoints</p>
-                <p>Or configure a StashDB endpoint in Settings → Plugins → Tag Manager</p>
-              </div>
-            </div>
-          `;
-          return;
-        }
-
-        // Fetch local tags
-        containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading local tags...</div></div>';
-        try {
-          localTags = await fetchLocalTags();
-          console.debug(`[tagManager] Loaded ${localTags.length} local tags`);
-        } catch (e) {
-          console.error("[tagManager] Failed to load local tags:", e);
-          containerRef.current.innerHTML = `<div class="tag-manager"><div class="tag-manager-error">Error loading tags: ${escapeHtml(e.message)}</div></div>`;
-          return;
-        }
-
-        // Load cache status for selected endpoint
-        await loadCacheStatus();
-
-        // Load tags from cache (or fetch if no cache); Browse needs them even without fuzzy search
-        containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading tag cache...</div></div>';
-        await loadTagsFromCache(containerRef.current);
-
-        setInitialized(true);
-        console.debug("[tagManager] Initialization complete");
-        _activeContainer = containerRef.current;
-        renderPage(containerRef.current);
-        if (cacheStatus?.error) showStatus(cacheStatus.error, 'error');
+      if (containerRef.current) {
+        initTagManagerPage(containerRef.current).then((ok) => {
+          if (ok) setInitialized(true);
+        });
       }
-
-      init();
 
       // F16: tag links navigate inside the SPA on a plain left click.
       const linkRoot = containerRef.current;
@@ -6484,6 +6517,7 @@
       renderPage,
       searchAllOnPage,
       searchSingleTag,
+      initTagManagerPage,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults, matchErrors,
@@ -6514,6 +6548,7 @@
       if ("blacklistDraft" in patch) blacklistDraft = patch.blacklistDraft;
       if ("blacklistPanelOpen" in patch) blacklistPanelOpen = patch.blacklistPanelOpen;
       if ("tagBlacklistRaw" in patch) tagBlacklistRaw = patch.tagBlacklistRaw;
+      if ("activeTab" in patch) activeTab = patch.activeTab;
     };
   }
 })();
