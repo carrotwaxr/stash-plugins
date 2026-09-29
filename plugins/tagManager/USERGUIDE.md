@@ -438,8 +438,8 @@ The cache status shows in the top-right:
 
 ### Manual Cache Management
 
-- **Refresh Cache** - Forces a fresh fetch from StashDB
-- **Clear Cache** - Removes the cache file (next load will fetch fresh)
+- **Refresh Cache** - Forces a fresh fetch from the stash-box and replaces the cache
+- To remove a cache by hand, delete its file from `<Stash config dir>/plugin_data/tagManager/tag_cache/`
 
 ### First-Time Fetch
 
