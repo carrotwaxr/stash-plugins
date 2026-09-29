@@ -62,20 +62,24 @@ Shortcuts are off while you type in a text field.
 
 Edits are queued as pending changes. Nothing is written until you save.
 1. Make your edits (drag and drop, context menu, keyboard).
-2. Review the pending changes in the panel at the bottom. Click the **x** on a row to drop that one change and keep the rest.
+2. Review the pending changes in the panel at the bottom. Click the **x** on a row to drop that one change and keep the rest. If another change needs that one to avoid a cycle, the plugin keeps it and names the change to remove first.
 3. Click **Save Changes** to apply them, or **Cancel** to discard them all.
 
 While a save runs, editing is locked and the button reads "Saving…".
 
-The plugin saves parent removals first, then new parents, shallowest first. A change that would create a cycle is refused before any request is sent. This includes a parent whose own chain runs into an existing cycle.
+The plugin saves parent removals first, then new parents, shallowest first. An edit that would create a cycle is refused ("Cannot create circular reference"). Each change is checked again before its request is sent. One that would now create a cycle is not sent and stays pending. Its row reads "Would make "X" its own ancestor", or "Its parent chain runs into an existing cycle; fix that first" when the new parent's own chain runs into an existing cycle.
 
 If a change fails, it stays pending with the error on its row. The others are still saved. A toast reports "N saved, M failed". Fix the problem and save again.
+
+After a save the plugin reloads the studios. If that reload fails, the tree still shows what was saved, and a toast says the hierarchy couldn't be reloaded.
 
 ### Navigation and Unsaved Changes
 
 Studio names, the context menu (View Studio, Edit Studio) and the toolbar button open pages inside Stash without a full reload. If you have pending changes, the plugin asks before it leaves the page.
 
-The plugin can't intercept Stash's own navbar or the browser's back button. If you leave that way, your pending changes stay in memory. When you come back to the hierarchy page, the plugin restores them and shows "N unsaved changes restored". Changes that no longer apply, such as a studio that was deleted, are dropped.
+The plugin can't intercept Stash's own navbar or the browser's back button. If you leave that way, your pending changes stay in memory. When you come back to the hierarchy page, the plugin restores them and shows "N unsaved changes restored" until your next edit or save. Changes that no longer apply are dropped: a studio or new parent that was deleted, a studio that already has that parent, or a change that would now form a cycle. The others are kept, whatever order you made them in.
+
+If you leave while a save is running, the save carries on. Nothing is shown on other Stash pages. Come back before it ends and the page shows it still saving, then its result. Changes that fail stay pending and are there when you return.
 
 A page reload or closing the tab loses pending changes. The browser warns you first while changes are pending.
 
