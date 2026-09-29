@@ -593,6 +593,16 @@ def score_scene(scene, performer_stash_ids, studio_stash_id, local_title=None, l
     return final_score, len(matching_performers), title_match, duration_score
 
 
+def result_sort_key(x):
+    """Sort results: not in local stash first, then score, duration score and date, all descending."""
+    in_stash = 1 if x["in_local_stash"] else 0
+    score = -x["score"]
+    duration = -x.get("duration_score", 0.5)
+    date_str = x.get("release_date") or ""
+    date_int = int(date_str[:10].replace("-", "")) if date_str else 0
+    return (in_stash, score, duration, -date_int)
+
+
 def get_scene_context(scene_id, plugin_settings):
     """
     Get scene context needed for searching.
@@ -717,16 +727,7 @@ def format_results(all_scenes, context, local_stash_ids, cache_hit):
 
         results.append(formatted)
 
-    # Sort: not in local stash first, then by score descending, then by duration score, then by date
-    def sort_key(x):
-        in_stash = 1 if x["in_local_stash"] else 0
-        score = -x["score"]
-        duration = -x.get("duration_score", 0.5)
-        date_str = x.get("release_date") or ""
-        date_int = int(date_str[:10].replace("-", "")) if date_str else 0
-        return (in_stash, score, duration, -date_int)
-
-    results.sort(key=sort_key)
+    results.sort(key=result_sort_key)
     return results
 
 
@@ -941,15 +942,7 @@ def find_matching_scenes(scene_id, plugin_settings, cached_stash_ids=None, cache
     all_results = phase1.get("results", []) + phase2.get("results", [])
 
     # Re-sort merged results
-    def sort_key(x):
-        in_stash = 1 if x["in_local_stash"] else 0
-        score = -x["score"]
-        duration = -x.get("duration_score", 0.5)
-        date_str = x.get("release_date") or ""
-        date_int = int(date_str[:10].replace("-", "")) if date_str else 0
-        return (in_stash, score, duration, -date_int)
-
-    all_results.sort(key=sort_key)
+    all_results.sort(key=result_sort_key)
 
     return {
         "scene_title": phase1.get("scene_title"),
