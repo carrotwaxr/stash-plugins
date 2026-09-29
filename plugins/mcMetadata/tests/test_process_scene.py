@@ -447,6 +447,55 @@ class TestEntryPoint(_Base):
         self.assertEqual(stash.moves(), [])
         self.assertTrue(os.path.exists(video))
 
+    def _run_capturing_logs(self, entry, stash, stdin):
+        """run() with every message to Stash's log recorded; returns (stdout, stash log calls)."""
+        out, stash_log = io.StringIO(), MagicMock()
+        with patch.object(entry, "stashapi_problem", return_value=None), redirect_stdout(out), \
+             patch.object(logger, "stash_log", stash_log):
+            entry.run(stdin, stash_factory=lambda connection: stash)
+        return out.getvalue(), stash_log.mock_calls
+
+    def test_disabled_hook_logs_nothing_even_with_setting_warnings(self):
+        entry = self._entry()
+        log_file = os.path.join(self.tmp, "logs", "mc.log")
+        noisy = {  # each of these makes map_settings warn
+            "enableRenamer": True, "renamerPath": self.organized, "renamerPathTemplate": "$Title",
+            "renamerFilepathBudget": 5, "dryRun": "maybe", "logFilePath": log_file,
+        }
+        for hook_type, gate in (("Scene.Update.Post", "enableHook"),
+                                ("Performer.Update.Post", "enableActorImages")):
+            for off in (False, "false", 0, None, "garbage"):
+                with self.subTest(hook=hook_type, value=off):
+                    stash = self.fake([], plugin_config=dict(noisy, **{gate: off}))
+                    out, calls = self._run_capturing_logs(entry, stash, self._stdin(hook_type))
+                    self.assertEqual(json.loads(out), {"output": "ok"})
+                    self.assertEqual(calls, [])
+                    self.assertFalse(os.path.exists(log_file))
+                    self.assertEqual(stash.calls, [("get_configuration",)])
+
+    def test_enabled_hook_still_warns_about_settings(self):
+        entry = self._entry()
+        stash = self.fake([], plugin_config={
+            "enableHook": "TRUE", "enableRenamer": True, "renamerPath": self.organized,
+            "renamerPathTemplate": "$Title"})
+        out, calls = self._run_capturing_logs(entry, stash, self._stdin())
+        warnings = [c.args[0] for c in calls if c[0] == "warning"]
+        self.assertTrue(any("renamerPathTemplate" in w for w in warnings), calls)
+        self.assertIn(("find_scene", "5"), stash.calls)
+
+    def test_hook_gates_match_map_settings(self):
+        from plugin_settings import hook_gates
+
+        for value in (True, False, "true", "False", " TRUE ", 1, 0, None, "garbage", 2, "", [], {}):
+            config = {"enableHook": value, "enableActorImages": value}
+            mapped = map_settings(config)
+            self.assertEqual(
+                hook_gates(config),
+                {"enable_hook": mapped["enable_hook"], "enable_actor_images": mapped["enable_actor_images"]},
+                value,
+            )
+        self.assertEqual(hook_gates(None), {"enable_hook": False, "enable_actor_images": False})
+
     def test_hook_main_processes_scene(self):
         entry = self._entry()
         video = os.path.join(self.incoming, "old.mp4")

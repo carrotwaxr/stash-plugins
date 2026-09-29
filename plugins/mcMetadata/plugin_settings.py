@@ -27,8 +27,11 @@ def template_is_unique(template):
     return any(all(k in template for k in keys) for keys in VALID_TEMPLATE_UNIQUENESS)
 
 
-def _bool(config, key, default):
-    """Real bool, "true"/"false" (any case), or 1/0; anything else -> default + warning."""
+def _bool(config, key, default, quiet=False):
+    """Real bool, "true"/"false" (any case), or 1/0; anything else -> default + warning.
+
+    quiet: no warning (for decisions made before anything may be logged).
+    """
     value = config.get(key, default)
     if value is None:
         return default
@@ -38,8 +41,22 @@ def _bool(config, key, default):
         return bool(value)
     if isinstance(value, str) and value.strip().lower() in ("true", "false"):
         return value.strip().lower() == "true"
-    log.warning(f"Setting {key}={value!r} is not a valid true/false value; using default {default}")
+    if not quiet:
+        log.warning(f"Setting {key}={value!r} is not a valid true/false value; using default {default}")
     return default
+
+
+def hook_gates(plugin_config):
+    """enable_hook and enable_actor_images from the raw plugin config, logging nothing.
+
+    Coerced as map_settings does, so a disabled hook can return before map_settings
+    warns about other settings.
+    """
+    plugin_config = plugin_config or {}
+    return {
+        "enable_hook": _bool(plugin_config, "enableHook", False, quiet=True),
+        "enable_actor_images": _bool(plugin_config, "enableActorImages", False, quiet=True),
+    }
 
 
 def _number(config, key, default):

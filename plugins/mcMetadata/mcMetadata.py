@@ -18,28 +18,21 @@ from stashapi_check import stashapi_problem
 PLUGIN_ID = "mcMetadata"
 
 
-def get_settings(stash_instance):
-    """Load settings from Stash's plugin configuration.
+def read_plugin_config(stash_instance):
+    """The plugin's raw (camelCase) settings as Stash stores them, and the error reading them.
 
-    Stash stores plugin settings in its database and provides them
-    via the configuration endpoint. The camelCase -> snake_case mapping
-    (with defaults, list-parsing, and the hookTriggerMode migration) lives
-    in plugin_settings.map_settings so it can be unit-tested independently.
+    Logs nothing, so a disabled hook can stay silent. The camelCase -> snake_case mapping
+    (with defaults, list-parsing, and the hookTriggerMode migration) is
+    plugin_settings.map_settings.
 
     Returns:
-        dict: Settings dictionary with snake_case keys for internal use
+        (dict, Exception or None): the config ({} if it couldn't be read) and the error
     """
-    import utils.logger as log
-    from plugin_settings import map_settings
-
     try:
         config = stash_instance.get_configuration()
-        plugin_config = config.get("plugins", {}).get(PLUGIN_ID, {})
+        return config.get("plugins", {}).get(PLUGIN_ID, {}), None
     except Exception as err:
-        log.error(f"Failed to get plugin configuration: {err}")
-        plugin_config = {}
-
-    return map_settings(plugin_config)
+        return {}, err
 
 
 def get_plugin_mode(plugin_args):
@@ -75,19 +68,25 @@ def main(json_input, stash):
     from scene import process_all_scenes, process_scene
     from conditions import should_process, describe_active_conditions
     from utils.self_updates import plugin_data_dir, should_skip_hook
+    from plugin_settings import hook_gates, map_settings
 
     plugin_args = json_input.get("args", {})
     try:
-        # Loaded here so a bad setting is a logged error, not a traceback
-        settings = get_settings(stash)
-        # Where the plugin keeps its own files (self-update markers); not a user setting
-        settings["data_dir"] = plugin_data_dir(json_input["server_connection"])
+        plugin_config, config_error = read_plugin_config(stash)
+        if config_error:
+            log.error(f"Failed to get plugin configuration: {config_error}")
 
         mode = get_plugin_mode(plugin_args)
 
-        # A disabled hook is a silent no-op: decide before any logging or log-file I/O
-        if is_disabled_hook_run(mode, settings):
+        # A disabled hook is a silent no-op: decide from the raw config, before
+        # map_settings (which warns about odd settings) and any log-file I/O
+        if is_disabled_hook_run(mode, hook_gates(plugin_config)):
             return
+
+        # Loaded here so a bad setting is a logged error, not a traceback
+        settings = map_settings(plugin_config)
+        # Where the plugin keeps its own files (self-update markers); not a user setting
+        settings["data_dir"] = plugin_data_dir(json_input["server_connection"])
 
         # Initialize file logging if configured
         if settings.get("log_file_path"):
