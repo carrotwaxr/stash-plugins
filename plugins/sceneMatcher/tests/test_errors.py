@@ -281,6 +281,157 @@ class TestThorough(MatchBase):
         self.assertNotIn("warnings", out)
 
 
+class FakeClock:
+    """Stands in for stashbox_api's `time`: sleep() moves monotonic() on, so waits add up."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.slept = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+    def time(self):
+        return self.now
+
+
+def rate_limited_once(ok_payload):
+    """urlopen side effect: every request is answered 429 (no Retry-After) once, then OK."""
+    state = {"n": 0}
+
+    def urlopen(req, timeout=None, context=None):
+        state["n"] += 1
+        if state["n"] % 2:
+            raise http_error(429)
+        return ok(ok_payload(state["n"] // 2))
+    return urlopen
+
+
+def text_page(_n):
+    return {"data": {"searchScene": [{"id": "t1", "title": "Some Title Here", "performers": [], "images": []}]}}
+
+
+def big_page(n):
+    # 100 scenes per page of 2000, so paging would go on to the page cap
+    return {"data": {"queryScenes": {"count": 2000, "scenes": [
+        {"id": f"p{n}-{i}", "title": "x", "performers": [], "images": []} for i in range(100)]}}}
+
+
+class TestOperationBudget(MatchBase):
+    """Each phase shares one time budget, so it ends before the browser's 120 s abort."""
+
+    def setUp(self):
+        super().setUp()
+        self.clock = FakeClock()
+        p = mock.patch.object(stashbox_api, "time", self.clock)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_budget_is_below_the_ui_timeout(self):
+        self.assertLessEqual(stashbox_api.OPERATION_BUDGET_SECONDS, 100)
+        js = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "scene-matcher.js")).read()
+        self.assertIn("REQUEST_TIMEOUT_MS = 120000", js)
+
+    def test_phase1_waits_stay_within_the_budget(self):
+        with mock.patch("urllib.request.urlopen", side_effect=rate_limited_once(text_page)):
+            out = scene_matcher.find_matches_fast("1", {})
+        self.assertLessEqual(sum(self.clock.slept), stashbox_api.OPERATION_BUDGET_SECONDS)
+        self.assertNotIn("error", out)
+        self.assertEqual(out["total_results"], 1)  # the first search's result is kept
+        self.assertTrue(out["partial"])
+        self.assertTrue(any("stopped after 100 s" in w for w in out["warnings"]), out["warnings"])
+
+    def test_phase2_waits_stay_within_the_budget(self):
+        with mock.patch("urllib.request.urlopen", side_effect=rate_limited_once(big_page)):
+            out = scene_matcher.find_matches_thorough("1", {})
+        self.assertLessEqual(sum(self.clock.slept), stashbox_api.OPERATION_BUDGET_SECONDS)
+        self.assertNotIn("error", out)
+        self.assertTrue(out["partial"])
+        self.assertGreater(out["total_results"], 0)  # pages fetched before the stop are kept
+        stops = [w for w in out["warnings"] if "stopped after 100 s" in w]
+        self.assertEqual(len(stops), 1, out["warnings"])
+
+    def test_phase1_nothing_before_the_budget_ran_out_is_an_error(self):
+        deadline = stashbox_api.Deadline(0)
+        with mock.patch.object(stashbox_api, "Deadline", return_value=deadline), \
+             mock.patch("urllib.request.urlopen") as u:
+            out = scene_matcher.find_matches_fast("1", {})
+        u.assert_not_called()
+        self.assertIn("stopped after", out["error"])
+
+
+class TestDeadline(unittest.TestCase):
+    def setUp(self):
+        self.clock = FakeClock()
+        p = mock.patch.object(stashbox_api, "time", self.clock)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def request(self, side_effect, deadline, settings=None):
+        with mock.patch("urllib.request.urlopen", side_effect=side_effect) as u:
+            try:
+                return stashbox_api.graphql_request_with_retry(
+                    URL, "query{a}", api_key="k", plugin_settings=settings or SETTINGS,
+                    deadline=deadline), None, u
+            except StashBoxAPIError as e:
+                return None, e, u
+
+    def test_expired_deadline_makes_no_request(self):
+        _, err, u = self.request([ok({"data": {}})], stashbox_api.Deadline(0))
+        self.assertIsInstance(err, stashbox_api.BudgetExceeded)
+        u.assert_not_called()
+
+    def test_retry_after_past_the_deadline_is_not_waited(self):
+        deadline = stashbox_api.Deadline(10)
+        _, err, u = self.request([http_error(429, {"Retry-After": "30"}), ok({"data": {}})], deadline)
+        self.assertIsInstance(err, stashbox_api.BudgetExceeded)
+        self.assertEqual(self.clock.slept, [])
+        self.assertEqual(u.call_count, 1)
+
+    def test_pause_past_the_deadline_is_not_waited(self):
+        _, err, _ = self.request([http_error(429), ok({"data": {}})], stashbox_api.Deadline(5))
+        self.assertIsInstance(err, stashbox_api.BudgetExceeded)
+        self.assertEqual(self.clock.slept, [])
+
+    def test_backoff_past_the_deadline_is_not_waited(self):
+        st = {"stashbox_initial_retry_delay": 8, "stashbox_max_retries": 3}
+        _, err, _ = self.request([http_error(503), ok({"data": {}})], stashbox_api.Deadline(5), st)
+        self.assertIsInstance(err, stashbox_api.BudgetExceeded)
+        self.assertEqual(self.clock.slept, [])
+
+    def test_wait_inside_the_deadline_still_happens(self):
+        data, err, _ = self.request([http_error(429, {"Retry-After": "5"}), ok({"data": {"x": 1}})],
+                                    stashbox_api.Deadline(50))
+        self.assertIsNone(err)
+        self.assertEqual(data, {"x": 1})
+        self.assertEqual(self.clock.slept, [5])
+
+    def test_request_timeout_capped_by_the_budget(self):
+        deadline = stashbox_api.Deadline(12)
+        _, _, u = self.request([ok({"data": {}})], deadline, {"stashbox_request_timeout": 30})
+        self.assertEqual(u.call_args.kwargs["timeout"], 12)
+
+    def test_pagination_stops_at_the_deadline_and_keeps_pages(self):
+        deadline = stashbox_api.Deadline(10)
+
+        def urlopen(req, timeout=None, context=None):
+            self.clock.now += 6  # each page takes 6 s
+            return ok(scene_page(["a"], 5))
+        with mock.patch("urllib.request.urlopen", side_effect=urlopen):
+            items, total, error = stashbox_api.paginated_query(
+                URL, "k", "query", lambda p, pp: {"page": p},
+                lambda d: (d["queryScenes"]["scenes"], d["queryScenes"]["count"]),
+                plugin_settings=PAGED, operation_name="t", max_pages=5, deadline=deadline)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(total, 5)
+        self.assertIsInstance(error, stashbox_api.BudgetExceeded)
+
+
 class TestMain(MatchBase):
     def _main(self, args):
         stdin = io.StringIO(json.dumps({"server_connection": {}, "args": args}))

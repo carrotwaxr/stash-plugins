@@ -29,7 +29,7 @@ class FakePaginated:
         self.calls = []
 
     def __call__(self, url, api_key, query, build_fn, extract_fn, plugin_settings=None,
-                 operation_name=None, max_pages=None):
+                 operation_name=None, max_pages=None, deadline=None):
         self.calls.append({"input": build_fn(1, 100)["input"], "max_pages": max_pages,
                            "settings": plugin_settings})
         items, total = self.responses.pop(0)

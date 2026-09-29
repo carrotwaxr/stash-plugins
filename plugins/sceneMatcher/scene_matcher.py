@@ -460,7 +460,8 @@ def build_search_query(studio_name, performer_names):
 # StashDB API (using resilient stashbox_api module)
 # ============================================================================
 
-def query_stashdb_by_text(stashdb_url, api_key, search_term, limit=25, plugin_settings=None):
+def query_stashdb_by_text(stashdb_url, api_key, search_term, limit=25, plugin_settings=None,
+                          deadline=None):
     """
     Query StashDB using text search. Returns a list; raises StashBoxAPIError.
     Uses stashbox_api for retry logic and rate limiting.
@@ -468,11 +469,13 @@ def query_stashdb_by_text(stashdb_url, api_key, search_term, limit=25, plugin_se
     return stashbox_api.search_scenes_by_text(
         stashdb_url, api_key, search_term,
         limit=limit,
-        plugin_settings=plugin_settings
+        plugin_settings=plugin_settings,
+        deadline=deadline,
     )
 
 
-def query_stashdb_scenes_combined(stashdb_url, api_key, performer_ids, studio_id, plugin_settings=None):
+def query_stashdb_scenes_combined(stashdb_url, api_key, performer_ids, studio_id, plugin_settings=None,
+                                  deadline=None):
     """
     Query StashDB with combined performer AND studio filter.
     Returns (scenes, error); raises StashBoxAPIError when the first page fails.
@@ -480,11 +483,13 @@ def query_stashdb_scenes_combined(stashdb_url, api_key, performer_ids, studio_id
     """
     return stashbox_api.query_scenes_combined(
         stashdb_url, api_key, performer_ids, studio_id,
-        plugin_settings=plugin_settings
+        plugin_settings=plugin_settings,
+        deadline=deadline,
     )
 
 
-def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, plugin_settings=None):
+def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, plugin_settings=None,
+                                       deadline=None):
     """
     Query StashDB for scenes featuring any of the given performers.
     Returns (scenes, error); raises StashBoxAPIError when the first page fails.
@@ -492,11 +497,13 @@ def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, plug
     """
     return stashbox_api.query_scenes_by_performers(
         stashdb_url, api_key, performer_ids,
-        plugin_settings=plugin_settings
+        plugin_settings=plugin_settings,
+        deadline=deadline,
     )
 
 
-def query_stashdb_scenes_by_studio(stashdb_url, api_key, studio_id, plugin_settings=None):
+def query_stashdb_scenes_by_studio(stashdb_url, api_key, studio_id, plugin_settings=None,
+                                   deadline=None):
     """
     Query StashDB for scenes from a studio.
     Returns (scenes, error); raises StashBoxAPIError when the first page fails.
@@ -504,7 +511,8 @@ def query_stashdb_scenes_by_studio(stashdb_url, api_key, studio_id, plugin_setti
     """
     return stashbox_api.query_scenes_by_studio(
         stashdb_url, api_key, studio_id,
-        plugin_settings=plugin_settings
+        plugin_settings=plugin_settings,
+        deadline=deadline,
     )
 
 
@@ -1034,6 +1042,20 @@ def _auth_message(name, error):
             f"in Stash Settings > Metadata Providers.")
 
 
+def _out_of_time(errors):
+    return any(isinstance(e, stashbox_api.BudgetExceeded) for e in errors)
+
+
+def _warnings(name, errors):
+    """One warning per distinct error message, in order."""
+    out = []
+    for e in errors:
+        w = f"{name}: {e}"
+        if w not in out:
+            out.append(w)
+    return out
+
+
 def _failure_response(base, name, errors):
     """Response for a phase where every stash-box request failed."""
     auth = any(getattr(e, "is_auth_error", False) for e in errors)
@@ -1070,12 +1092,17 @@ def find_matches_fast(scene_id, plugin_settings, endpoint=None):
     all_scenes = {}
     errors = []
     searches = 0
+    deadline = stashbox_api.Deadline()  # both searches share one time budget
 
     def run_search(term):
         nonlocal searches
         searches += 1
+        if _out_of_time(errors):
+            errors.append(stashbox_api.BudgetExceeded(deadline.seconds))
+            return
         try:
-            found = query_stashdb_by_text(stashdb_url, stashdb_api_key, term, plugin_settings=plugin_settings)
+            found = query_stashdb_by_text(stashdb_url, stashdb_api_key, term, plugin_settings=plugin_settings,
+                                          deadline=deadline)
         except stashbox_api.StashBoxAPIError as e:
             log.LogWarning(f"Text search failed on {stashdb_name}: {e}")
             errors.append(e)
@@ -1129,7 +1156,9 @@ def find_matches_fast(scene_id, plugin_settings, endpoint=None):
         "has_more": bool(context["performer_stash_ids"] or context["studio_stash_id"])
     }
     if errors:
-        response["warnings"] = [f"{stashdb_name}: {e}" for e in errors]
+        response["warnings"] = _warnings(stashdb_name, errors)
+    if _out_of_time(errors):
+        response["partial"] = True
 
     return response
 
@@ -1191,12 +1220,16 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
     capped_totals = []  # stash-box totals of queries that the page cap stopped short
     errors = []
     succeeded = 0
+    deadline = stashbox_api.Deadline()  # every query and wait in this phase shares one budget
 
     def run_query(fn, *args):
         """Run one paginated query; keep whatever it returned and note failures."""
         nonlocal succeeded
+        if _out_of_time(errors):
+            return  # the budget is spent: the queries not yet run are skipped
         try:
-            scenes, error = fn(stashdb_url, stashdb_api_key, *args, plugin_settings=plugin_settings)
+            scenes, error = fn(stashdb_url, stashdb_api_key, *args, plugin_settings=plugin_settings,
+                               deadline=deadline)
         except stashbox_api.StashBoxAPIError as e:
             log.LogWarning(f"Query failed on {stashdb_name}: {e}")
             errors.append(e)
@@ -1273,7 +1306,7 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
         response["total_candidates"] = candidates
     if errors:
         response["partial"] = True
-        response["warnings"] = [f"{stashdb_name}: {e}" for e in errors]
+        response["warnings"] = _warnings(stashdb_name, errors)
 
     return response
 

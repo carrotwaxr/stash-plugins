@@ -111,6 +111,39 @@ class StashBoxAPIError(Exception):
 MAX_RETRY_AFTER = 60.0
 MAX_TOTAL_WAIT = 90.0
 
+# Every stash-box request and wait in one operation (a phase-1 or phase-2 search) shares
+# this budget, so the reply reaches the browser before it gives up at 120 s.
+OPERATION_BUDGET_SECONDS = 100.0
+
+
+class Deadline:
+    """The time left for one operation. No wait may end past it, and request timeouts
+    are cut to it."""
+
+    def __init__(self, seconds=OPERATION_BUDGET_SECONDS):
+        self.seconds = seconds
+        self._end = time.monotonic() + seconds
+
+    def remaining(self):
+        return max(0.0, self._end - time.monotonic())
+
+    def expired(self):
+        return self.remaining() <= 0.0
+
+    def fits(self, wait):
+        """True when waiting `wait` seconds still ends before the deadline."""
+        return wait < self.remaining()
+
+
+class BudgetExceeded(StashBoxAPIError):
+    """The operation's time budget ran out. What was collected before it is still good."""
+
+    def __init__(self, seconds):
+        super().__init__(
+            f"stopped after {seconds:.0f} s; the stash-box is rate-limiting or slow to answer, "
+            f"try again later",
+            retryable=True)
+
 _AUTH_MESSAGE_RE = re.compile(r"unauthori[sz]ed|forbidden|not authori[sz]ed", re.IGNORECASE)
 
 
@@ -167,7 +200,7 @@ def get_config(plugin_settings, key):
 
 
 def graphql_request_with_retry(url, query, variables=None, api_key=None,
-                                plugin_settings=None, operation_name=None):
+                                plugin_settings=None, operation_name=None, deadline=None):
     """
     Make a GraphQL request with retry logic for transient failures.
 
@@ -178,16 +211,23 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
         api_key: API key for authentication
         plugin_settings: Plugin configuration for retry/timeout settings
         operation_name: Human-readable name for logging
+        deadline: the operation's Deadline, shared by all its requests (a fresh
+            OPERATION_BUDGET_SECONDS one when omitted). No request starts after it,
+            no wait (Retry-After, rate-limit pause, backoff) runs past it, and the
+            request timeout is cut to the time left.
 
     Returns:
         The response "data" dict (GraphQL errors alongside non-null data are
         logged and the data returned)
 
     Raises:
+        BudgetExceeded: when the deadline is reached, or a wait would pass it.
         StashBoxAPIError: on HTTP/GraphQL/parse failures, auth failures
             (is_auth_error), rate limits that are too long to wait out, or
             after max retries.
     """
+    if deadline is None:
+        deadline = Deadline()
     max_retries = get_config(plugin_settings, "max_retries")
     initial_delay = get_config(plugin_settings, "initial_retry_delay")
     max_delay = get_config(plugin_settings, "max_retry_delay")
@@ -216,8 +256,14 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
     delay = initial_delay
     waited = 0.0
 
+    def out_of_time(wait):
+        log.LogWarning(f"{label}: a {wait:.0f}s wait would pass the {deadline.seconds:.0f}s budget; stopping")
+        return BudgetExceeded(deadline.seconds)
+
     def backoff(reason, attempt):
         nonlocal delay, waited
+        if not deadline.fits(delay):
+            raise out_of_time(delay)
         log.LogWarning(
             f"{reason} on {label}. Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
         )
@@ -226,8 +272,12 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
         delay = min(delay * backoff_multiplier, max_delay)
 
     for attempt in range(max_retries + 1):
+        if deadline.expired():
+            raise BudgetExceeded(deadline.seconds)
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
+            # At least a second, so a nearly spent budget still gets a real attempt
+            request_timeout = min(timeout, max(1.0, deadline.remaining()))
+            with urllib.request.urlopen(req, timeout=request_timeout, context=SSL_CONTEXT) as response:
                 body = response.read().decode("utf-8", errors="replace")
             try:
                 result = json.loads(body)
@@ -284,6 +334,8 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
                         f"Rate limited by the stash-box (asked to wait {wait:.0f}s); try again later",
                         status_code=429
                     )
+                if not deadline.fits(wait):
+                    raise out_of_time(wait)
                 log.LogWarning(
                     f"Rate limited (429) on {label}. "
                     f"Pausing {wait}s before retry {attempt + 1}/{max_retries}"
@@ -350,7 +402,7 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
 
 
 def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
-                    plugin_settings=None, operation_name=None, max_pages=None):
+                    plugin_settings=None, operation_name=None, max_pages=None, deadline=None):
     """
     Execute a paginated GraphQL query with rate limiting between pages.
 
@@ -363,6 +415,8 @@ def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
         plugin_settings: Plugin configuration
         operation_name: Human-readable name for logging
         max_pages: Override default max pages limit
+        deadline: the operation's Deadline (see graphql_request_with_retry); paging
+            stops, keeping what it has, when it is reached
 
     Returns:
         (items, total, error): every item collected, the server's total count,
@@ -371,6 +425,8 @@ def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
     Raises:
         StashBoxAPIError: when the first page fails (nothing to return).
     """
+    if deadline is None:
+        deadline = Deadline()
     request_delay = get_config(plugin_settings, "request_delay")
     per_page = get_config(plugin_settings, "per_page")
 
@@ -389,7 +445,8 @@ def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
             data = graphql_request_with_retry(
                 url, query, variables, api_key,
                 plugin_settings=plugin_settings,
-                operation_name=f"{operation_name or 'query'} (page {page})"
+                operation_name=f"{operation_name or 'query'} (page {page})",
+                deadline=deadline,
             )
         except StashBoxAPIError as e:
             if page == 1:
@@ -425,6 +482,10 @@ def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
 
         # Delay between pages to be courteous to the server
         if page <= max_pages:
+            if not deadline.fits(request_delay):
+                log.LogWarning(f"{operation_name}: time budget spent; returning {len(all_items)} items")
+                error = BudgetExceeded(deadline.seconds)
+                break
             time.sleep(request_delay)
 
     return all_items, total, error
@@ -448,10 +509,11 @@ def _scenes_list(items, total):
 
 
 def _paged_scene_query(url, api_key, query, build_variables, extract, plugin_settings,
-                       operation_name, max_pages):
+                       operation_name, max_pages, deadline=None):
     items, total, error = paginated_query(
         url, api_key, query, build_variables, extract,
-        plugin_settings=plugin_settings, operation_name=operation_name, max_pages=max_pages)
+        plugin_settings=plugin_settings, operation_name=operation_name, max_pages=max_pages,
+        deadline=deadline)
     return items, total, error
 
 
@@ -461,7 +523,7 @@ def _extract_scenes(data):
 
 
 def _performer_modifier_queries(url, api_key, query, performer_ids, studio_id,
-                                plugin_settings, operation_name, max_pages):
+                                plugin_settings, operation_name, max_pages, deadline=None):
     """Run a performer (optionally + studio) query: INCLUDES_ALL first with 2+ performers,
     then add INCLUDES when that finds fewer than MIN_COMBINED_RESULTS_THRESHOLD scenes.
 
@@ -487,7 +549,7 @@ def _performer_modifier_queries(url, api_key, query, performer_ids, studio_id,
         try:
             items, total, error = _paged_scene_query(
                 url, api_key, query, make_builder(modifier), _extract_scenes,
-                plugin_settings, f"{operation_name} ({modifier})", max_pages)
+                plugin_settings, f"{operation_name} ({modifier})", max_pages, deadline)
         except StashBoxAPIError as e:
             if n == 0:
                 raise
@@ -545,7 +607,7 @@ SCENE_FIELDS = """
 """
 
 
-def query_scenes_by_studio(url, api_key, studio_id, plugin_settings=None):
+def query_scenes_by_studio(url, api_key, studio_id, plugin_settings=None, deadline=None):
     """Query StashDB for all scenes from a studio. Returns (scenes, error); raises if page 1 fails."""
     query = f"""
     query QueryScenes($input: SceneQueryInput!) {{
@@ -575,14 +637,14 @@ def query_scenes_by_studio(url, api_key, studio_id, plugin_settings=None):
     max_pages = get_config(plugin_settings, "max_pages_studio")
     items, total, error = _paged_scene_query(
         url, api_key, query, build_variables, _extract_scenes,
-        plugin_settings, "scenes for studio", max_pages)
+        plugin_settings, "scenes for studio", max_pages, deadline)
     scenes = _scenes_list(items, total)
 
     log.LogInfo(f"StashDB: Found {len(scenes)} scenes for studio")
     return scenes, error
 
 
-def search_scenes_by_text(url, api_key, search_term, limit=25, plugin_settings=None):
+def search_scenes_by_text(url, api_key, search_term, limit=25, plugin_settings=None, deadline=None):
     """Search StashDB scenes by text query. Raises StashBoxAPIError on failure."""
     if not search_term or len(search_term) < 3:
         return []
@@ -598,7 +660,8 @@ def search_scenes_by_text(url, api_key, search_term, limit=25, plugin_settings=N
     data = graphql_request_with_retry(
         url, query, {"term": search_term, "limit": limit}, api_key,
         plugin_settings=plugin_settings,
-        operation_name=f"text search '{search_term[:30]}...'"
+        operation_name=f"text search '{search_term[:30]}...'",
+        deadline=deadline,
     )
     scenes = ((data or {}).get("searchScene")) or []
     log.LogInfo(f"StashDB text search '{search_term[:30]}...': found {len(scenes)} scenes")
@@ -618,7 +681,8 @@ def _scene_query_text():
     """
 
 
-def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_settings=None, max_pages=None):
+def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_settings=None, max_pages=None,
+                          deadline=None):
     """Query StashDB for scenes by performers (AND first, then OR when sparse) and studio.
 
     Returns (scenes, error); raises if page 1 fails. max_pages defaults to the
@@ -631,12 +695,13 @@ def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_setting
 
     scenes, error = _performer_modifier_queries(
         url, api_key, _scene_query_text(), performer_ids, studio_id,
-        plugin_settings, "combined performer+studio query", max_pages)
+        plugin_settings, "combined performer+studio query", max_pages, deadline)
     log.LogInfo(f"StashDB combined (performer+studio): found {len(scenes)} scenes")
     return scenes, error
 
 
-def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None, max_pages=None):
+def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None, max_pages=None,
+                               deadline=None):
     """Query StashDB for scenes featuring the given performers (AND first, then OR when sparse).
 
     Returns (scenes, error); raises if page 1 fails. max_pages defaults to the
@@ -649,6 +714,6 @@ def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None
 
     scenes, error = _performer_modifier_queries(
         url, api_key, _scene_query_text(), performer_ids, None,
-        plugin_settings, f"scenes for {len(performer_ids)} performers", max_pages)
+        plugin_settings, f"scenes for {len(performer_ids)} performers", max_pages, deadline)
     log.LogInfo(f"StashDB: Found {len(scenes)} scenes for {len(performer_ids)} performers")
     return scenes, error
