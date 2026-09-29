@@ -14,8 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 class TestTagManagerModes(unittest.TestCase):
     """Test different plugin operation modes."""
 
+    @patch('tag_manager.load_cached_tags', return_value=None)
     @patch('stashdb_api.graphql_request')
-    def test_search_mode_returns_matches(self, mock_graphql):
+    def test_search_mode_returns_matches(self, mock_graphql, _mock_cache):
         """search mode should return matching StashDB tags."""
         # Mock StashDB response
         mock_graphql.return_value = {
@@ -45,8 +46,9 @@ class TestTagManagerModes(unittest.TestCase):
         self.assertGreater(len(result["matches"]), 0)
         self.assertEqual(result["matches"][0]["tag"]["name"], "Anal Creampie")
 
+    @patch('tag_manager.load_cached_tags', return_value=None)
     @patch('stashdb_api.graphql_request')
-    def test_search_mode_scores_exact_higher_than_alias(self, mock_graphql):
+    def test_search_mode_scores_exact_higher_than_alias(self, mock_graphql, _mock_cache):
         """Exact name matches should score higher than alias matches."""
         # Mock StashDB response with two tags:
         # - One where search term matches the name exactly
@@ -276,3 +278,77 @@ class TestHandleFetchAll(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def _tag(tag_id, name, aliases=None):
+    return {"id": tag_id, "name": name, "description": "", "aliases": aliases or [], "category": None}
+
+
+class TestMainSearch(unittest.TestCase):
+    """Run tag_manager.main() end to end with a mocked Stash and StashDB."""
+
+    URL = "https://stashdb.org/graphql"
+
+    def setUp(self):
+        import io
+        import plugin_data
+        self._io = io
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(setattr, plugin_data, "_current_dir", None)
+        self.plugin_config = {"tagBlacklist": "Blonde"}
+
+    def _run(self, args, graphql_side_effect=None, graphql_return=None):
+        import tag_manager
+        config = {
+            "general": {"stashBoxes": [{"endpoint": self.URL, "api_key": "k", "name": "StashDB"}]},
+            "plugins": {"tagManager": self.plugin_config},
+        }
+        if graphql_return is None:
+            graphql_return = {"queryTags": {"count": 2, "tags": [
+                _tag("b1", "Blonde"), _tag("b2", "Blonde Hair")]}}
+        payload = json.dumps({"server_connection": {"Dir": self.tmp}, "args": args})
+        out = self._io.StringIO()
+        with patch("sys.stdin", self._io.StringIO(payload)), \
+             patch("sys.stdout", out), \
+             patch("tag_manager.LocalStash") as mock_stash, \
+             patch("stashdb_api.graphql_request", side_effect=graphql_side_effect,
+                   return_value=graphql_return):
+            mock_stash.return_value.configuration.return_value = config
+            tag_manager.main()
+        return json.loads(out.getvalue())["output"]
+
+    def test_search_uses_server_blacklist(self):
+        output = self._run({
+            "mode": "search", "tag_name": "Blonde", "stashdb_url": self.URL,
+            "settings": {"tagBlacklist": ""},
+        })
+        names = [m["tag"]["name"] for m in output["matches"]]
+        self.assertNotIn("Blonde", names)
+        self.assertIn("Blonde Hair", names)
+
+    def test_search_ignores_client_stashdb_tags(self):
+        import tag_manager, plugin_data
+        plugin_data.configure({"Dir": self.tmp})
+        tag_manager.save_tags_to_cache(self.URL, [_tag("h1", "Handcuffs")])
+        output = self._run({
+            "mode": "search", "tag_name": "Handcuff", "stashdb_url": self.URL,
+            "stashdb_tags": [_tag("z1", "Handcuffz")],
+        }, graphql_return={"queryTags": {"count": 0, "tags": []}})
+        names = [m["tag"]["name"] for m in output["matches"]]
+        self.assertIn("Handcuffs", names)
+        self.assertNotIn("Handcuffz", names)
+        self.assertFalse(output.get("fuzzy_unavailable"))
+
+    def test_search_without_cache_reports_fuzzy_unavailable(self):
+        output = self._run({"mode": "search", "tag_name": "Blonde", "stashdb_url": self.URL})
+        self.assertTrue(output["fuzzy_unavailable"])
+
+    def test_search_error_is_reported(self):
+        from stashdb_api import StashDBAPIError
+        output = self._run(
+            {"mode": "search", "tag_name": "Blonde", "stashdb_url": self.URL},
+            graphql_side_effect=StashDBAPIError("forbidden", status_code=403),
+        )
+        self.assertIn("error", output)
+        self.assertTrue(output["auth_error"])

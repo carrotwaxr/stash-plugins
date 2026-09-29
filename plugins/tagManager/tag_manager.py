@@ -323,7 +323,7 @@ def get_settings_from_config(stash_config):
     }
 
 
-def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags=None):
+def handle_search(tag_name, stashdb_url, stashdb_api_key, settings):
     """
     Search for StashDB matches for a local tag.
 
@@ -332,10 +332,10 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
         stashdb_url: StashDB GraphQL endpoint
         stashdb_api_key: StashDB API key
         settings: Plugin settings dict
-        stashdb_tags: Optional cached StashDB tags (avoids re-fetch)
 
     Returns:
-        Dict with matches and search info
+        Dict with matches and search info. `fuzzy_unavailable` is True when fuzzy
+        matching is enabled but there is no tag cache for this endpoint yet.
     """
     log.LogDebug(f"Searching for tag: {tag_name}")
 
@@ -353,6 +353,11 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
 
     # If we have cached tags, also do local fuzzy matching
     local_matches = []
+    fuzzy_unavailable = False
+    cache = load_cached_tags(stashdb_url) if enable_fuzzy else None
+    stashdb_tags = (cache or {}).get("tags") or []
+    if enable_fuzzy and not stashdb_tags:
+        fuzzy_unavailable = True
     if stashdb_tags and enable_fuzzy:
         synonyms_path = os.path.join(get_plugin_dir(), "synonyms.json")
         synonyms = load_synonyms(synonyms_path)
@@ -418,7 +423,8 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
     return {
         "tag_name": tag_name,
         "matches": combined_matches[:20],  # Limit to top 20
-        "total_matches": len(combined_matches)
+        "total_matches": len(combined_matches),
+        "fuzzy_unavailable": fuzzy_unavailable,
     }
 
 
@@ -588,11 +594,9 @@ def main():
     log.LogDebug(f"tagManager called with mode: {mode}")
     log.LogTrace(f"Args keys: {list(args.keys())}")
 
-    # Get settings from server connection or args
     server_connection = input_data.get("server_connection", {})
     plugin_data.configure(server_connection)
-    # For now, settings come from args (JS passes them)
-    settings = get_settings_from_config(args.get("settings", {}))
+    settings = get_settings_from_config(DEFAULT_PLUGIN_SETTINGS)  # overridden from Stash's config below
 
     # The UI says which stash-box it has selected; the URL we use (also the cache key)
     # and its API key come from Stash's config. Scene sync resolves its own below.
@@ -600,6 +604,9 @@ def main():
         try:
             stash_config = LocalStash(server_connection).configuration()
             stashdb_url, stashdb_api_key = resolve_stashbox(args.get("stashdb_url"), stash_config)
+            # Settings come from what's saved in Stash, never from the browser.
+            plugin_config = (stash_config.get("plugins") or {}).get(plugin_data.PLUGIN_ID) or {}
+            settings = get_settings_from_config({**DEFAULT_PLUGIN_SETTINGS, **plugin_config})
         except Exception as e:
             log.LogError(f"Could not resolve stash-box endpoint: {e}")
             print(json.dumps({"output": {"error": str(e)}}))
@@ -657,11 +664,7 @@ def main():
 
             log.LogDebug(f"Searching for tag: {tag_name}")
 
-            # Pass cached tags if provided (from JS cache)
-            stashdb_tags = args.get("stashdb_tags")
-            if stashdb_tags:
-                log.LogDebug(f"Using {len(stashdb_tags)} cached tags from JS")
-            result = handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags)
+            result = handle_search(tag_name, stashdb_url, stashdb_api_key, settings)
 
         elif mode == "fetch_all":
             force_refresh = args.get("force_refresh", False)
@@ -673,6 +676,10 @@ def main():
             result = {"error": f"Unknown mode: {mode}"}
 
         output = {"output": result}
+
+    except StashDBAPIError as e:
+        log.LogError(f"StashDB error in mode '{mode}': {e}")
+        output = {"output": {"error": str(e), "auth_error": e.is_auth_error}}
 
     except Exception as e:
         log.LogError(f"Error in mode '{mode}': {e}")
