@@ -169,12 +169,18 @@ tagManager/
 ├── tag-manager.js         # JavaScript UI
 ├── tag-manager.css        # UI styles
 ├── synonyms.json          # Custom synonym mappings
+├── assets/                # Files served to the UI (default_settings.json)
 ├── requirements.txt       # Python dependencies
 ├── cache/                 # Tag cache files (auto-created)
 └── tests/                 # Test suite
 ```
 
 ## Changelog
+
+### v0.6.1
+
+- The backend now looks up the stash-box URL and API key in Stash's own configuration instead of accepting them from the browser. An endpoint that isn't configured in Stash is rejected.
+- Only the `assets/` folder is served to the browser, instead of the whole plugin directory.
 
 ### v0.6.0
 

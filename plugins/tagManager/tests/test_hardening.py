@@ -5,6 +5,7 @@ Tests for defensive config reads (folded #128-review hardening follow-ups).
   cleared numeric field; backfill only fills *missing* keys, not "").
 - get_settings_from_config no longer crashes on an empty-string fuzzyThreshold/pageSize.
 - resolve_sync_dry_run falls back to the safe default on a missing/malformed config.
+- resolve_stashbox takes the stash-box URL and key from Stash's config, never the client.
 
 Run with: python -m pytest tests/test_hardening.py -v
 """
@@ -15,7 +16,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tag_manager import safe_int, get_settings_from_config, resolve_sync_dry_run
+from tag_manager import safe_int, get_settings_from_config, resolve_sync_dry_run, resolve_stashbox
 from tag_manager import DEFAULT_PLUGIN_SETTINGS
 
 
@@ -72,6 +73,51 @@ class TestResolveSyncDryRun(unittest.TestCase):
 
     def test_none_config_falls_back(self):
         self.assertEqual(resolve_sync_dry_run(None), DEFAULT_PLUGIN_SETTINGS["syncDryRun"])
+
+
+class TestResolveStashbox(unittest.TestCase):
+    CONFIG = {
+        "general": {"stashBoxes": [
+            {"endpoint": "https://stashdb.org/graphql", "api_key": "stashdb-key", "name": "StashDB"},
+            {"endpoint": "https://fansdb.cc/graphql", "api_key": "fansdb-key", "name": "FansDB"},
+        ]},
+        "plugins": {},
+    }
+
+    def test_matches_configured_endpoint(self):
+        self.assertEqual(
+            resolve_stashbox("https://fansdb.cc/graphql", self.CONFIG),
+            ("https://fansdb.cc/graphql", "fansdb-key"),
+        )
+
+    def test_match_ignores_case_and_trailing_slash_but_returns_configured_url(self):
+        self.assertEqual(
+            resolve_stashbox("HTTPS://StashDB.org/graphql/", self.CONFIG),
+            ("https://stashdb.org/graphql", "stashdb-key"),
+        )
+
+    def test_unconfigured_endpoint_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_stashbox("http://10.0.0.4:8080/graphql", self.CONFIG)
+
+    def test_empty_request_uses_first_box(self):
+        self.assertEqual(resolve_stashbox("", self.CONFIG), ("https://stashdb.org/graphql", "stashdb-key"))
+
+    def test_no_boxes_raises(self):
+        with self.assertRaises(ValueError):
+            resolve_stashbox("https://stashdb.org/graphql", {"general": {"stashBoxes": []}})
+
+    def test_legacy_plugin_credentials(self):
+        cfg = {"general": {"stashBoxes": []}, "plugins": {"tagManager": {"stashdbApiKey": "legacy-key"}}}
+        self.assertEqual(
+            resolve_stashbox("https://stashdb.org/graphql", cfg),
+            ("https://stashdb.org/graphql", "legacy-key"),
+        )
+
+    def test_malformed_config_raises_value_error(self):
+        for cfg in (None, {}, {"general": None, "plugins": None}, {"plugins": {"tagManager": None}}):
+            with self.assertRaises(ValueError):
+                resolve_stashbox("https://stashdb.org/graphql", cfg)
 
 
 if __name__ == "__main__":

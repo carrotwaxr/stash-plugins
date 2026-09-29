@@ -226,7 +226,6 @@
             general {
               stashBoxes {
                 endpoint
-                api_key
                 name
               }
             }
@@ -260,7 +259,6 @@
         // Fallback to plugin settings if no stash-boxes configured
         selectedStashBox = {
           endpoint: settings.stashdbEndpoint,
-          api_key: settings.stashdbApiKey,
           name: "Plugin Settings"
         };
         stashBoxes = [selectedStashBox];
@@ -544,17 +542,17 @@
       }
     `;
 
-    // Use selected stash-box or fall back to plugin settings
+    // Use selected stash-box or fall back to plugin settings. The backend looks
+    // up the API key for this endpoint in Stash's config.
     const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
-    const apiKey = selectedStashBox?.api_key || settings.stashdbApiKey;
 
     console.debug(`[tagManager] callBackend mode=${mode} endpoint=${endpoint}`);
 
+    const { stashdbApiKey, ...backendSettings } = settings;
     const fullArgs = {
       mode,
       stashdb_url: endpoint,
-      stashdb_api_key: apiKey,
-      settings: settings,
+      settings: backendSettings,
       ...args,
     };
 
