@@ -838,6 +838,26 @@
     }
   }
 
+  // Test hook: active only when a test sets window.__MISSING_SCENES_TEST__
+  if (window.__MISSING_SCENES_TEST__) {
+    window.__MISSING_SCENES_TEST__.modal = {
+      findMissingScenes,
+      getEndpoints,
+      performSearch,
+      handleSearch,
+      handleLoadMore,
+      handleAddAll,
+      updateStats,
+      renderResults,
+      updateLoadMoreButton,
+      setStatus,
+      showLoading,
+      showError,
+      createModal,
+      removeModal,
+    };
+  }
+
   // Start the plugin
   init();
 })();

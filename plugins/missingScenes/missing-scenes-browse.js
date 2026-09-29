@@ -487,6 +487,18 @@
     console.log('[MissingScenes] Route registered:', BROWSE_PATH);
   }
 
+  // Test hook: active only when a test sets window.__MISSING_SCENES_TEST__
+  if (window.__MISSING_SCENES_TEST__) {
+    window.__MISSING_SCENES_TEST__.browse = {
+      getAllEndpoints,
+      browseStashdb,
+      renderPage,
+      performSearch,
+      setupControlHandlers,
+      MissingScenesBrowsePage,
+    };
+  }
+
   // Initialize
   registerRoute();
   setupNavButtonInjection();
