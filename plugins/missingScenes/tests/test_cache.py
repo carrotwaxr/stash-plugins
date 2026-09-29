@@ -3,6 +3,10 @@
 import hashlib
 import json
 import os
+import shutil
+import subprocess
+import sys
+import textwrap
 import time
 
 import pytest
@@ -38,9 +42,12 @@ def test_data_dir_creates_under_dir(tmp_path):
     assert os.path.isdir(p)
 
 
-def test_data_dir_without_dir_uses_plugin_dir_data():
+def test_data_dir_without_dir_uses_plugin_dir_data(monkeypatch):
+    made = []
+    monkeypatch.setattr(plugin_data.os, "makedirs", lambda path, **k: made.append(path))  # keep the plugin dir clean
     p = plugin_data.data_dir(None)
     assert p == os.path.join(os.path.dirname(os.path.abspath(plugin_data.__file__)), "data")
+    assert made == [p] and plugin_data.default_dir() == p
 
 
 def test_configure_uses_dir(tmp_path):
@@ -195,3 +202,64 @@ def test_fresh_build_ignores_the_memory_and_disk_caches(monkeypatch):
     assert missing_scenes._local_stash_id_cache[EP] == {"now"}
     assert missing_scenes._read_cache_from_disk(EP) == {"now"}
     assert missing_scenes._cache_metadata[EP]["source"] == "built"
+
+
+# ---- importing never writes (a read-only plugin folder) ------------------------------------
+
+PLUGIN_FILES = ["missing_scenes.py", "plugin_data.py", "log.py", "fingerprint_index.py",
+                "stashbox_api.py", "theporndb_api.py", "missingScenes.yml"]
+
+
+def plugin_copy(tmp_path):
+    src = os.path.dirname(os.path.abspath(missing_scenes.__file__))
+    dst = tmp_path / "missingScenes"
+    dst.mkdir()
+    for name in PLUGIN_FILES:
+        shutil.copy(os.path.join(src, name), dst / name)
+    return dst
+
+
+def run_python(cwd, code):
+    return subprocess.run([sys.executable, "-c", textwrap.dedent(code)], cwd=cwd,
+                          capture_output=True, text=True, timeout=60)
+
+
+def test_importing_the_module_creates_no_data_folder(tmp_path):
+    plugin = plugin_copy(tmp_path)
+    run = run_python(plugin, "import missing_scenes")
+    assert run.returncode == 0, run.stderr
+    assert not (plugin / "data").exists()
+
+
+def test_a_read_only_plugin_folder_still_answers(tmp_path):
+    plugin = plugin_copy(tmp_path)
+    config = tmp_path / "config"
+    config.mkdir()
+    run = run_python(plugin, f"""
+        import json, os
+        plugin = os.getcwd()
+        real = os.makedirs
+        def makedirs(path, *a, **k):
+            # a read-only mount: nothing can be created inside the plugin folder
+            if os.path.abspath(path).startswith(plugin):
+                raise PermissionError(13, "Read-only file system", path)
+            return real(path, *a, **k)
+        os.makedirs = makedirs
+        import missing_scenes as ms
+        ms._input_data = {{"server_connection": {{"Dir": {str(config)!r}}}, "args": {{}}}}
+        ms.stash_graphql = lambda q, v=None: {{"configuration": {{"plugins": {{}}}}}}
+        ms.main()
+        print(ms.CACHE_DIR)
+    """)
+    assert run.returncode == 0, run.stderr
+    lines = run.stdout.strip().splitlines()
+    assert json.loads(lines[0]) == {"output": {"success": True, "message": "No operation specified"}}
+    assert lines[1] == str(config / "plugin_data" / "missingScenes")
+
+
+def test_current_dir_never_raises_when_nothing_can_be_created(monkeypatch):
+    def read_only(path, *a, **k):
+        raise PermissionError(13, "Read-only file system", path)
+    monkeypatch.setattr(plugin_data.os, "makedirs", read_only)
+    path = plugin_data.current_dir()
+    assert isinstance(path, str) and path

@@ -57,9 +57,10 @@ _cache_metadata: dict[str, dict] = {}
 
 # Disk cache configuration
 CACHE_TTL_SECONDS = 300  # 5 minutes
-# Lives in Stash's config dir (plugin_data/missingScenes); main() re-points it after
-# plugin_data.configure(). Cache functions read this at call time.
-CACHE_DIR = plugin_data.current_dir()
+# Lives in Stash's config dir (plugin_data/missingScenes): main() sets it after
+# plugin_data.configure(). Until then it is only the plugin-dir fallback's path; nothing is
+# created at import, so a read-only plugin dir works. Cache functions read this at call time.
+CACHE_DIR = plugin_data.default_dir()
 
 
 def _md5_hex(text: str) -> str:
