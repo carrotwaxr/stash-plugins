@@ -221,6 +221,10 @@
   font-style: italic;
 }
 
+.tm-search-failed {
+  color: var(--bs-danger, #dc3545);
+}
+
 .tm-loading {
   color: var(--bs-secondary-color, #888);
 }
@@ -547,6 +551,10 @@
    Tag Hierarchy View Styles
    ============================================ */
 
+.tag-hierarchy-container:focus {
+  outline: none;
+}
+
 .tag-hierarchy-container {
   padding: 20px;
   max-width: 1400px;
@@ -844,6 +852,27 @@
   font-size: 0.85em;
   color: var(--bs-warning, #ffc107);
   margin-top: 4px;
+}
+
+.tm-blacklist-editor {
+  margin: 8px 0 12px;
+}
+
+.tm-blacklist-editor textarea {
+  width: 100%;
+  font-family: monospace;
+}
+
+.tm-blacklist-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.tm-blacklist-hint {
+  font-size: 0.85em;
+  opacity: 0.7;
 }
 
 /* ============================================
@@ -1632,4 +1661,23 @@
 
 .tm-conflict-actions .btn {
   font-size: 0.85em;
+}
+
+/* F6: one row action at a time; resolved rows keep their result */
+.tm-conflict-list.tm-conflict-busy .tm-conflict-actions {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.tm-conflict-row.tm-conflict-done {
+  opacity: 0.8;
+}
+
+.tm-conflict-result {
+  font-size: 0.9em;
+}
+
+.tm-conflict-error {
+  color: var(--bs-danger, #dc3545);
+  font-size: 0.9em;
 }

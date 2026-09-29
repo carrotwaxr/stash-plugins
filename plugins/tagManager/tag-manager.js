@@ -16,14 +16,22 @@
   let stashBoxes = []; // Configured stash-box endpoints from Stash
   let selectedStashBox = null; // Currently selected stash-box
   let stashdbTags = null; // Cached tags for selected endpoint
+  let stashdbTagsLoad = null; // The page's background load of stashdbTags while it runs
   let cacheStatus = null; // Cache status for selected endpoint
   let localTags = []; // Local Stash tags
   let currentPage = 1;
   let isLoading = false;
   let isCacheLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
+  let matchErrors = {}; // tag_id -> error text of its last failed search (no matchResults entry then)
+  let fuzzyHintShown = false; // the "fuzzy matching unavailable" hint shows once per page visit
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
-  let categoryMappings = {}; // Cache of category_name -> local_tag_id
+  let categoryMappingsLoaded = false; // true once the stored mappings were read (or found empty)
+  let pendingMappingDeletes = new Set(); // JSON [endpoint, category] deleted while not loaded
+  let categoryMappings = {}; // { endpoint: { category_name: local_tag_id } } (see getCategoryMapping)
+  let tagBlacklistRaw = ''; // Raw blacklist text as saved (for the editor)
+  let blacklistPanelOpen = false;
+  let blacklistDraft = null; // Unsaved editor text (null when the editor matches the saved text)
   let tagBlacklist = []; // Parsed blacklist patterns [{type: 'literal'|'regex', pattern: string, regex?: RegExp}]
   let activeTab = 'match'; // 'match' or 'browse'
   let browseCategory = null; // Selected category in browse view
@@ -62,6 +70,80 @@
     const baseURL = baseEl ? baseEl.getAttribute("href") : "/";
     const normalizedAssetPath = assetPath.replace(/^\/+/, "");
     return `${baseURL}plugin/${PLUGIN_ID}/assets/${normalizedAssetPath}`;
+  }
+
+  /**
+   * F16: an app path under Stash's <base href> (e.g. "/stash/"), so links and
+   * navigation work when Stash is served from a sub-path. Accepts paths with or
+   * without a leading slash; never doubles slashes.
+   *   stashPath("/tags/5") -> "/tags/5" (base "/") or "/stash/tags/5" (base "/stash/")
+   */
+  function stashPath(path) {
+    const baseEl = document.querySelector("base");
+    let base = (baseEl && baseEl.getAttribute("href")) || "/";
+    if (/^([a-z][a-z\d+.-]*:)?\/\//i.test(base)) { // absolute or protocol-relative
+      try { base = new URL(base, window.location.href).pathname; } catch (e) { /* keep the raw href */ }
+    }
+    let prefix = base.replace(/\/+$/, "");
+    if (prefix && !prefix.startsWith("/")) prefix = `/${prefix}`;
+    const rel = String(path == null ? "" : path).replace(/^\/+/, "");
+    return `${prefix}/${rel}`;
+  }
+
+  /**
+   * F16: navigate inside Stash's single-page app (react-router's BrowserRouter
+   * listens for popstate) instead of a full page load. `path` is un-based
+   * ("/tags/5"); stashPath adds the base. Falls back to a normal load only if
+   * the History API refuses.
+   */
+  function navigateTo(path) {
+    const url = stashPath(path);
+    try {
+      window.history.pushState({}, "", url);
+      // history v4 ignores a popstate whose state is undefined, so pass one.
+      window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
+    } catch (e) {
+      console.warn("[tagManager] In-app navigation failed; loading the page instead:", e);
+      window.location.href = url;
+    }
+  }
+
+  /**
+   * F16: delegated click handler for in-page links that carry
+   * data-tm-route="/tags/5" (their href is the based path, so middle-click and
+   * open-in-new-tab still work). A plain left click navigates in the SPA; any
+   * modifier key, non-left button, target=_blank or an already-handled click is
+   * left to the browser.
+   */
+  function handleInternalLinkClick(e) {
+    if (!e || e.defaultPrevented || e.button !== 0) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const link = e.target && typeof e.target.closest === "function" ? e.target.closest("a[data-tm-route]") : null;
+    if (!link) return;
+    const target = link.getAttribute("target");
+    if (target && target !== "_self") return;
+    const route = link.getAttribute("data-tm-route");
+    if (!route) return;
+    e.preventDefault();
+    navigateTo(route);
+  }
+
+  /** href + data-tm-route attributes for an in-page link to a Stash path. */
+  function internalLinkAttrs(path) {
+    return `href="${escapeHtml(stashPath(path))}" data-tm-route="${escapeHtml(path)}"`;
+  }
+
+  // Used when default_settings.json could not be loaded (DEFAULTS is {}).
+  const FALLBACK_NUMERIC_DEFAULTS = { fuzzyThreshold: 80, pageSize: 25 };
+
+  /**
+   * F18: parse an integer setting (radix 10). NaN or below `min` gives `def`;
+   * above `max` is capped. 0 is a valid value when `min` allows it.
+   */
+  function parseIntSetting(value, def, min = -Infinity, max = Infinity) {
+    const n = Number.parseInt(String(value), 10);
+    if (Number.isNaN(n) || n < min) return def;
+    return n > max ? max : n;
   }
 
   /**
@@ -240,8 +322,11 @@
         stashdbApiKey: pluginConfig.stashdbApiKey || STASHDB_API_KEY,
         enableFuzzySearch: pluginConfig.enableFuzzySearch ?? DEFAULTS.enableFuzzySearch,
         enableSynonymSearch: pluginConfig.enableSynonymSearch ?? DEFAULTS.enableSynonymSearch,
-        fuzzyThreshold: parseInt(pluginConfig.fuzzyThreshold) || DEFAULTS.fuzzyThreshold,
-        pageSize: parseInt(pluginConfig.pageSize) || DEFAULTS.pageSize,
+        // F18: 0 is a valid threshold; a missing/unusable DEFAULTS falls back to constants.
+        fuzzyThreshold: parseIntSetting(pluginConfig.fuzzyThreshold,
+          parseIntSetting(DEFAULTS.fuzzyThreshold, FALLBACK_NUMERIC_DEFAULTS.fuzzyThreshold, 0, 100), 0, 100),
+        pageSize: parseIntSetting(pluginConfig.pageSize,
+          parseIntSetting(DEFAULTS.pageSize, FALLBACK_NUMERIC_DEFAULTS.pageSize, 1), 1),
         preferStashBoxName: pluginConfig.preferStashBoxName ?? DEFAULTS.preferStashBoxName,
         preferStashBoxDescription: pluginConfig.preferStashBoxDescription ?? DEFAULTS.preferStashBoxDescription,
         leaveParentTagsAlone: pluginConfig.leaveParentTagsAlone ?? DEFAULTS.leaveParentTagsAlone,
@@ -274,8 +359,115 @@
     }
   }
 
+  // Category mappings were one flat map, and the plugin historically targeted StashDB.
+  const LEGACY_MAPPINGS_ENDPOINT = STASHDB_ENDPOINT;
+
+  const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const isMappingId = (v) => typeof v === "string" || (typeof v === "number" && Number.isFinite(v));
+  const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
   /**
-   * Load category mappings from plugin settings
+   * F20: normalize stored category mappings to the per-endpoint shape
+   * { endpoint: { categoryName: localTagId } }. Pure: returns a new object.
+   *   - a string/number value is a legacy flat entry { category: id }; it moves
+   *     under `legacyEndpoint`, unless that endpoint's nested map already has the
+   *     category (the nested entry wins).
+   *   - a plain-object value is an endpoint map; its string/number ids are kept.
+   *   - ids are stored as strings (local tag ids are strings).
+   *   - anything else (null, booleans, arrays) is dropped with a console.warn.
+   *   - a non-object input gives {}.
+   * An already-nested map, or {}, comes back unchanged.
+   */
+  function migrateCategoryMappings(raw, legacyEndpoint = LEGACY_MAPPINGS_ENDPOINT) {
+    if (!isPlainObject(raw)) {
+      if (raw !== null && raw !== undefined) {
+        console.warn("[tagManager] Category mappings are not an object; ignoring them:", raw);
+      }
+      return {};
+    }
+    const out = {};
+    const legacy = {};
+    const dropped = [];
+    for (const [key, value] of Object.entries(raw)) {
+      if (isMappingId(value)) {
+        legacy[key] = String(value);
+      } else if (isPlainObject(value)) {
+        const inner = {};
+        for (const [category, id] of Object.entries(value)) {
+          if (isMappingId(id)) inner[category] = String(id);
+          else dropped.push(`${key} / ${category}`);
+        }
+        out[key] = inner;
+      } else {
+        dropped.push(key);
+      }
+    }
+    if (Object.keys(legacy).length > 0) {
+      const target = out[legacyEndpoint] || {};
+      const overridden = Object.keys(legacy).filter(c => hasOwn(target, c) && target[c] !== legacy[c]);
+      if (overridden.length > 0) {
+        console.warn(`[tagManager] Legacy category mappings for ${overridden.join(", ")} conflict with ` +
+          `newer ${legacyEndpoint} mappings; keeping the newer ones.`);
+      }
+      out[legacyEndpoint] = { ...legacy, ...target };
+    }
+    if (dropped.length > 0) {
+      console.warn("[tagManager] Dropped unreadable category mapping entries:", dropped);
+    }
+    return out;
+  }
+
+  /** F20: the saved local parent tag id for `category` on `endpoint`, or undefined. */
+  function getCategoryMapping(endpoint, category) {
+    if (!endpoint || !category || !hasOwn(categoryMappings, endpoint)) return undefined;
+    const map = categoryMappings[endpoint];
+    return isPlainObject(map) && hasOwn(map, category) ? map[category] : undefined;
+  }
+
+  /** F20: remember `category` -> local tag `id` for `endpoint` (in memory; save separately). */
+  function setCategoryMapping(endpoint, category, id) {
+    if (!endpoint || !category || id === null || id === undefined) return;
+    if (!hasOwn(categoryMappings, endpoint) || !isPlainObject(categoryMappings[endpoint])) {
+      categoryMappings[endpoint] = {};
+    }
+    categoryMappings[endpoint][category] = String(id);
+    pendingMappingDeletes.delete(JSON.stringify([endpoint, category]));
+  }
+
+  /** F20: forget one endpoint's mapping for `category`; drops the endpoint map once empty. */
+  function deleteCategoryMapping(endpoint, category) {
+    if (!endpoint || !category) return;
+    // Not loaded: the stored value may still hold it, so remember to remove it on merge.
+    if (!categoryMappingsLoaded) pendingMappingDeletes.add(JSON.stringify([endpoint, category]));
+    if (!hasOwn(categoryMappings, endpoint)) return;
+    const map = categoryMappings[endpoint];
+    if (isPlainObject(map)) delete map[category];
+    if (!isPlainObject(map) || Object.keys(map).length === 0) delete categoryMappings[endpoint];
+  }
+
+  /**
+   * A saved mapping points at a tag missing from localTags, which can be stale:
+   * delete and save it only once Stash confirms the tag is gone. A failed
+   * lookup, or a mapping changed meanwhile, keeps it.
+   */
+  async function dropCategoryMappingIfTagGone(endpoint, category, tagId) {
+    try {
+      if (await tagExists(tagId)) return;
+    } catch (e) {
+      console.warn('[tagManager] Could not check the tag of a category mapping; keeping it:', e);
+      return;
+    }
+    if (getCategoryMapping(endpoint, category) !== tagId) return;
+    deleteCategoryMapping(endpoint, category);
+    await saveCategoryMappings();
+  }
+
+  /**
+   * Load category mappings from plugin settings. F20: a legacy flat map is
+   * migrated to the per-endpoint shape (under StashDB) and saved once. If that
+   * save fails, the migrated map stays in memory: every later save writes the
+   * whole map, and the next load migrates the stored flat map again, so nothing
+   * is lost.
    */
   async function loadCategoryMappings() {
     try {
@@ -291,13 +483,31 @@
 
       // Parse JSON string from settings
       if (pluginConfig.categoryMappings) {
+        let parsed;
         try {
-          categoryMappings = JSON.parse(pluginConfig.categoryMappings);
-          console.debug("[tagManager] Loaded category mappings:", Object.keys(categoryMappings).length);
+          parsed = typeof pluginConfig.categoryMappings === "string"
+            ? JSON.parse(pluginConfig.categoryMappings)
+            : pluginConfig.categoryMappings;
         } catch (e) {
-          console.warn("[tagManager] Failed to parse category mappings:", e);
+          console.warn("[tagManager] Stored category mappings are unreadable and will be " +
+            "replaced on the next save:", e);
           categoryMappings = {};
+          categoryMappingsLoaded = true;
+          return;
         }
+        categoryMappings = migrateCategoryMappings(parsed, LEGACY_MAPPINGS_ENDPOINT);
+        categoryMappingsLoaded = true;
+        console.debug("[tagManager] Loaded category mappings for endpoints:", Object.keys(categoryMappings).length);
+        if (JSON.stringify(categoryMappings) !== JSON.stringify(parsed)) {
+          console.info("[tagManager] Migrating category mappings to the per-endpoint shape");
+          const saved = await saveCategoryMappings({ quiet: true });
+          if (!saved) {
+            console.warn("[tagManager] Could not save the migrated category mappings; " +
+              "using them in memory and retrying on the next save.");
+          }
+        }
+      } else {
+        categoryMappingsLoaded = true; // nothing stored yet
       }
     } catch (e) {
       console.error("[tagManager] Failed to load category mappings:", e);
@@ -305,9 +515,46 @@
   }
 
   /**
-   * Save category mappings to plugin settings
+   * Save category mappings to plugin settings. `quiet` skips the error toast
+   * (the load-time migration save, where nothing is lost on failure).
    */
-  async function saveCategoryMappings() {
+  async function saveCategoryMappings({ quiet = false } = {}) {
+    if (!categoryMappingsLoaded) {
+      // The earlier load failed: merge onto what is stored instead of replacing it.
+      try {
+        const stored = (await getPluginConfig()).categoryMappings;
+        let base = {};
+        if (stored) {
+          try {
+            base = migrateCategoryMappings(
+              typeof stored === "string" ? JSON.parse(stored) : stored, LEGACY_MAPPINGS_ENDPOINT);
+          } catch (e) {
+            console.warn("[tagManager] Stored category mappings are unreadable and will be " +
+              "replaced on the next save:", e);
+          }
+        }
+        for (const key of pendingMappingDeletes) {
+          const [endpoint, category] = JSON.parse(key);
+          if (isPlainObject(base[endpoint])) {
+            delete base[endpoint][category];
+            if (Object.keys(base[endpoint]).length === 0) delete base[endpoint];
+          }
+        }
+        for (const [endpoint, map] of Object.entries(categoryMappings)) {
+          if (!isPlainObject(map)) continue;
+          base[endpoint] = { ...(isPlainObject(base[endpoint]) ? base[endpoint] : {}), ...map };
+        }
+        categoryMappings = base;
+        categoryMappingsLoaded = true;
+        pendingMappingDeletes = new Set();
+      } catch (e) {
+        console.error("[tagManager] Could not re-read stored category mappings; not saving:", e);
+        if (!quiet && typeof showToast === "function") {
+          showToast("Failed to save category mappings — they may not persist.", "error");
+        }
+        return false;
+      }
+    }
     const written = { categoryMappings: JSON.stringify(categoryMappings) };
     try {
       await savePluginConfigPatch(written);
@@ -320,7 +567,7 @@
       return true;
     } catch (e) {
       console.error("[tagManager] Failed to save category mappings:", e);
-      if (typeof showToast === "function") {
+      if (!quiet && typeof showToast === "function") {
         showToast("Failed to save category mappings — they may not persist.", "error");
       }
       return false;
@@ -420,6 +667,7 @@
         allTags {
           id
           name
+          aliases
           image_path
           scene_count
           parent_count
@@ -455,6 +703,24 @@
 
     const result = await graphqlRequest(query, { id: tagId });
     return (result?.findTag?.parents || []).map(p => p.id);
+  }
+
+  /**
+   * Whether Stash has a tag with this id. Throws when the lookup fails or the
+   * answer is unclear, so callers can tell "gone" from "unknown".
+   */
+  async function tagExists(tagId) {
+    const query = `
+      query FindTag($id: ID!) {
+        findTag(id: $id) {
+          id
+        }
+      }
+    `;
+
+    const result = await graphqlRequest(query, { id: tagId });
+    if (!result || result.findTag === undefined) throw new Error('findTag missing from the response');
+    return result.findTag !== null;
   }
 
   /**
@@ -563,10 +829,28 @@
 
     const output = data?.runPluginOperation;
     if (output?.error) {
-      throw new Error(output.error);
+      const err = new Error(output.error);
+      err.output = output; // keep auth_error etc. for formatBackendError
+      throw err;
     }
 
     return output;
+  }
+
+  /**
+   * Human-readable text for a backend error output ({error, auth_error}).
+   */
+  function formatBackendError(output, boxName) {
+    if (!output || typeof output !== 'object' || !output.error) return 'Unknown error';
+    if (output.auth_error) {
+      const name = boxName || selectedStashBox?.name || 'The stash-box';
+      return `${name} rejected the API key (${output.error}). Check the API key in Settings → Metadata Providers.`;
+    }
+    return String(output.error);
+  }
+
+  function backendErrorText(e) {
+    return formatBackendError(e?.output || { error: e?.message });
   }
 
   /**
@@ -586,30 +870,92 @@
   }
 
   /**
-   * Parse blacklist string into pattern objects
+   * Parse blacklist text into pattern objects. Same rules as blacklist.py
+   * (both run tests/blacklist_cases.json): separators are newline, comma and
+   * semicolon; /body/flags is a regex; a "/" entry with no valid closing "/"
+   * is the legacy form (rest of the line is the body).
    */
   function parseBlacklist(blacklistStr) {
     if (!blacklistStr) return [];
+    const text = String(blacklistStr);
+    const isSep = (c) => c === '\n' || c === ',' || c === ';';
+    const isSpace = (c) => /\s/.test(c);
+    const out = [];
+    const n = text.length;
+    let i = 0;
 
-    return blacklistStr.split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0)
-      .map(pattern => {
-        if (pattern.startsWith('/')) {
-          // Regex pattern - extract pattern without leading /
-          const regexStr = pattern.slice(1);
-          try {
-            return { type: 'regex', pattern: regexStr, regex: new RegExp(regexStr, 'i') };
-          } catch (e) {
-            console.warn(`[tagManager] Invalid regex in blacklist: ${pattern}`, e);
-            return null;
-          }
-        } else {
-          // Literal pattern - case-insensitive
-          return { type: 'literal', pattern: pattern.toLowerCase() };
+    const addRegex = (body, flags, raw) => {
+      if (!body) return;
+      let jsFlags = 'i';
+      for (const f of flags) {
+        if (f === 'm' || f === 's') {
+          if (!jsFlags.includes(f)) jsFlags += f;
+        } else if (f !== 'i') {
+          console.warn(`[tagManager] Unknown regex flag '${f}' in blacklist: ${raw}`);
         }
-      })
-      .filter(p => p !== null);
+      }
+      try {
+        out.push({ type: 'regex', pattern: body, regex: new RegExp(body, jsFlags) });
+      } catch (e) {
+        console.warn(`[tagManager] Invalid regex in blacklist: ${raw}`, e);
+      }
+    };
+
+    while (i < n) {
+      const ch = text[i];
+      if (isSpace(ch) || isSep(ch)) { i++; continue; }
+
+      let eol = text.indexOf('\n', i);
+      if (eol === -1) eol = n;
+
+      if (ch === '/') {
+        let j = i + 1;
+        let close = -1;
+        while (j < eol) {
+          if (text[j] === '\\' && j + 1 < eol) { j += 2; continue; }
+          if (text[j] === '/') { close = j; break; }
+          j++;
+        }
+        if (close !== -1) {
+          let k = close + 1;
+          while (k < n && text[k] >= 'a' && text[k] <= 'z') k++;
+          if (k === n || isSpace(text[k]) || isSep(text[k])) {
+            addRegex(text.slice(i + 1, close), text.slice(close + 1, k), text.slice(i, k));
+            i = k;
+            continue;
+          }
+        }
+        // Legacy form: rest of the line is the body (right-trimmed)
+        const raw = text.slice(i, eol).replace(/\s+$/, '');
+        addRegex(raw.slice(1), '', raw);
+        i = eol;
+        continue;
+      }
+
+      let end = i;
+      while (end < n && !isSep(text[end])) end++;
+      const raw = text.slice(i, end).trim();
+      out.push({ type: 'literal', pattern: raw.toLowerCase() });
+      i = end;
+    }
+    return out;
+  }
+
+  /**
+   * Matches with blacklisted tags dropped; each entry keeps its index into
+   * the original array so callers can address matchResults[tagId][index].
+   */
+  function visibleMatches(matches) {
+    const out = [];
+    (matches || []).forEach((match, index) => {
+      if (!isBlacklisted(match.tag?.name)) out.push({ match, index });
+    });
+    return out;
+  }
+
+  /** First non-blacklisted match and its original index, or null. */
+  function bestVisibleMatch(matches) {
+    return visibleMatches(matches)[0] || null;
   }
 
   /**
@@ -646,12 +992,34 @@
       const data = await graphqlRequest(query);
       const pluginConfig = data?.configuration?.plugins?.[PLUGIN_ID] || {};
 
-      if (pluginConfig.tagBlacklist) {
-        tagBlacklist = parseBlacklist(pluginConfig.tagBlacklist);
-        console.debug("[tagManager] Loaded blacklist:", tagBlacklist.length, "patterns");
-      }
+      tagBlacklistRaw = pluginConfig.tagBlacklist || '';
+      tagBlacklist = parseBlacklist(tagBlacklistRaw);
+      console.debug("[tagManager] Loaded blacklist:", tagBlacklist.length, "patterns");
     } catch (e) {
       console.error("[tagManager] Failed to load blacklist:", e);
+    }
+  }
+
+  /**
+   * Save the blacklist text through the config write queue, verify it
+   * round-tripped, then reload tagBlacklist.
+   */
+  async function saveBlacklist(text) {
+    const written = { tagBlacklist: text };
+    try {
+      await savePluginConfigPatch(written);
+      const readback = await getPluginConfig();
+      if (!valuesPersisted(written, readback)) {
+        throw new Error("blacklist did not round-trip");
+      }
+      await loadBlacklist();
+      return true;
+    } catch (e) {
+      console.error("[tagManager] Failed to save blacklist:", e);
+      if (typeof showToast === "function") {
+        showToast("Failed to save the blacklist — it may not persist.", "error");
+      }
+      return false;
     }
   }
 
@@ -688,7 +1056,7 @@
       showStatus(msg, 'success');
     } catch (e) {
       console.error("[tagManager] Cache refresh failed:", e);
-      showStatus(`Cache refresh failed: ${e.message}`, 'error');
+      showStatus(`Cache refresh failed: ${backendErrorText(e)}`, 'error');
     } finally {
       isCacheLoading = false;
       renderPage(container);
@@ -700,10 +1068,12 @@
    */
   async function loadTagsFromCache(container) {
     if (!selectedStashBox) return;
+    const box = selectedStashBox; // a slow load must not land on another stash-box
 
     try {
       console.debug("[tagManager] Loading tags for", selectedStashBox.endpoint);
       const result = await callBackend('fetch_all', { force_refresh: false });
+      if (selectedStashBox !== box) return;
 
       stashdbTags = result.tags || [];
       cacheStatus = {
@@ -721,8 +1091,9 @@
       }
     } catch (e) {
       console.error("[tagManager] Failed to load tags:", e);
+      if (selectedStashBox !== box) return;
       stashdbTags = null;
-      cacheStatus = { exists: false, error: e.message };
+      cacheStatus = { exists: false, error: backendErrorText(e) };
     }
   }
 
@@ -830,13 +1201,7 @@
    * @returns {object|null} - The conflicting tag or null
    */
   function findConflictingTag(name, excludeTagId) {
-    const lowerName = name.toLowerCase();
-    return localTags.find(t =>
-      t.id !== excludeTagId && (
-        t.name.toLowerCase() === lowerName ||
-        t.aliases?.some(a => a.toLowerCase() === lowerName)
-      )
-    ) || null;
+    return indexFindByName(getLocalTagIndex(), name, excludeTagId) || null;
   }
 
   /**
@@ -927,8 +1292,197 @@
   }
 
   /**
+   * F5: does this Stash accept `TagsMergeInput.values` (Stash v0.31+)? With it,
+   * the merge and the destination's update run in ONE transaction. A successful
+   * answer is cached; a failed introspection counts as "no" and is retried on the
+   * next call.
+   * @returns {Promise<boolean>}
+   */
+  let _mergeValuesSupport = null; // Promise<boolean> once introspection is in flight/succeeded
+  async function supportsMergeValues() {
+    if (!_mergeValuesSupport) {
+      const pending = graphqlRequest(`
+        query TagsMergeInputFields {
+          __type(name: "TagsMergeInput") { inputFields { name } }
+        }
+      `).then(data => (data?.__type?.inputFields || []).some(f => f.name === 'values'));
+      _mergeValuesSupport = pending;
+      pending.catch(() => {
+        if (_mergeValuesSupport === pending) _mergeValuesSupport = null;
+      });
+    }
+    try {
+      return await _mergeValuesSupport;
+    } catch (e) {
+      console.warn('[tagManager] could not detect tagsMerge values support:', e);
+      return false;
+    }
+  }
+
+  /**
+   * F5: fetch both merge sides fresh (aliases, stash_ids, parents, children) so
+   * the destination's final values aren't built from a stale localTags.
+   * @returns {Promise<{source: object|null, destination: object|null}>}
+   */
+  async function fetchTagsForMerge(sourceId, destinationId) {
+    const fields = `
+      id
+      name
+      aliases
+      stash_ids { endpoint stash_id }
+      parents { id }
+      children { id }
+    `;
+    const data = await graphqlRequest(`
+      query FindTagsForMerge($source: ID!, $destination: ID!) {
+        source: findTag(id: $source) { ${fields} }
+        destination: findTag(id: $destination) { ${fields} }
+      }
+    `, { source: sourceId, destination: destinationId });
+    return { source: data?.source || null, destination: data?.destination || null };
+  }
+
+  /** Ids of a tag's parents/children, minus the two merge sides. */
+  function relationIdsForMerge(list, source, destination) {
+    return (list || []).map(r => String(r.id))
+      .filter(id => id !== String(source.id) && id !== String(destination.id));
+  }
+
+  /**
+   * The destination's parent ids after absorbing `source`: dest ∪ source parents
+   * ∪ `addParentId` (optional), minus both merge sides. No direct cycles: a tag
+   * that is already the destination's child can't also become its parent.
+   * Deeper cycles are rejected by Stash's own hierarchy validation. Pure.
+   */
+  function mergeParentIds(source, destination, addParentId) {
+    const destChildIds = new Set(relationIdsForMerge(destination.children, source, destination));
+    return [...new Set([
+      ...relationIdsForMerge(destination.parents, source, destination),
+      ...relationIdsForMerge(source.parents, source, destination),
+      ...relationIdsForMerge(addParentId ? [{ id: addParentId }] : [], source, destination),
+    ])].filter(id => !destChildIds.has(id));
+  }
+
+  /**
+   * F5: the destination's values after absorbing `source`. Stash's plain merge
+   * moves scenes etc., the source name/aliases and stash_ids, but NOT parents,
+   * children or description. With TagsMergeInput.values these override the
+   * destination, so every field is spelled out in full:
+   *   aliases    = dest ∪ source name ∪ source aliases ∪ sanitizedAliases, minus
+   *                the destination name, deduped case-insensitively
+   *   stash_ids  = dest ∪ source, with this endpoint replaced by the new link
+   *   parent_ids = dest ∪ source parents ∪ `addParentId` (the dialog's parent
+   *                choice, optional), minus both sides and dest's children
+   *   child_ids  = dest ∪ source children, minus both sides and the new parents
+   *   description only when `description` is given (no rename: never `name`).
+   * Pure.
+   */
+  function buildMergeValues({ source, destination, stashdbTag, endpoint, sanitizedAliases, description, addParentId }) {
+    const aliases = [];
+    const seenAliases = new Set([String(destination.name || '').toLowerCase()]);
+    const candidates = [
+      ...(destination.aliases || []), source.name, ...(source.aliases || []), ...(sanitizedAliases || []),
+    ];
+    for (const alias of candidates) {
+      if (!alias) continue;
+      const key = String(alias).toLowerCase();
+      if (seenAliases.has(key)) continue;
+      seenAliases.add(key);
+      aliases.push(alias);
+    }
+
+    const stashIds = [];
+    const seenStashIds = new Set();
+    for (const sid of [...(destination.stash_ids || []), ...(source.stash_ids || [])]) {
+      if (!sid || sid.endpoint === endpoint) continue;
+      const key = `${sid.endpoint}\u0000${sid.stash_id}`;
+      if (seenStashIds.has(key)) continue;
+      seenStashIds.add(key);
+      stashIds.push({ endpoint: sid.endpoint, stash_id: sid.stash_id });
+    }
+    stashIds.push({ endpoint, stash_id: stashdbTag.id });
+
+    // No direct cycles: a new parent can't also stay a child.
+    const parentIds = mergeParentIds(source, destination, addParentId);
+    const parentSet = new Set(parentIds);
+    const childIds = [...new Set([
+      ...relationIdsForMerge(destination.children, source, destination),
+      ...relationIdsForMerge(source.children, source, destination),
+    ])].filter(id => !parentSet.has(id));
+
+    const values = {
+      id: String(destination.id), // TagUpdateInput.id is required (ignored by tagsMerge)
+      aliases,
+      stash_ids: stashIds,
+      parent_ids: parentIds,
+      child_ids: childIds,
+    };
+    if (description !== undefined) values.description = description;
+    return values;
+  }
+
+  /**
+   * F5: ask before an irreversible merge, with what moves. Expects the source's
+   * `parents`/`children` (fresh from fetchTagsForMerge); relations to either
+   * merge side aren't counted. `addedParent` ({ name, isNew }) is a parent the
+   * merge adds to the destination (the dialog's parent choice), if any.
+   * @returns {Promise<boolean>}
+   */
+  async function confirmTagMerge(sourceTag, destinationTag, { addedParent = null } = {}) {
+    const sceneCount = await getTagSceneCount(sourceTag.id);
+    const childCount = relationIdsForMerge(sourceTag.children, sourceTag, destinationTag).length;
+    const parentCount = relationIdsForMerge(sourceTag.parents, sourceTag, destinationTag).length;
+    const count = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const parentNote = addedParent
+      ? `, and "${addedParent.name}" is added as a parent${addedParent.isNew ? ' (a new tag)' : ''}`
+      : '';
+    return confirm(
+      `Merge "${sourceTag.name}" into "${destinationTag.name}"?\n\n` +
+      `${count(sceneCount, 'scene')}, ${count(childCount, 'child tag')} and ${count(parentCount, 'parent tag')} ` +
+      `move to "${destinationTag.name}"${parentNote}. "${sourceTag.name}" will be deleted. This can't be undone.`
+    );
+  }
+
+  /** Local state after the source tag is gone from the server. */
+  function dropMergedSourceLocally(sourceId) {
+    const sourceIdx = localTags.findIndex(t => t.id === sourceId);
+    if (sourceIdx >= 0) {
+      localTags.splice(sourceIdx, 1);
+      localTagsChanged();
+    }
+    delete matchResults[sourceId];
+  }
+
+  /**
+   * Create the category tag for a '__create__' parent choice and add it to
+   * localTags. Throws if the create fails.
+   * @returns {Promise<object>} the new local tag
+   */
+  async function createCategoryParentTag(categoryName) {
+    const newParent = await createTag({ name: categoryName });
+    if (!newParent?.id) throw new Error('the server returned no tag');
+    const created = localTagFromCreated(newParent, { name: categoryName });
+    localTags.push(created);
+    localTagsChanged();
+    console.debug(`[tagManager] Created parent tag: ${created.name}`);
+    return created;
+  }
+
+  /**
    * Handle merging a source tag into a destination tag, then apply StashDB link.
    * Used by both pre-validation and API error merge handlers.
+   *
+   * F5: confirms first, then on Stash v0.31+ sends ONE tagsMerge whose `values`
+   * set the destination's aliases, stash_ids, parents, children and optional
+   * description in the same transaction. On v0.30 it merges, then updates; if
+   * that update fails the merge has already happened, so the source is dropped
+   * locally and the error says what to fix.
+   *
+   * The dialog's parent choice is applied the way Apply does it: unless
+   * parents are left alone, a chosen parent for the stash-box tag's category is
+   * added to the destination's parents. A '__create__' parent is created only
+   * after the user confirms; if that fails, nothing is merged. A remembered
+   * mapping is saved only once the merge (and on v0.30 the update) succeeded.
    *
    * @param {object} params - Merge parameters
    * @param {object} params.sourceTag - The tag being merged (will be deleted)
@@ -938,72 +1492,144 @@
    * @param {string[]} params.sanitizedAliases - Aliases to include in the merge
    * @param {HTMLElement} params.modal - The modal element (for reading description choice)
    * @param {HTMLElement} params.container - The container element (for re-rendering)
-   * @returns {Promise<{success: boolean, error?: string}>}
+   * @param {?string} [params.parentId] - the dialog's parent: a tag id, '__create__', or null
+   * @param {boolean} [params.rememberMapping] - save category -> parent for `endpoint`
+   * @returns {Promise<{success: boolean, error?: string, cancelled?: boolean, merged?: boolean,
+   *   createdParent?: object}>}
+   *   `cancelled`: the user declined, nothing was sent. `merged`: the source is
+   *   gone on the server even though the result is a failure. `createdParent`:
+   *   the '__create__' parent, set whenever it was created (even on failure).
    */
-  async function performTagMerge({ sourceTag, destinationId, stashdbTag, endpoint, sanitizedAliases, modal, container }) {
+  async function performTagMerge({
+    sourceTag, destinationId, stashdbTag, endpoint, sanitizedAliases, modal, container, parentId = null, rememberMapping = false,
+  }) {
     const destinationTag = localTags.find(t => t.id === destinationId);
     if (!destinationTag) {
       return { success: false, error: 'Could not find destination tag.' };
     }
 
+    let fresh;
     try {
-      // Merge current tag into the destination (conflicting) tag
-      // This will move all entities from current tag to destination, merge aliases, then delete current tag
-      const mergedTag = await mergeTags([sourceTag.id], destinationId);
+      fresh = await fetchTagsForMerge(sourceTag.id, destinationId);
+    } catch (e) {
+      console.error('[tagManager] Merge pre-check error:', e.message);
+      return { success: false, error: `Could not load the tags to merge: ${e.message}` };
+    }
+    if (!fresh.source || !fresh.destination) {
+      const missing = !fresh.source ? sourceTag.name : destinationTag.name;
+      return { success: false, error: `"${missing}" no longer exists in Stash (it may have been merged or deleted). Refresh and try again.` };
+    }
+    const source = fresh.source;
+    const destination = fresh.destination;
 
-      // Preserve existing stash_ids and add/update the new one for this endpoint
-      const existingStashIds = mergedTag.stash_ids || [];
-      const filteredStashIds = existingStashIds.filter(sid => sid.endpoint !== endpoint);
+    // The dialog's parent choice, as Apply resolves it (#126: none when leaving
+    // parents alone). Only a parent the merge really adds is announced.
+    const categoryName = stashdbTag.category?.name || null;
+    const parentChoice = shouldResolveParents(settings) && categoryName && parentId ? String(parentId) : null;
+    let addedParent = null;
+    if (parentChoice === '__create__') {
+      addedParent = { name: categoryName, isNew: true };
+    } else if (parentChoice &&
+        mergeParentIds(source, destination, parentChoice).length > mergeParentIds(source, destination).length) {
+      addedParent = { name: localTags.find(t => t.id === parentChoice)?.name || parentChoice, isNew: false };
+    }
 
-      const stashIdUpdate = {
-        id: destinationId,
-        stash_ids: [...filteredStashIds, {
-          endpoint: endpoint,
-          stash_id: stashdbTag.id,
-        }],
-      };
+    if (!(await confirmTagMerge(source, destination, { addedParent }))) {
+      return { success: false, cancelled: true };
+    }
 
-      // Merge the aliases we collected (including the original tag name) into the destination
-      const mergedAliases = new Set(mergedTag.aliases || []);
-      for (const alias of sanitizedAliases) {
-        mergedAliases.add(alias);
+    // Create a '__create__' parent only now that the user has confirmed.
+    let parentTagId = parentChoice === '__create__' ? null : parentChoice;
+    let createdParent = null;
+    if (parentChoice === '__create__') {
+      try {
+        createdParent = await createCategoryParentTag(categoryName);
+      } catch (e) {
+        console.error('[tagManager] Failed to create parent tag:', e);
+        return { success: false, error: `Failed to create parent tag "${categoryName}": ${e.message} (nothing was merged)` };
       }
-      stashIdUpdate.aliases = Array.from(mergedAliases);
+      parentTagId = createdParent.id;
+    }
 
-      // Apply description if user chose StashDB description
-      const descChoice = modal.querySelector('input[name="tm-desc"]:checked')?.value;
-      if (descChoice === 'stashdb' && stashdbTag.description) {
-        stashIdUpdate.description = stashdbTag.description;
-      }
+    // Apply description if user chose StashDB description
+    const descChoice = modal.querySelector('input[name="tm-desc"]:checked')?.value;
+    const values = buildMergeValues({
+      source,
+      destination,
+      stashdbTag,
+      endpoint,
+      sanitizedAliases,
+      description: descChoice === 'stashdb' && stashdbTag.description ? stashdbTag.description : undefined,
+      addParentId: parentTagId,
+    });
 
-      await updateTag(stashIdUpdate);
-
-      // Update local state - remove the merged (source) tag and update destination
-      const sourceIdx = localTags.findIndex(t => t.id === sourceTag.id);
-      if (sourceIdx >= 0) {
-        localTags.splice(sourceIdx, 1);
-      }
-
-      const destIdx = localTags.findIndex(t => t.id === destinationId);
-      if (destIdx >= 0) {
-        localTags[destIdx].stash_ids = stashIdUpdate.stash_ids;
-        localTags[destIdx].aliases = stashIdUpdate.aliases;
-        if (stashIdUpdate.description !== undefined) {
-          localTags[destIdx].description = stashIdUpdate.description;
+    try {
+      if (await supportsMergeValues()) {
+        // Stash v0.31+: merge + destination update in one transaction.
+        try {
+          await mergeTags([sourceTag.id], destinationId, values);
+        } catch (e) {
+          console.error('[tagManager] Merge error:', e.message);
+          const unchanged = createdParent
+            ? `nothing was merged; the new parent tag "${createdParent.name}" was kept`
+            : 'nothing was changed';
+          return { success: false, error: `${e.message} (${unchanged})`, createdParent };
+        }
+      } else {
+        // Stash v0.30: two steps. The merge moves scenes, aliases and stash_ids
+        // and deletes the source; the update adds the rest.
+        await mergeTags([sourceTag.id], destinationId);
+        try {
+          await updateTag(values);
+        } catch (e) {
+          console.error('[tagManager] Post-merge update error:', e.message);
+          // The source is gone on the server: don't keep offering it.
+          dropMergedSourceLocally(sourceTag.id);
+          try {
+            renderPage(container);
+          } catch (renderErr) {
+            console.error('[tagManager] re-render after merge failed:', renderErr);
+          }
+          await refreshLocalTags();
+          return {
+            success: false,
+            merged: true,
+            createdParent,
+            error: `Merged '${source.name}' into '${destination.name}', but updating '${destination.name}' failed: ${e.message}. ` +
+              `The merge can't be undone; fix the conflict (e.g. rename the clashing alias) and edit '${destination.name}' in Stash.`,
+          };
         }
       }
 
-      delete matchResults[sourceTag.id];
+      // Update local state - remove the merged (source) tag and update destination
+      dropMergedSourceLocally(sourceTag.id);
+
+      const destIdx = localTags.findIndex(t => t.id === destinationId);
+      if (destIdx >= 0) {
+        localTags[destIdx].stash_ids = values.stash_ids;
+        localTags[destIdx].aliases = values.aliases;
+        localTagsChanged();
+        if (values.description !== undefined) {
+          localTags[destIdx].description = values.description;
+        }
+      }
+
+      // Save the mapping only once the merge (and on v0.30 the update) succeeded
+      if (rememberMapping && parentTagId) {
+        setCategoryMapping(endpoint, categoryName, parentTagId);
+        await saveCategoryMappings();
+      }
+
       modal.remove();
 
       showStatus(`Merged "${sourceTag.name}" into "${destinationTag.name}" and linked to StashDB`, 'success');
       renderPage(container);
       await refreshLocalTags(); // #124: pull server truth after the merge
 
-      return { success: true };
+      return { success: true, createdParent };
     } catch (e) {
       console.error('[tagManager] Merge error:', e.message);
-      return { success: false, error: e.message };
+      return { success: false, error: e.message, createdParent };
     }
   }
 
@@ -1105,22 +1731,62 @@
   }
 
   /**
+   * F19: whether the Parent row (select, Search, Remember) is rendered in the diff dialog.
+   */
+  function shouldShowParentControls(settings, hasCategory) {
+    return !!hasCategory && !settings.leaveParentTagsAlone;
+  }
+
+  /**
+   * F4: options for the diff dialog's parent dropdown. Exactly one is selected.
+   * A saved mapping is offered (once) only if its tag still exists.
+   * Values: '' = no parent, '__create__' = create the category tag, otherwise a tag id.
+   *
+   * @returns {{value: string, label: string, selected: boolean}[]}
+   */
+  function buildParentOptions({ existingParents = [], parentMatches = [], savedMappingId, categoryName, localTags: tags = [] }) {
+    const saved = savedMappingId ? tags.find(t => t.id === savedMappingId) : null;
+    const savedId = saved ? saved.id : null;
+    const createLabel = `Create "${categoryName}"`;
+
+    let selectedValue;
+    if (savedId) selectedValue = savedId;
+    else if (existingParents.length) selectedValue = existingParents[0].id;
+    else if (parentMatches.length) selectedValue = parentMatches[0].tag.id;
+    else selectedValue = '__create__';
+
+    const opts = [];
+    const add = (value, label) => opts.push({ value, label, selected: value === selectedValue });
+    add('', '-- No parent --');
+    if (saved) add(saved.id, `${saved.name} (saved mapping)`);
+    existingParents.filter(p => p.id !== savedId).forEach(p => add(p.id, `${p.name} (current parent)`));
+    if (!existingParents.length && !parentMatches.length && !savedId) add('__create__', createLabel);
+    parentMatches
+      .filter(m => m.tag.id !== savedId && !existingParents.some(p => p.id === m.tag.id))
+      .forEach(m => add(m.tag.id, `${m.tag.name} (${m.matchType})`));
+    if (existingParents.length || parentMatches.length || savedId) add('__create__', createLabel);
+    return opts;
+  }
+
+  /**
    * Resolve parent tags for categories found among selected StashDB tags.
    * Returns: { categoryName: { parentTagId, parentTagName, resolution, description } }
    * resolution is one of: 'saved', 'exact', 'create'
+   * F20: saved mappings are read for `endpoint` (default: the selected stash-box).
    */
-  function resolveCategoryParents(selectedIds) {
+  function resolveCategoryParents(selectedIds, endpoint = selectedStashBox?.endpoint) {
     const result = {};
+    const stashdbById = new Map((stashdbTags || []).map(t => [t.id, t]));
 
     for (const stashdbId of selectedIds) {
-      const tag = stashdbTags.find(t => t.id === stashdbId);
+      const tag = stashdbById.get(stashdbId);
       if (!tag?.category) continue;
 
       const catName = tag.category.name;
       if (result[catName]) continue;
 
       // 1. Check saved mapping
-      const savedId = categoryMappings[catName];
+      const savedId = getCategoryMapping(endpoint, catName);
       if (savedId) {
         const savedTag = localTags.find(t => t.id === savedId);
         if (savedTag) {
@@ -1390,6 +2056,9 @@
     if (isCacheLoading) {
       return '<span class="tm-cache-status tm-cache-loading">Building cache...</span>';
     }
+    if (stashdbTagsLoad) {
+      return '<span class="tm-cache-status tm-cache-loading">Loading tags...</span>';
+    }
     if (!cacheStatus) {
       return '<span class="tm-cache-status tm-cache-unknown">Cache unknown</span>';
     }
@@ -1404,10 +2073,80 @@
 
   /**
    * Handle importing selected StashDB tags, with optional category parent assignment.
+   * Resolves false if the user cancelled in the category preview, true otherwise.
+   * F11: isImporting and the import button are reset in `finally` on every exit
+   * path (done, cancelled or thrown); a throw is shown to the user.
    */
   async function handleImportSelected(container) {
-    if (selectedForImport.size === 0) return;
-    if (isImporting) return;
+    if (selectedForImport.size === 0) return true;
+    if (isImporting) return true;
+    isImporting = true;
+    importCancelRequested = false;
+
+    const statusEl = container.querySelector('.tm-selection-info');
+    const btnEl = container.querySelector('#tm-import-selected');
+    let message;
+    let failed = false;
+    try {
+      message = await importSelectedTags(statusEl, btnEl);
+    } catch (e) {
+      console.error('[tagManager] Import failed:', e);
+      message = `Import failed: ${e.message || e}`;
+      failed = true;
+    } finally {
+      isImporting = false;
+      if (btnEl) btnEl.disabled = selectedForImport.size === 0;
+    }
+    if (message === null) return false; // cancelled in the category preview
+
+    if (statusEl) statusEl.textContent = message;
+    if (failed) showToast(message, 'error');
+
+    setTimeout(() => {
+      renderPage(container);
+      refreshLocalTags(); // #124: reconcile with server truth after import
+    }, 1500);
+    return true;
+  }
+
+  /**
+   * "Import All Unlinked": select every non-blacklisted, not-yet-linked StashDB
+   * tag and import. Ignored while an import runs (it owns selectedForImport).
+   */
+  async function handleImportAll(container) {
+    if (isImporting) return; // a running import owns selectedForImport
+    const endpoint = selectedStashBox?.endpoint;
+    if (!stashdbTags || !endpoint) return;
+
+    const unlinked = importAllCandidates({ stashdbTags, localTags, endpoint, isBlacklisted });
+
+    if (unlinked.length === 0) {
+      showStatus('All tags are already linked', 'info');
+      return;
+    }
+
+    if (!confirm(`Import ${unlinked.length} unlinked tag${unlinked.length !== 1 ? 's' : ''} from all categories?`)) {
+      return;
+    }
+
+    const previousSelection = selectedForImport;
+    selectedForImport = new Set(unlinked);
+    const started = await handleImportSelected(container);
+    // Cancelled in the category preview: give the user their own selection back.
+    if (started === false) {
+      selectedForImport = previousSelection;
+      renderPage(container);
+    }
+  }
+
+  /**
+   * The import itself; handleImportSelected owns the isImporting flag.
+   * @returns {Promise<?string>} the summary line, or null if the user cancelled
+   */
+  async function importSelectedTags(statusEl, btnEl) {
+    const endpoint = selectedStashBox?.endpoint;
+    if (!endpoint) throw new Error('no stash-box endpoint is selected');
+    if (!stashdbTags) throw new Error('the stash-box tags are not loaded; reload them and try again');
 
     let parentMap = null;
     let remember = false;
@@ -1416,12 +2155,12 @@
     // #126: when "leave parent tags alone" is on, import flat — skip the category
     // preview modal and all parent creation/assignment (parentMap stays null).
     if (shouldResolveParents(settings)) {
-      const categoryResolutions = resolveCategoryParents(selectedForImport);
+      const categoryResolutions = resolveCategoryParents(selectedForImport, endpoint);
       const hasCategories = Object.keys(categoryResolutions).length > 0;
 
       if (hasCategories) {
         const result = await showCategoryPreviewModal(categoryResolutions);
-        if (result === 'cancel') return;
+        if (result === 'cancel') return null;
         if (result !== null) {
           parentMap = result.parentMap;
           remember = result.remember;
@@ -1430,13 +2169,19 @@
       }
     }
 
-    isImporting = true;
-
-    const statusEl = container.querySelector('.tm-selection-info');
-    const btnEl = container.querySelector('#tm-import-selected');
-
+    const total = selectedForImport.size;
     if (statusEl) statusEl.textContent = 'Importing...';
     if (btnEl) btnEl.disabled = true;
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-sm btn-secondary';
+    cancelBtn.id = 'tm-import-cancel';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => {
+      requestImportCancel();
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = 'Cancelling...';
+    });
+    if (btnEl?.parentNode) btnEl.parentNode.insertBefore(cancelBtn, btnEl.nextSibling);
 
     let created = 0;
     let linked = 0;
@@ -1456,6 +2201,7 @@
             if (newTag) {
               createdParents[catName] = newTag.id;
               localTags.push({ id: newTag.id, name: newTag.name, aliases: [], stash_ids: [], parents: [] });
+              localTagsChanged();
             }
           } catch (e) {
             console.error(`[tagManager] Failed to create parent tag "${catName}":`, e);
@@ -1481,8 +2227,16 @@
       }
     }
 
+    const stashdbById = new Map(stashdbTags.map(t => [t.id, t]));
+    const processed = new Set();
+    let cancelledAt = -1;
+    let position = 0;
     for (const stashdbId of selectedForImport) {
-      const stashdbTag = stashdbTags.find(t => t.id === stashdbId);
+      if (importCancelRequested) { cancelledAt = position; break; }
+      position++;
+      processed.add(stashdbId);
+      if (statusEl) statusEl.textContent = `Importing ${position} / ${total}`;
+      const stashdbTag = stashdbById.get(stashdbId);
       if (!stashdbTag) continue;
 
       // Resolve parent ID for this tag's category
@@ -1498,13 +2252,13 @@
         if (existingTag) {
           const existingStashIds = existingTag.stash_ids || [];
           const filteredStashIds = existingStashIds.filter(
-            sid => sid.endpoint !== selectedStashBox.endpoint
+            sid => sid.endpoint !== endpoint
           );
 
           await updateTag({
             id: existingTag.id,
             stash_ids: [...filteredStashIds, {
-              endpoint: selectedStashBox.endpoint,
+              endpoint: endpoint,
               stash_id: stashdbId
             }]
           });
@@ -1512,9 +2266,10 @@
           const idx = localTags.findIndex(t => t.id === existingTag.id);
           if (idx >= 0) {
             localTags[idx].stash_ids = [...filteredStashIds, {
-              endpoint: selectedStashBox.endpoint,
+              endpoint: endpoint,
               stash_id: stashdbId
             }];
+            localTagsChanged();
           }
 
           linked++;
@@ -1548,7 +2303,7 @@
             description: stashdbTag.description || '',
             aliases: stashdbTag.aliases || [],
             stash_ids: [{
-              endpoint: selectedStashBox.endpoint,
+              endpoint: endpoint,
               stash_id: stashdbId
             }]
           };
@@ -1575,6 +2330,7 @@
               stash_ids: input.stash_ids,
               parents: parentId ? [{ id: parentId }] : []
             });
+            localTagsChanged();
             created++;
             if (parentId) parented++;
           }
@@ -1593,18 +2349,24 @@
       }
     }
 
+    cancelBtn.remove();
+
     // Save category mappings if requested
     if (remember && resolutions) {
       for (const [catName, info] of Object.entries(resolutions)) {
         const finalId = info.parentTagId || createdParents[catName];
         if (finalId) {
-          categoryMappings[catName] = finalId;
+          setCategoryMapping(endpoint, catName, finalId);
         }
       }
       await saveCategoryMappings();
     }
 
-    selectedForImport.clear();
+    if (cancelledAt >= 0) {
+      for (const id of processed) selectedForImport.delete(id); // keep the untouched rest selected
+    } else {
+      selectedForImport.clear();
+    }
 
     // #125: resolve any collected alias/name conflicts via the modal. Counts from
     // resolution actions fold into the created/linked totals; resolved/skipped are
@@ -1612,14 +2374,14 @@
     let conflictsResolved = 0;
     let skipped = 0;
     if (importConflicts.length > 0) {
-      const outcome = await renderConflictResolutionModal(importConflicts);
+      const outcome = await renderConflictResolutionModal(importConflicts, endpoint);
       created += outcome.created;
       linked += outcome.linked;
       conflictsResolved = outcome.resolved;
       skipped = outcome.skipped;
     }
 
-    const message = summarizeImportResult({
+    const summary = summarizeImportResult({
       created,
       linked,
       parented,
@@ -1628,30 +2390,373 @@
       skipped,
       errors,
     });
+    return cancelledAt >= 0 ? `Cancelled after ${cancelledAt} of ${total}. ${summary}` : summary;
+  }
 
-    if (statusEl) statusEl.textContent = message;
+  /**
+   * F6: the conflict modal's model, without the DOM. One row per deferred import:
+   * { i, stashdbTag, parentId, conflicts, done, result, error }. `outcome` holds
+   * the counts that fold into the import summary. `busy` lets one row action run
+   * at a time (two merge-intos on one tag would overwrite each other's aliases).
+   * @param {Array<{stashdbTag: object, parentId: ?string, conflicts: Array}>} importConflicts
+   * @param {string} endpoint - the stash-box endpoint the import links to
+   */
+  function createConflictSession(importConflicts, endpoint) {
+    const rows = new Map();
+    importConflicts.forEach((entry, i) => rows.set(i, {
+      i,
+      stashdbTag: entry.stashdbTag,
+      parentId: entry.parentId || null,
+      conflicts: entry.conflicts || [],
+      done: false,
+      result: '',
+      error: '',
+    }));
+    const session = { endpoint, rows, outcome: { created: 0, linked: 0, skipped: 0, resolved: 0 }, busy: false };
+    recheckConflictRows(session);
+    return session;
+  }
 
-    setTimeout(() => {
-      isImporting = false;
-      renderPage(container);
-      refreshLocalTags(); // #124: reconcile with server truth after import
-    }, 1500);
+  /**
+   * F6: recompute every pending row's conflicts from the current localTags, so no
+   * row shows or acts on a clash that another row's action has changed. A row
+   * whose conflicts are all gone is offered a plain Import.
+   */
+  function recheckConflictRows(session) {
+    localTagsChanged(); // tags may have been edited in place since the last lookup (e.g. via an "Open" link)
+    for (const row of session.rows.values()) {
+      if (!row.done) row.conflicts = detectImportConflicts(row.stashdbTag);
+    }
+  }
+
+  function pendingConflictRows(session) {
+    return [...session.rows.values()].filter(r => !r.done);
+  }
+
+  /** Distinct local tags among a row's conflicts, in first-seen order. */
+  function distinctConflictTags(conflicts) {
+    const seen = new Map();
+    for (const c of conflicts) {
+      if (!seen.has(c.conflictingTag.id)) seen.set(c.conflictingTag.id, c.conflictingTag);
+    }
+    return [...seen.values()];
+  }
+
+  /** The incoming name itself is taken, so no new tag can be created with it. */
+  function rowHasNameConflict(row) {
+    const nameLower = row.stashdbTag.name.toLowerCase();
+    return row.conflicts.some(c => c.conflictingValue.toLowerCase() === nameLower);
+  }
+
+  function quoteList(values) {
+    return values.map(v => `"${v}"`).join(', ');
+  }
+
+  /** 'aliases "Bar", "Baz" (already used by "Barbara", "Bazza")' */
+  function droppedAliasesText(conflicts, removed) {
+    const lower = new Set(removed.map(a => a.toLowerCase()));
+    const owners = [...new Set(conflicts
+      .filter(c => lower.has(c.conflictingValue.toLowerCase()))
+      .map(c => c.conflictingTag.name))];
+    return `${removed.length === 1 ? 'alias' : 'aliases'} ${quoteList(removed)} (already used by ${quoteList(owners)})`;
+  }
+
+  /**
+   * A localTags entry for a tag just created: what the server returned (createTag
+   * selects the full tag), falling back to what was sent.
+   */
+  function localTagFromCreated(created, input = {}) {
+    return {
+      id: created.id,
+      name: created.name ?? input.name,
+      description: created.description ?? input.description ?? '',
+      aliases: created.aliases ?? input.aliases ?? [],
+      stash_ids: created.stash_ids ?? input.stash_ids ?? [],
+      parents: created.parents ?? (input.parent_ids || []).map(id => ({ id })),
+    };
+  }
+
+  function conflictCreateInput(session, row, aliases) {
+    const input = {
+      name: row.stashdbTag.name,
+      description: row.stashdbTag.description || '',
+      aliases,
+      stash_ids: [{ endpoint: session.endpoint, stash_id: row.stashdbTag.id }],
+    };
+    if (row.parentId) input.parent_ids = [row.parentId];
+    return input;
+  }
+
+  function conflictStaleTarget(row) {
+    return { ok: false, message: `"${row.stashdbTag.name}" no longer clashes with that tag; choose again.` };
+  }
+
+  function conflictNameTaken(row) {
+    return {
+      ok: false,
+      message: `The name "${row.stashdbTag.name}" is already taken, so it can't be a new tag. Merge it into the existing tag or skip it.`,
+    };
+  }
+
+  /** "Merge into existing": link the incoming stash-box tag to a clashing local tag. */
+  async function conflictMergeInto(session, row, tagId) {
+    const existing = localTags.find(t => t.id === tagId);
+    if (!existing || !row.conflicts.some(c => c.conflictingTag.id === tagId)) return conflictStaleTarget(row);
+    const { endpoint } = session;
+    const stashdbId = row.stashdbTag.id;
+    const current = (existing.stash_ids || []).find(s => s.endpoint === endpoint);
+    if (current && current.stash_id !== stashdbId) {
+      const box = getEndpointDisplayName(stashBoxes.find(sb => sb.endpoint === endpoint) || { endpoint });
+      if (!confirm(
+        `"${existing.name}" is already linked to ${box} ID ${current.stash_id}.\n\n` +
+        `Replace that link with ${stashdbId} ("${row.stashdbTag.name}")?`
+      )) {
+        return { ok: false, cancelled: true, message: '' };
+      }
+    }
+    const input = buildMergeIntoExistingInput(existing, row.stashdbTag, row.conflicts, endpoint, stashdbId, row.parentId);
+    const added = input.aliases.slice((existing.aliases || []).length);
+    let updated;
+    try {
+      updated = await updateTag(input);
+    } catch (e) {
+      console.error('[tagManager] merge-into-existing failed:', e);
+      return { ok: false, message: `Merge into "${existing.name}" failed: ${e.message || e}` };
+    }
+    const idx = localTags.findIndex(t => t.id === tagId);
+    if (idx >= 0) {
+      localTags[idx].aliases = input.aliases;
+      localTags[idx].stash_ids = (updated && updated.stash_ids) || input.stash_ids;
+      localTagsChanged();
+      if (input.parent_ids) localTags[idx].parents = input.parent_ids.map(id => ({ id }));
+    }
+    session.outcome.linked++; session.outcome.resolved++;
+    const addedText = added.length ? ` (added ${added.length === 1 ? 'alias' : 'aliases'} ${quoteList(added)})` : '';
+    return { ok: true, localTagsChanged: true, message: `Merged into "${existing.name}"${addedText}` };
+  }
+
+  /**
+   * "Strip alias & import" (strip) or, once a row has no conflicts left, a plain
+   * Import (all original aliases).
+   */
+  async function conflictImport(session, row, { strip }) {
+    if (strip && rowHasNameConflict(row)) return conflictNameTaken(row);
+    if (!strip && row.conflicts.length) {
+      return { ok: false, message: `"${row.stashdbTag.name}" clashes with a local tag again; choose again.` };
+    }
+    const { aliases, removed } = sanitizeAliasesForImport(row.stashdbTag, row.conflicts);
+    const input = conflictCreateInput(session, row, aliases);
+    let created;
+    try {
+      created = await createTag(input);
+    } catch (e) {
+      console.error('[tagManager] conflict import failed:', e);
+      return { ok: false, message: `Import failed: ${e.message || e}` };
+    }
+    if (!created?.id) return { ok: false, message: 'Import failed: the server returned no tag.' };
+    localTags.push(localTagFromCreated(created, input));
+    localTagsChanged();
+    session.outcome.created++; session.outcome.resolved++;
+    let message = 'Imported';
+    if (removed.length) message = `Imported without the ${droppedAliasesText(row.conflicts, removed)}`;
+    else if (!strip) message = 'Imported (no conflicts left)';
+    return { ok: true, localTagsChanged: true, message };
+  }
+
+  /**
+   * "Merge existing into this": create the incoming tag, then merge the clashing
+   * local tag into it. F6: if the merge fails, the new tag is destroyed again so
+   * nothing is left behind and a retry doesn't collide on the name.
+   */
+  async function conflictReverse(session, row, tagId) {
+    const existing = localTags.find(t => t.id === tagId);
+    if (!existing || !row.conflicts.some(c => c.conflictingTag.id === tagId)) return conflictStaleTarget(row);
+    if (rowHasNameConflict(row)) return conflictNameTaken(row);
+    const name = row.stashdbTag.name;
+    const sceneCount = await getTagSceneCount(tagId);
+    if (!confirm(`Merge "${existing.name}" into "${name}"?\n\nThis deletes "${existing.name}" and reassigns its ${sceneCount} scene${sceneCount === 1 ? '' : 's'} to the imported tag. This cannot be undone.`)) {
+      return { ok: false, cancelled: true, message: '' };
+    }
+    // Create the incoming tag clean (strip the conflicting aliases so the create
+    // succeeds while the existing tag still owns them), then absorb the existing
+    // tag — tagsMerge carries its aliases/scenes onto the new tag.
+    const { aliases, removed } = sanitizeAliasesForImport(row.stashdbTag, row.conflicts);
+    const input = conflictCreateInput(session, row, aliases);
+    let created;
+    try {
+      created = await createTag(input);
+    } catch (e) {
+      console.error('[tagManager] reverse-merge create failed:', e);
+      return { ok: false, message: `Could not create "${name}": ${e.message || e}. Nothing was changed.` };
+    }
+    if (!created?.id) return { ok: false, message: `Could not create "${name}": the server returned no tag. Nothing was changed.` };
+
+    let merged;
+    try {
+      merged = await mergeTags([tagId], created.id);
+    } catch (e) {
+      console.error('[tagManager] reverse-merge failed; removing the new tag:', e);
+      const why = e.message || e;
+      try {
+        await destroyTag(created.id);
+      } catch (destroyErr) {
+        console.error('[tagManager] could not remove the new tag after a failed merge:', destroyErr);
+        localTags.push(localTagFromCreated(created, input)); // it exists on the server
+        localTagsChanged();
+        return {
+          ok: false,
+          localTagsChanged: true,
+          message: `Merging "${existing.name}" into "${name}" failed: ${why}. Removing the new tag "${name}" (id ${created.id}) also failed: ${destroyErr.message || destroyErr}. Delete it in Stash, or merge into it here.`,
+        };
+      }
+      return { ok: false, message: `Merging "${existing.name}" into "${name}" failed: ${why}. The new tag was removed again; nothing changed.` };
+    }
+
+    dropMergedSourceLocally(tagId);
+    const createdLocal = localTagFromCreated(created, input);
+    localTags.push({
+      ...createdLocal,
+      name: (merged && merged.name) || createdLocal.name,
+      aliases: (merged && merged.aliases) || createdLocal.aliases,
+      stash_ids: (merged && merged.stash_ids) || createdLocal.stash_ids,
+    });
+    localTagsChanged();
+    session.outcome.created++; session.outcome.resolved++;
+    // Aliases that clashed with OTHER tags were stripped and are not brought back by the merge.
+    const otherConflicts = row.conflicts.filter(c => c.conflictingTag.id !== tagId);
+    const lost = removed.filter(a => otherConflicts.some(c => c.conflictingValue.toLowerCase() === a.toLowerCase()));
+    const lostText = lost.length ? `, without the ${droppedAliasesText(otherConflicts, lost)}` : '';
+    return { ok: true, localTagsChanged: true, message: `Created "${name}" and merged "${existing.name}" into it${lostText}` };
+  }
+
+  /**
+   * F6: run one conflict-row action and re-check the remaining rows afterwards.
+   * @param {object} session - from createConflictSession
+   * @param {number} i - row index
+   * @param {'merge-into'|'strip'|'reverse'|'import'|'skip'} action
+   * @param {string} [tagId] - the local tag for merge-into / reverse
+   * @returns {Promise<{ok: boolean, message: string, localTagsChanged?: boolean, cancelled?: boolean, busy?: boolean}>}
+   *   ok: the row is resolved and shows `message` as its result. Otherwise the row
+   *   stays actionable and shows `message` as its error (not when cancelled).
+   */
+  async function resolveConflictRow(session, i, action, tagId) {
+    const row = session.rows.get(i);
+    if (!row || row.done) return { ok: false, message: 'This row is already resolved.' };
+    if (session.busy) return { ok: false, busy: true, message: 'Another action is still running.' };
+    session.busy = true;
+    row.error = '';
+    let result;
+    try {
+      row.conflicts = detectImportConflicts(row.stashdbTag); // act on the current clashes
+      if (action === 'merge-into') result = await conflictMergeInto(session, row, tagId);
+      else if (action === 'strip') result = await conflictImport(session, row, { strip: true });
+      else if (action === 'import') result = await conflictImport(session, row, { strip: false });
+      else if (action === 'reverse') result = await conflictReverse(session, row, tagId);
+      else if (action === 'skip') {
+        session.outcome.skipped++;
+        result = { ok: true, message: 'Skipped' };
+      } else result = { ok: false, message: `Unknown action "${action}".` };
+    } catch (e) {
+      console.error(`[tagManager] conflict action "${action}" failed:`, e);
+      result = { ok: false, message: `Failed: ${e.message || e}` };
+    } finally {
+      session.busy = false;
+    }
+    if (result.ok) {
+      row.done = true;
+      row.result = result.message;
+    } else if (!result.cancelled) {
+      row.error = result.message;
+    }
+    recheckConflictRows(session);
+    return result;
+  }
+
+  /** One conflict row: its result once resolved, else its clashes and actions. */
+  function conflictRowHtml(row) {
+    const { i, stashdbTag, conflicts } = row;
+    const nameHtml = `<strong>${escapeHtml(stashdbTag.name)}</strong>`;
+    if (row.done) {
+      return `
+          <div class="tm-conflict-row tm-conflict-done" data-i="${i}">
+            <div class="tm-conflict-desc">
+              ${nameHtml}
+              <span class="tm-conflict-result">${escapeHtml(row.result)}</span>
+            </div>
+          </div>
+        `;
+    }
+    const errorHtml = row.error ? `<div class="tm-conflict-error">${escapeHtml(row.error)}</div>` : '';
+    const skipBtn = `<button class="btn btn-secondary btn-sm tm-conflict-skip" data-i="${i}">Skip</button>`;
+    if (conflicts.length === 0) {
+      return `
+          <div class="tm-conflict-row" data-i="${i}">
+            <div class="tm-conflict-desc">
+              ${nameHtml}
+              <span class="tm-conflict-detail">no conflicts left (an earlier action resolved them)</span>
+            </div>
+            ${errorHtml}
+            <div class="tm-conflict-actions">
+              <button class="btn btn-primary btn-sm tm-conflict-import" data-i="${i}">Import</button>
+              ${skipBtn}
+            </div>
+          </div>
+        `;
+    }
+    const hasNameConflict = rowHasNameConflict(row);
+    const values = [...new Set(conflicts.map(c => c.conflictingValue))];
+    const tags = distinctConflictTags(conflicts);
+    const mergeBtns = tags.map(t =>
+      `<button class="btn btn-primary btn-sm tm-conflict-merge-into" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge into "${escapeHtml(t.name)}"</button>`
+    ).join('');
+    // A name collision means the incoming name is taken, so we can't create a
+    // new tag with it — strip-alias and reverse-merge are unavailable.
+    const stripBtn = hasNameConflict ? '' :
+      `<button class="btn btn-secondary btn-sm tm-conflict-strip" data-i="${i}">Strip alias &amp; import</button>`;
+    const reverseBtns = hasNameConflict ? '' : tags.map(t =>
+      `<button class="btn btn-danger btn-sm tm-conflict-reverse" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge "${escapeHtml(t.name)}" into this</button>`
+    ).join('');
+    const openBtns = tags.map(t =>
+      `<a href="${escapeHtml(stashPath(`/tags/${t.id}`))}" target="_blank" class="btn btn-secondary btn-sm">Open "${escapeHtml(t.name)}"</a>`
+    ).join('');
+    return `
+          <div class="tm-conflict-row" data-i="${i}">
+            <div class="tm-conflict-desc">
+              ${nameHtml}
+              <span class="tm-conflict-detail">${hasNameConflict ? 'name' : 'alias'} ${values.map(v => `&ldquo;${escapeHtml(v)}&rdquo;`).join(', ')} already used by ${tags.map(t => `&ldquo;${escapeHtml(t.name)}&rdquo;`).join(', ')}</span>
+            </div>
+            ${errorHtml}
+            <div class="tm-conflict-actions">
+              ${mergeBtns}
+              ${stripBtn}
+              ${reverseBtns}
+              ${openBtns}
+              ${skipBtn}
+            </div>
+          </div>
+        `;
   }
 
   /**
    * #125: End-of-import resolution modal for alias/name conflicts. Renders one
-   * row per deferred import with per-row actions. Resolves to aggregate counts
+   * row per deferred import with per-row actions (see resolveConflictRow).
+   * Resolved rows stay listed with their result; the footer button reads "Done"
+   * once nothing is pending. Resolves to aggregate counts
    * { created, linked, skipped, resolved } that fold into the import summary.
    * Unresolved rows at close count as skipped.
    * @param {Array<{stashdbTag: object, parentId: ?string, conflicts: Array}>} importConflicts
+   * @param {string} [endpoint] - defaults to the selected stash-box's endpoint
    * @returns {Promise<{created: number, linked: number, skipped: number, resolved: number}>}
    */
-  function renderConflictResolutionModal(importConflicts) {
+  function renderConflictResolutionModal(importConflicts, endpoint = selectedStashBox?.endpoint) {
     return new Promise((resolve) => {
-      const outcome = { created: 0, linked: 0, skipped: 0, resolved: 0 };
-      const remaining = new Map();
-      importConflicts.forEach((entry, i) => remaining.set(i, entry));
-      const endpoint = selectedStashBox.endpoint;
+      if (!endpoint) {
+        // Nothing can be linked without an endpoint: leave every row unresolved.
+        console.error('[tagManager] No stash-box endpoint selected; skipping conflict resolution.');
+        resolve({ created: 0, linked: 0, skipped: importConflicts.length, resolved: 0 });
+        return;
+      }
+      const session = createConflictSession(importConflicts, endpoint);
 
       const backdrop = document.createElement('div');
       backdrop.className = 'tm-modal-backdrop';
@@ -1672,202 +2777,54 @@
       `;
       document.body.appendChild(backdrop);
       const listEl = backdrop.querySelector('.tm-conflict-list');
+      const footerBtn = backdrop.querySelector('#tm-conflict-skip-all');
 
       let settled = false;
+      let closeRequested = false;
       function finish() {
         if (settled) return;
+        if (session.busy) { closeRequested = true; return; } // close once the running action ends
         settled = true;
-        for (const _i of remaining.keys()) outcome.skipped++; // unresolved → skipped
-        remaining.clear();
+        session.outcome.skipped += pendingConflictRows(session).length; // unresolved → skipped
         backdrop.remove();
-        resolve(outcome);
-      }
-
-      function distinctConflictTags(conflicts) {
-        const seen = new Map();
-        for (const c of conflicts) {
-          if (!seen.has(c.conflictingTag.id)) seen.set(c.conflictingTag.id, c.conflictingTag);
-        }
-        return [...seen.values()];
-      }
-
-      function rowHtml(i, entry) {
-        const { stashdbTag, conflicts } = entry;
-        const nameLower = stashdbTag.name.toLowerCase();
-        const hasNameConflict = conflicts.some(c => c.conflictingValue.toLowerCase() === nameLower);
-        const values = [...new Set(conflicts.map(c => c.conflictingValue))];
-        const tags = distinctConflictTags(conflicts);
-        const mergeBtns = tags.map(t =>
-          `<button class="btn btn-primary btn-sm tm-conflict-merge-into" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge into "${escapeHtml(t.name)}"</button>`
-        ).join('');
-        // A name collision means the incoming name is taken, so we can't create a
-        // new tag with it — strip-alias and reverse-merge are unavailable.
-        const stripBtn = hasNameConflict ? '' :
-          `<button class="btn btn-secondary btn-sm tm-conflict-strip" data-i="${i}">Strip alias &amp; import</button>`;
-        const reverseBtns = hasNameConflict ? '' : tags.map(t =>
-          `<button class="btn btn-danger btn-sm tm-conflict-reverse" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge "${escapeHtml(t.name)}" into this</button>`
-        ).join('');
-        const openBtns = tags.map(t =>
-          `<a href="/tags/${escapeHtml(t.id)}" target="_blank" class="btn btn-secondary btn-sm">Open "${escapeHtml(t.name)}"</a>`
-        ).join('');
-        return `
-          <div class="tm-conflict-row" data-i="${i}">
-            <div class="tm-conflict-desc">
-              <strong>${escapeHtml(stashdbTag.name)}</strong>
-              <span class="tm-conflict-detail">${hasNameConflict ? 'name' : 'alias'} ${values.map(v => `&ldquo;${escapeHtml(v)}&rdquo;`).join(', ')} already used by ${tags.map(t => `&ldquo;${escapeHtml(t.name)}&rdquo;`).join(', ')}</span>
-            </div>
-            <div class="tm-conflict-actions">
-              ${mergeBtns}
-              ${stripBtn}
-              ${reverseBtns}
-              ${openBtns}
-              <button class="btn btn-secondary btn-sm tm-conflict-skip" data-i="${i}">Skip</button>
-            </div>
-          </div>
-        `;
+        resolve(session.outcome);
       }
 
       function render() {
-        if (remaining.size === 0) { finish(); return; }
-        listEl.innerHTML = [...remaining].map(([i, e]) => rowHtml(i, e)).join('');
+        listEl.innerHTML = [...session.rows.values()].map(conflictRowHtml).join('');
+        if (footerBtn) footerBtn.textContent = pendingConflictRows(session).length ? 'Skip all remaining' : 'Done';
         attachHandlers();
       }
 
-      function removeRow(i) {
-        remaining.delete(i);
-        render();
-      }
-
-      function setRowBusy(i) {
-        const row = listEl.querySelector(`.tm-conflict-row[data-i="${i}"]`);
-        if (row) row.classList.add('tm-conflict-busy');
-      }
-      function clearRowBusy(i) {
-        const row = listEl.querySelector(`.tm-conflict-row[data-i="${i}"]`);
-        if (row) row.classList.remove('tm-conflict-busy');
-      }
-
-      async function doMergeInto(i, tagId) {
-        const entry = remaining.get(i);
-        if (!entry) return;
-        const existing = localTags.find(t => t.id === tagId);
-        if (!existing) return;
-        setRowBusy(i);
+      async function act(i, action, tagId) {
+        if (settled || session.busy) return;
+        const rowEl = listEl.querySelector(`.tm-conflict-row[data-i="${i}"]`);
+        if (rowEl) rowEl.classList.add('tm-conflict-busy');
+        listEl.classList.add('tm-conflict-busy');
         try {
-          const input = buildMergeIntoExistingInput(existing, entry.stashdbTag, entry.conflicts, endpoint, entry.stashdbTag.id, entry.parentId);
-          const updated = await updateTag(input);
-          const idx = localTags.findIndex(t => t.id === tagId);
-          if (idx >= 0) {
-            localTags[idx].aliases = input.aliases;
-            localTags[idx].stash_ids = (updated && updated.stash_ids) || input.stash_ids;
-            if (input.parent_ids) localTags[idx].parents = input.parent_ids.map(id => ({ id }));
-          }
-          outcome.linked++; outcome.resolved++;
-          removeRow(i);
-        } catch (e) {
-          console.error('[tagManager] merge-into-existing failed:', e);
-          alert('Merge failed: ' + (e.message || e));
-          clearRowBusy(i);
+          await resolveConflictRow(session, i, action, tagId);
+        } finally {
+          listEl.classList.remove('tm-conflict-busy');
         }
-      }
-
-      async function doStrip(i) {
-        const entry = remaining.get(i);
-        if (!entry) return;
-        setRowBusy(i);
-        const { stashdbTag, parentId, conflicts } = entry;
-        const { aliases } = sanitizeAliasesForImport(stashdbTag, conflicts);
-        try {
-          const input = {
-            name: stashdbTag.name,
-            description: stashdbTag.description || '',
-            aliases,
-            stash_ids: [{ endpoint, stash_id: stashdbTag.id }],
-          };
-          if (parentId) input.parent_ids = [parentId];
-          const newTag = await createTag(input);
-          if (newTag) {
-            localTags.push({ id: newTag.id, name: newTag.name, aliases, stash_ids: input.stash_ids, parents: parentId ? [{ id: parentId }] : [] });
-            outcome.created++; outcome.resolved++;
-          }
-          removeRow(i);
-        } catch (e) {
-          console.error('[tagManager] strip-alias import failed:', e);
-          alert('Import failed: ' + (e.message || e));
-          clearRowBusy(i);
-        }
-      }
-
-      async function doReverse(i, tagId) {
-        const entry = remaining.get(i);
-        if (!entry) return;
-        const existing = localTags.find(t => t.id === tagId);
-        if (!existing) return;
-        // Guard the row across the async scene-count fetch + confirm so a second
-        // click can't start a concurrent handler; restore it if the user cancels.
-        setRowBusy(i);
-        const sceneCount = await getTagSceneCount(tagId);
-        if (!confirm(`Merge "${existing.name}" into "${entry.stashdbTag.name}"?\n\nThis deletes "${existing.name}" and reassigns its ${sceneCount} scene${sceneCount === 1 ? '' : 's'} to the imported tag. This cannot be undone.`)) {
-          clearRowBusy(i);
-          return;
-        }
-        const { stashdbTag, parentId, conflicts } = entry;
-        // Create the incoming tag clean (strip the conflicting aliases so the create
-        // succeeds while the existing tag still owns them), then absorb the existing
-        // tag — tagsMerge carries its aliases/scenes onto the new tag.
-        const { aliases } = sanitizeAliasesForImport(stashdbTag, conflicts);
-        try {
-          const input = {
-            name: stashdbTag.name,
-            description: stashdbTag.description || '',
-            aliases,
-            stash_ids: [{ endpoint, stash_id: stashdbTag.id }],
-          };
-          if (parentId) input.parent_ids = [parentId];
-          const newTag = await createTag(input);
-          if (!newTag) throw new Error('tagCreate returned no tag');
-          const merged = await mergeTags([tagId], newTag.id);
-          const removedIdx = localTags.findIndex(t => t.id === tagId);
-          if (removedIdx >= 0) localTags.splice(removedIdx, 1);
-          localTags.push({
-            id: newTag.id,
-            name: (merged && merged.name) || newTag.name,
-            aliases: (merged && merged.aliases) || aliases,
-            stash_ids: (merged && merged.stash_ids) || input.stash_ids,
-            parents: parentId ? [{ id: parentId }] : [],
-          });
-          outcome.created++; outcome.resolved++;
-          removeRow(i);
-        } catch (e) {
-          console.error('[tagManager] reverse-merge failed:', e);
-          alert('Reverse merge failed: ' + (e.message || e));
-          clearRowBusy(i);
-        }
-      }
-
-      function doSkip(i) {
-        if (!remaining.has(i)) return;
-        outcome.skipped++;
-        remaining.delete(i);
-        render();
+        if (closeRequested) finish();
+        else if (!settled) render();
       }
 
       function attachHandlers() {
-        listEl.querySelectorAll('.tm-conflict-merge-into').forEach(b =>
-          b.addEventListener('click', () => doMergeInto(Number(b.dataset.i), b.dataset.tag)));
-        listEl.querySelectorAll('.tm-conflict-strip').forEach(b =>
-          b.addEventListener('click', () => doStrip(Number(b.dataset.i))));
-        listEl.querySelectorAll('.tm-conflict-reverse').forEach(b =>
-          b.addEventListener('click', () => doReverse(Number(b.dataset.i), b.dataset.tag)));
-        listEl.querySelectorAll('.tm-conflict-skip').forEach(b =>
-          b.addEventListener('click', () => doSkip(Number(b.dataset.i))));
+        const on = (selector, action) => listEl.querySelectorAll(selector).forEach(b =>
+          b.addEventListener('click', () => act(Number(b.dataset.i), action, b.dataset.tag)));
+        on('.tm-conflict-merge-into', 'merge-into');
+        on('.tm-conflict-strip', 'strip');
+        on('.tm-conflict-reverse', 'reverse');
+        on('.tm-conflict-import', 'import');
+        on('.tm-conflict-skip', 'skip');
         // "Open" links intentionally do not resolve the row — the user may return
         // to it; if they close the modal with it unresolved it counts as skipped.
       }
 
       backdrop.querySelector('.tm-close-btn').addEventListener('click', finish);
       backdrop.addEventListener('click', (e) => { if (e.target === backdrop) finish(); });
-      backdrop.querySelector('#tm-conflict-skip-all').addEventListener('click', finish);
+      if (footerBtn) footerBtn.addEventListener('click', finish);
 
       render();
     });
@@ -1930,47 +2887,58 @@
       return;
     }
 
+    // F11: the flag and the button are reset in `finally`, whatever happens.
     isImporting = true;
-    const statusEl = container.querySelector('.tm-selection-info');
-    if (statusEl) statusEl.textContent = 'Updating linked tags...';
+    const btnEl = container.querySelector('#tm-update-linked');
+    if (btnEl) btnEl.disabled = true;
+    try {
+      const statusEl = container.querySelector('.tm-selection-info');
+      if (statusEl) statusEl.textContent = 'Updating linked tags...';
 
-    let updated = 0;
-    let errors = 0;
+      let updated = 0;
+      let errors = 0;
 
-    for (const { localTag, stashdbTag, needsDescription, newAliases } of tagsToUpdate) {
-      try {
-        const input = { id: localTag.id };
-        if (needsDescription) {
-          input.description = stashdbTag.description;
+      for (const { localTag, stashdbTag, needsDescription, newAliases } of tagsToUpdate) {
+        try {
+          const input = { id: localTag.id };
+          if (needsDescription) {
+            input.description = stashdbTag.description;
+          }
+          if (newAliases.length > 0) {
+            input.aliases = [...(localTag.aliases || []), ...newAliases];
+          }
+
+          await updateTag(input);
+
+          // Update local cache
+          const idx = localTags.findIndex(t => t.id === localTag.id);
+          if (idx >= 0) {
+            if (needsDescription) localTags[idx].description = stashdbTag.description;
+            if (newAliases.length > 0) localTags[idx].aliases = input.aliases;
+            localTagsChanged();
+          }
+          updated++;
+        } catch (e) {
+          console.error(`[tagManager] Failed to update "${localTag.name}":`, e);
+          errors++;
         }
-        if (newAliases.length > 0) {
-          input.aliases = [...(localTag.aliases || []), ...newAliases];
-        }
-
-        await updateTag(input);
-
-        // Update local cache
-        const idx = localTags.findIndex(t => t.id === localTag.id);
-        if (idx >= 0) {
-          if (needsDescription) localTags[idx].description = stashdbTag.description;
-          if (newAliases.length > 0) localTags[idx].aliases = input.aliases;
-        }
-        updated++;
-      } catch (e) {
-        console.error(`[tagManager] Failed to update "${localTag.name}":`, e);
-        errors++;
       }
+
+      const parts = [];
+      if (updated > 0) parts.push(`Updated ${updated} tag${updated !== 1 ? 's' : ''}`);
+      if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
+      const message = parts.join(', ') || 'No changes';
+
+      showStatus(message, errors > 0 ? 'warning' : 'success');
+    } catch (e) {
+      console.error('[tagManager] Updating linked tags failed:', e);
+      showStatus(`Updating linked tags failed: ${e.message || e}`, 'error');
+    } finally {
+      isImporting = false;
+      if (btnEl) btnEl.disabled = false;
     }
 
-    const parts = [];
-    if (updated > 0) parts.push(`Updated ${updated} tag${updated !== 1 ? 's' : ''}`);
-    if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
-    const message = parts.join(', ') || 'No changes';
-
-    showStatus(message, errors > 0 ? 'warning' : 'success');
-
     setTimeout(() => {
-      isImporting = false;
       renderPage(container);
       refreshLocalTags(); // #124: reconcile with server truth after import
     }, 1500);
@@ -1992,11 +2960,112 @@
    */
   function findLocalTagByName(name) {
     if (!name) return undefined;
-    const lowerName = name.toLowerCase();
-    return localTags.find(t =>
-      t.name.toLowerCase() === lowerName ||
-      t.aliases?.some(a => a.toLowerCase() === lowerName)
-    );
+    return indexFindByName(getLocalTagIndex(), name);
+  }
+
+  // ---- F10: local tag index -------------------------------------------------
+  // Lookups by name/alias/stash_id were linear scans of localTags (10k+ tags),
+  // repeated per StashDB tag (3k+) on every render and import. The index turns
+  // them into Map lookups with the same semantics as the scans they replace.
+
+  /**
+   * Build lookup maps over local tags.
+   *  byName:  lowercase name or alias -> tags carrying it, in localTags order
+   *  byStash: `endpoint|stash_id` -> first tag having that stash_id
+   */
+  function buildLocalTagIndex(tags) {
+    const byName = new Map();
+    const byStash = new Map();
+    const addName = (value, tag) => {
+      if (typeof value !== 'string' || !value) return;
+      const key = value.toLowerCase();
+      const list = byName.get(key);
+      if (!list) byName.set(key, [tag]);
+      else if (list[list.length - 1] !== tag) list.push(tag);
+    };
+    for (const tag of tags || []) {
+      addName(tag.name, tag);
+      for (const a of tag.aliases || []) addName(a, tag);
+      for (const sid of tag.stash_ids || []) {
+        const key = `${sid.endpoint}|${sid.stash_id}`;
+        if (!byStash.has(key)) byStash.set(key, tag);
+      }
+    }
+    return { byName, byStash };
+  }
+
+  /** First tag whose name or alias equals `name` (case-insensitive), skipping excludeId. */
+  function indexFindByName(index, name, excludeId) {
+    const list = index.byName.get(String(name).toLowerCase());
+    if (!list) return undefined;
+    return excludeId === undefined || excludeId === null
+      ? list[0]
+      : list.find(t => t.id !== excludeId);
+  }
+
+  /** The tag linked to `stashId` for `endpoint`, if any. */
+  function indexFindByStashId(index, endpoint, stashId) {
+    return index.byStash.get(`${endpoint}|${stashId}`);
+  }
+
+  // Invalidation rule: the memoized index is rebuilt when (a) the localTags array
+  // reference changed (reassignment after a fetch), (b) its length changed (a push
+  // or splice, even one that forgot to notify), or (c) localTagsChanged() was
+  // called. In-place edits of a tag's name/aliases/stash_ids keep the array and
+  // its length, so those sites must call localTagsChanged().
+  let _localIndex = null;
+  let _localIndexRef = null;
+  let _localIndexLen = -1;
+  let _localIndexVersion = 0;
+  let _localIndexBuiltVersion = -1;
+
+  function localTagsChanged() {
+    _localIndexVersion++;
+  }
+
+  function getLocalTagIndex() {
+    if (!_localIndex || _localIndexRef !== localTags || _localIndexLen !== localTags.length ||
+        _localIndexBuiltVersion !== _localIndexVersion) {
+      _localIndex = buildLocalTagIndex(localTags);
+      _localIndexRef = localTags;
+      _localIndexLen = localTags.length;
+      _localIndexBuiltVersion = _localIndexVersion;
+    }
+    return _localIndex;
+  }
+
+  /** True if some local tag has this stash_id for this endpoint. */
+  function isLinkedForEndpoint(stashId, endpoint) {
+    return !!endpoint && !!indexFindByStashId(getLocalTagIndex(), endpoint, stashId);
+  }
+
+  /**
+   * StashDB tags to import with "Import All Unlinked": everything except
+   * blacklisted tags and tags already linked (for this endpoint) to a local tag.
+   * Tags that only match a local tag by name stay in: the import links them.
+   * @returns {string[]} StashDB tag ids
+   */
+  function importAllCandidates({ stashdbTags: tags, localTags: locals, endpoint, isBlacklisted: blacklisted }) {
+    const index = buildLocalTagIndex(locals);
+    const skip = blacklisted || (() => false);
+    const ids = [];
+    for (const tag of tags || []) {
+      if (skip(tag.name)) continue;
+      if (indexFindByStashId(index, endpoint, tag.id)) continue;
+      ids.push(tag.id);
+    }
+    return ids;
+  }
+
+  /** Tags on a page that still need a match for `endpoint` (ignores links to other stash-boxes). */
+  function tagsToSearchOnPage(tags, endpoint) {
+    return tags.filter(t => !hasStashIdForEndpoint(t, endpoint));
+  }
+
+  // F10: cancel flag for a running import; checked before each tag.
+  let importCancelRequested = false;
+  function requestImportCancel() {
+    importCancelRequested = true;
   }
 
   /**
@@ -2041,13 +3110,11 @@
     let filteredTags = tags;
     if (browseFilter === 'linked') {
       filteredTags = tags.filter(tag => {
-        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-        return hasStashIdForEndpoint(localMatch, endpoint);
+        return isLinkedForEndpoint(tag.id, endpoint);
       });
     } else if (browseFilter === 'unlinked') {
       filteredTags = tags.filter(tag => {
-        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-        return !hasStashIdForEndpoint(localMatch, endpoint);
+        return !isLinkedForEndpoint(tag.id, endpoint);
       });
     }
 
@@ -2059,10 +3126,7 @@
 
     const rows = tags.map(tag => {
       // Check if linked to THIS endpoint specifically
-      const isLinkedToEndpoint = hasStashIdForEndpoint(
-        localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id)),
-        endpoint
-      );
+      const isLinkedToEndpoint = isLinkedForEndpoint(tag.id, endpoint);
       // Check if tag exists locally by name (for smart import)
       const existsByName = findLocalTagByName(tag.name);
       const canLink = existsByName && !isLinkedToEndpoint;
@@ -2109,13 +3173,11 @@
     let filteredTags = tags;
     if (browseFilter === 'linked') {
       filteredTags = tags.filter(tag => {
-        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-        return hasStashIdForEndpoint(localMatch, endpoint);
+        return isLinkedForEndpoint(tag.id, endpoint);
       });
     } else if (browseFilter === 'unlinked') {
       filteredTags = tags.filter(tag => {
-        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-        return !hasStashIdForEndpoint(localMatch, endpoint);
+        return !isLinkedForEndpoint(tag.id, endpoint);
       });
     }
 
@@ -2127,10 +3189,7 @@
 
     const rows = tags.map(tag => {
       // Check if linked to THIS endpoint specifically
-      const isLinkedToEndpoint = hasStashIdForEndpoint(
-        localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id)),
-        endpoint
-      );
+      const isLinkedToEndpoint = isLinkedForEndpoint(tag.id, endpoint);
       // Check if tag exists locally by name (for smart import)
       const existsByName = findLocalTagByName(tag.name);
       const canLink = existsByName && !isLinkedToEndpoint;
@@ -2172,6 +3231,13 @@
    * Render the browse/import view
    */
   function renderBrowseView() {
+    if (!stashdbTags && stashdbTagsLoad) {
+      return `
+        <div class="tm-browse-empty">
+          <p>Loading stash-box tags...</p>
+        </div>
+      `;
+    }
     if (!stashdbTags || stashdbTags.length === 0) {
       return `
         <div class="tm-browse-empty">
@@ -2311,6 +3377,12 @@
 
     const hasStashBox = stashBoxes.length > 0;
 
+    // A re-render (e.g. the focus refresh) must not drop focus from the blacklist editor.
+    const active = document.activeElement;
+    const editorFocus = active && active.id === 'tm-blacklist-text'
+      ? { start: active.selectionStart, end: active.selectionEnd }
+      : null;
+
     container.innerHTML = `
       <div class="tag-manager">
         <div class="tag-manager-header">
@@ -2355,7 +3427,20 @@
               <button class="btn btn-primary" id="tm-search-all-btn" ${isLoading || isCacheLoading ? 'disabled' : ''}>
                 ${isLoading ? 'Searching...' : 'Find Matches for Page'}
               </button>
+              <button class="btn btn-secondary" id="tm-blacklist-toggle">
+                Blacklist${tagBlacklist.length ? ` (${tagBlacklist.length})` : ''} ${blacklistPanelOpen ? '\u25B2' : '\u25BC'}
+              </button>
             </div>
+            ${blacklistPanelOpen ? `
+              <div class="tm-blacklist-editor">
+                <textarea id="tm-blacklist-text" class="form-control" rows="6"
+                  placeholder="One pattern per line. Plain text matches the whole tag name; /regex/i is a regular expression.">${escapeHtml(blacklistDraft ?? tagBlacklistRaw)}</textarea>
+                <div class="tm-blacklist-actions">
+                  <button class="btn btn-primary btn-sm" id="tm-blacklist-save">Save</button>
+                  <span class="tm-blacklist-hint">Blacklisted StashDB tags are hidden from matches and search results.</span>
+                </div>
+              </div>
+            ` : ''}
 
             <div class="tag-manager-list" id="tm-tag-list">
               ${pageTags.length === 0
@@ -2380,6 +3465,14 @@
 
     // Attach event handlers
     attachEventHandlers(container);
+
+    if (editorFocus) {
+      const editor = container.querySelector('#tm-blacklist-text');
+      if (editor) {
+        editor.focus();
+        editor.setSelectionRange(editorFocus.start, editorFocus.end);
+      }
+    }
   }
 
   /**
@@ -2387,8 +3480,9 @@
    */
   function renderTagRow(tag) {
     const matches = matchResults[tag.id];
-    const hasMatches = matches && matches.length > 0;
-    const bestMatch = hasMatches ? matches[0] : null;
+    const best = bestVisibleMatch(matches);
+    const hasMatches = !!best;
+    const bestMatch = best ? best.match : null;
 
     let matchContent = '';
     if (isLoading) {
@@ -2407,9 +3501,16 @@
           <button class="btn btn-secondary btn-sm tm-more" data-tag-id="${tag.id}">More</button>
         </div>
       `;
-    } else if (matches !== undefined) {
+    } else if (matchErrors[tag.id]) {
+      // The Find Match handler (.tm-search) retries the search
       matchContent = `
-        <span class="tm-no-match">No matches found</span>
+        <span class="tm-no-match tm-search-failed">Search failed: ${escapeHtml(matchErrors[tag.id])}</span>
+        <button class="btn btn-primary btn-sm tm-search" data-tag-id="${tag.id}">Retry</button>
+      `;
+    } else if (matches !== undefined) {
+      const hidden = (matches?.length || 0);
+      matchContent = `
+        <span class="tm-no-match">${hidden > 0 ? 'No matches (hidden by blacklist)' : 'No matches found'}</span>
         <button class="btn btn-secondary btn-sm tm-manual-search" data-tag-id="${tag.id}">Search</button>
       `;
     } else {
@@ -2421,7 +3522,7 @@
     return `
       <div class="tm-tag-row" data-tag-id="${tag.id}">
         <div class="tm-tag-info">
-          <a href="/tags/${tag.id}" class="tm-tag-name">${escapeHtml(tag.name)}</a>
+          <a ${internalLinkAttrs(`/tags/${tag.id}`)} class="tm-tag-name">${escapeHtml(tag.name)}</a>
           ${tag.aliases?.length ? `<span class="tm-tag-aliases">${escapeHtml(tag.aliases.join(', '))}</span>` : ''}
         </div>
         <div class="tm-tag-match">
@@ -2440,16 +3541,6 @@
       tab.addEventListener('click', () => {
         const newTab = tab.dataset.tab;
         if (newTab !== activeTab) {
-          // Warn if there are pending hierarchy changes
-          if (isEditMode && pendingChanges.length > 0) {
-            if (!confirm('You have unsaved hierarchy changes. Discard them?')) {
-              return;
-            }
-            // Discard changes
-            isEditMode = false;
-            pendingChanges = [];
-            originalParentMap.clear();
-          }
           activeTab = newTab;
           renderPage(container);
         }
@@ -2548,31 +3639,7 @@
       // Import All Unlinked button
       const importAllBtn = container.querySelector('#tm-import-all');
       if (importAllBtn) {
-        importAllBtn.addEventListener('click', () => {
-          const endpoint = selectedStashBox?.endpoint;
-          if (!stashdbTags || !endpoint) return;
-
-          // Collect all unlinked StashDB tag IDs
-          const unlinkedIds = new Set();
-          for (const tag of stashdbTags) {
-            const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-            if (!hasStashIdForEndpoint(localMatch, endpoint)) {
-              unlinkedIds.add(tag.id);
-            }
-          }
-
-          if (unlinkedIds.size === 0) {
-            showStatus('All tags are already linked', 'info');
-            return;
-          }
-
-          if (!confirm(`Import ${unlinkedIds.size} unlinked tag${unlinkedIds.size !== 1 ? 's' : ''} from all categories?`)) {
-            return;
-          }
-
-          selectedForImport = unlinkedIds;
-          handleImportSelected(container);
-        });
+        importAllBtn.addEventListener('click', () => handleImportAll(container));
       }
 
       // Update Linked Tags button
@@ -2595,19 +3662,23 @@
       if (newStashBox && newStashBox.endpoint !== selectedStashBox?.endpoint) {
         console.debug("[tagManager] Switching to stash-box:", newStashBox.name);
         selectedStashBox = newStashBox;
-        // Clear cached data for previous endpoint
+        // Clear cached data for previous endpoint (a background load for it is dropped)
         stashdbTags = null;
+        stashdbTagsLoad = null;
         matchResults = {};
+        matchErrors = {};
         cacheStatus = null;
+        selectedForImport = new Set();
         // Load cache status for new endpoint
         await loadCacheStatus();
 
         // If on browse tab and cache exists, load it automatically
         if (activeTab === 'browse' && cacheStatus?.exists && !cacheStatus?.expired) {
-          await loadStashdbTags(container);
+          await loadTagsFromCache(container);
         }
 
         renderPage(container);
+        if (cacheStatus?.error) showStatus(cacheStatus.error, 'error');
       }
     });
 
@@ -2640,6 +3711,31 @@
       }
     });
 
+    // Blacklist editor
+    container.querySelector('#tm-blacklist-toggle')?.addEventListener('click', () => {
+      blacklistPanelOpen = !blacklistPanelOpen;
+      renderPage(container);
+    });
+    // Unsaved text lives in blacklistDraft so a re-render keeps it
+    container.querySelector('#tm-blacklist-text')?.addEventListener('input', (e) => {
+      blacklistDraft = e.target.value;
+    });
+    container.querySelector('#tm-blacklist-save')?.addEventListener('click', async (e) => {
+      const btn = e.target;
+      const text = container.querySelector('#tm-blacklist-text')?.value || '';
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      const ok = await saveBlacklist(text);
+      if (ok) {
+        if (blacklistDraft === text) blacklistDraft = null; // keep anything typed during the save
+        renderPage(container);
+        showStatus('Blacklist saved', 'success');
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Save';
+      }
+    });
+
     // Search all on page
     container.querySelector('#tm-search-all-btn')?.addEventListener('click', () => {
       searchAllOnPage(container);
@@ -2657,7 +3753,8 @@
     container.querySelectorAll('.tm-accept').forEach(btn => {
       btn.addEventListener('click', (e) => {
         const tagId = e.target.dataset.tagId;
-        showDiffDialog(tagId, container);
+        const best = bestVisibleMatch(matchResults[tagId]);
+        if (best) showDiffDialog(tagId, container, best.index);
       });
     });
 
@@ -2686,8 +3783,8 @@
     const startIdx = (currentPage - 1) * settings.pageSize;
     const pageTags = filtered.slice(startIdx, startIdx + settings.pageSize);
 
-    // Only search tags that don't already have StashDB IDs
-    const tagsToSearch = pageTags.filter(t => !t.stash_ids || t.stash_ids.length === 0);
+    // Only search tags that have no ID for the selected stash-box (a link to another one doesn't count)
+    const tagsToSearch = tagsToSearchOnPage(pageTags, selectedStashBox?.endpoint);
 
     if (tagsToSearch.length === 0) {
       showStatus('All tags on this page are already matched', 'info');
@@ -2697,21 +3794,31 @@
     isLoading = true;
     renderPage(container);
 
+    let searchError = null;
+    let fuzzyUnavailable = false;
     for (const tag of tagsToSearch) {
       try {
         const result = await callBackend('search', {
           tag_name: tag.name,
-          stashdb_tags: stashdbTags,
         });
         matchResults[tag.id] = result.matches || [];
+        delete matchErrors[tag.id];
+        if (result.fuzzy_unavailable) fuzzyUnavailable = true;
       } catch (e) {
         console.error(`[tagManager] Error searching for ${tag.name}:`, e);
-        matchResults[tag.id] = [];
+        const text = backendErrorText(e);
+        delete matchResults[tag.id];
+        matchErrors[tag.id] = text;
+        if (!searchError) {
+          searchError = text;
+        }
       }
     }
 
     isLoading = false;
     renderPage(container);
+    if (searchError) showStatus(`Error: ${searchError}`, 'error');
+    else if (fuzzyUnavailable) showFuzzyUnavailableHint();
   }
 
   /**
@@ -2724,14 +3831,137 @@
     try {
       const result = await callBackend('search', {
         tag_name: tag.name,
-        stashdb_tags: stashdbTags,
       });
       matchResults[tagId] = result.matches || [];
+      delete matchErrors[tagId];
       renderPage(container);
+      if (result.fuzzy_unavailable) showFuzzyUnavailableHint();
     } catch (e) {
       console.error(`[tagManager] Error searching for ${tag.name}:`, e);
-      showStatus(`Error: ${e.message}`, 'error');
+      const text = backendErrorText(e);
+      delete matchResults[tagId];
+      matchErrors[tagId] = text;
+      renderPage(container);
+      showStatus(`Error: ${text}`, 'error');
     }
+  }
+
+  /**
+   * F12: the diff dialog's Apply, without the DOM. validateBeforeSave runs FIRST:
+   * on a conflict nothing is created, saved or fetched. Only then does it create
+   * a '__create__' parent, update the tag and, once the update succeeded, save
+   * the category mapping. The caller passes the dialog's current selections.
+   * @param {object} p
+   * @param {object} p.tag - the local tag being matched
+   * @param {object} p.stashdbTag - the chosen stash-box tag
+   * @param {string} p.endpoint
+   * @param {'local'|'local_add_alias'|'stashdb'} p.nameChoice
+   * @param {'local'|'stashdb'} p.descChoice
+   * @param {Iterable<string>} p.aliases - the dialog's final aliases
+   * @param {?string} p.parentId - a tag id, '__create__', or null
+   * @param {boolean} p.rememberMapping
+   * @returns {Promise<object>} { ok, sanitizedAliases, updateInput?, createdParent?,
+   *   validationErrors?, error?, stage?: 'parent'|'update' }. `createdParent` is
+   *   set whenever a parent was created, even if a later step failed.
+   */
+  async function applyDiff({ tag, stashdbTag, endpoint, nameChoice, descChoice, aliases, parentId, rememberMapping }) {
+    // Determine final name
+    const finalName = nameChoice === 'stashdb' ? stashdbTag.name : tag.name;
+
+    // Sanitize aliases - remove final name to prevent self-referential alias
+    const sanitizedAliases = sanitizeAliasesForSave(aliases, finalName, tag.name);
+
+    // Pre-validation: check for conflicts before hitting the API at all
+    const validationErrors = validateBeforeSave(finalName, sanitizedAliases, tag.id);
+    if (validationErrors.length > 0) {
+      return { ok: false, validationErrors, sanitizedAliases };
+    }
+
+    const categoryName = stashdbTag.category?.name || null;
+    console.debug('[tagManager] Applying match:', {
+      localTag: tag.name,
+      stashdbTag: stashdbTag.name,
+      endpoint,
+      nameChoice,
+      descChoice,
+      aliasCount: sanitizedAliases.length,
+      categoryName,
+      parentId,
+    });
+
+    // Build update input - preserve existing stash_ids from other endpoints
+    const filteredStashIds = (tag.stash_ids || []).filter(sid => sid.endpoint !== endpoint);
+    const updateInput = {
+      id: tag.id,
+      stash_ids: [...filteredStashIds, {
+        endpoint: endpoint,
+        stash_id: stashdbTag.id,
+      }],
+    };
+    if (nameChoice === 'stashdb') {
+      updateInput.name = stashdbTag.name;
+    }
+    if (descChoice === 'stashdb') {
+      updateInput.description = stashdbTag.description || '';
+    }
+    updateInput.aliases = sanitizedAliases;
+
+    // Handle parent tag from category (#126: skipped when leaving parents alone)
+    let parentTagId = null;
+    let createdParent = null;
+    if (shouldResolveParents(settings) && categoryName && parentId) {
+      if (parentId === '__create__') {
+        try {
+          createdParent = await createCategoryParentTag(categoryName);
+        } catch (e) {
+          console.error('[tagManager] Failed to create parent tag:', e);
+          return { ok: false, stage: 'parent', error: `Failed to create parent tag: ${e.message}`, sanitizedAliases };
+        }
+        parentTagId = createdParent.id;
+      } else {
+        parentTagId = parentId;
+      }
+
+      // Merge new parent with existing parents (don't replace)
+      try {
+        const existingParentIds = await fetchTagParentIds(tag.id);
+        if (!existingParentIds.includes(parentTagId)) {
+          updateInput.parent_ids = [...existingParentIds, parentTagId];
+        }
+      } catch (e) {
+        console.error('[tagManager] Failed to read current parents:', e);
+        return {
+          ok: false, stage: 'parent', createdParent, sanitizedAliases,
+          error: `Could not read the current parents of "${tag.name}": ${e.message}`,
+        };
+      }
+    }
+
+    try {
+      await updateTag(updateInput);
+    } catch (e) {
+      console.error('[tagManager] Save error:', e.message);
+      return { ok: false, stage: 'update', error: e.message, createdParent, sanitizedAliases };
+    }
+
+    // Update local state
+    const idx = localTags.findIndex(t => t.id === tag.id);
+    if (idx >= 0) {
+      localTags[idx].stash_ids = updateInput.stash_ids;
+      if (updateInput.name) localTags[idx].name = updateInput.name;
+      if (updateInput.description !== undefined) localTags[idx].description = updateInput.description;
+      if (updateInput.aliases) localTags[idx].aliases = updateInput.aliases;
+      localTagsChanged();
+    }
+    delete matchResults[tag.id];
+
+    // Save the mapping only once the tag itself is saved
+    if (rememberMapping && parentTagId) {
+      setCategoryMapping(endpoint, categoryName, parentTagId);
+      await saveCategoryMappings();
+    }
+
+    return { ok: true, updateInput, createdParent, sanitizedAliases };
   }
 
   /**
@@ -2765,22 +3995,27 @@
     let parentMatches = [];
     const existingParents = tag.parents || [];
 
+    let parentOptions = [];
+    let savedMappingId = null;
+    const showParentControls = shouldShowParentControls(settings, hasCategory);
     if (hasCategory) {
-      // Check for saved mapping first
-      const savedMapping = categoryMappings[stashdbTag.category.name];
-      if (savedMapping) {
-        selectedParentId = savedMapping;
-      } else if (existingParents.length > 0) {
-        // Tag already has a parent - use it
-        selectedParentId = existingParents[0].id;
-        createParentIfMissing = false;
-      } else {
-        // Find local matches by category name
-        parentMatches = findLocalParentMatches(stashdbTag.category.name);
-        if (parentMatches.length > 0) {
-          selectedParentId = parentMatches[0].tag.id;
-        }
+      const categoryName = stashdbTag.category.name;
+      // F20: mappings are per endpoint; the same endpoint Apply links to.
+      const mappingEndpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
+      savedMappingId = getCategoryMapping(mappingEndpoint, categoryName) || null;
+      if (savedMappingId && !localTags.some(t => t.id === savedMappingId)) {
+        // Not in localTags (maybe deleted, maybe localTags is stale): don't
+        // pre-select it; drop it only if Stash says the tag is gone.
+        dropCategoryMappingIfTagGone(mappingEndpoint, categoryName, savedMappingId).catch(e =>
+          console.warn('[tagManager] Failed to drop stale category mapping:', e));
+        savedMappingId = null;
       }
+      parentMatches = findLocalParentMatches(categoryName);
+      parentOptions = buildParentOptions({
+        existingParents, parentMatches, savedMappingId, categoryName, localTags,
+      });
+      const sel = parentOptions.find(o => o.selected);
+      selectedParentId = sel && sel.value !== '' ? sel.value : null;
     }
 
     // Helper function to render alias checkboxes for a column
@@ -2916,6 +4151,8 @@
               }
               select.value = tagId;
               selectedParentId = tagId;
+              const remember = modal.querySelector('#tm-remember-mapping');
+              if (remember) remember.checked = tagId !== savedMappingId;
             }
             searchModal.remove();
           });
@@ -3017,7 +4254,7 @@
                   </div>
                 </td>
               </tr>
-              ${hasCategory ? `
+              ${showParentControls ? `
               <tr>
                 <td>Parent Tag</td>
                 <td colspan="3">
@@ -3028,29 +4265,15 @@
                     </div>
                     <div class="tm-parent-select">
                       <select id="tm-parent-select" class="form-control">
-                        <option value="">-- No parent --</option>
-                        ${existingParents.map(p => `
-                          <option value="${p.id}" ${selectedParentId === p.id ? 'selected' : ''}>
-                            ${escapeHtml(p.name)} (current parent)
-                          </option>
+                        ${parentOptions.map(o => `
+                          <option value="${escapeHtml(o.value)}" ${o.selected ? 'selected' : ''}>${escapeHtml(o.label)}</option>
                         `).join('')}
-                        ${(!existingParents.length && !parentMatches.length) ? `
-                          <option value="__create__" selected>Create "${escapeHtml(stashdbTag.category.name)}"</option>
-                        ` : ''}
-                        ${parentMatches.filter(m => !existingParents.some(p => p.id === m.tag.id)).map(m => `
-                          <option value="${m.tag.id}" ${selectedParentId === m.tag.id ? 'selected' : ''}>
-                            ${escapeHtml(m.tag.name)} (${m.matchType})
-                          </option>
-                        `).join('')}
-                        ${(existingParents.length || parentMatches.length) ? `
-                          <option value="__create__">Create "${escapeHtml(stashdbTag.category.name)}"</option>
-                        ` : ''}
                       </select>
                       <button type="button" class="btn btn-secondary btn-sm" id="tm-parent-search-btn">Search...</button>
                     </div>
                     <div class="tm-parent-remember">
                       <label>
-                        <input type="checkbox" id="tm-remember-mapping" checked>
+                        <input type="checkbox" id="tm-remember-mapping" ${selectedParentId && selectedParentId === savedMappingId ? '' : 'checked'}>
                         Remember this mapping
                       </label>
                     </div>
@@ -3093,6 +4316,8 @@
       if (parentSelect) {
         parentSelect.addEventListener('change', (e) => {
           selectedParentId = e.target.value === '' ? null : e.target.value;
+          const remember = modal.querySelector('#tm-remember-mapping');
+          if (remember) remember.checked = selectedParentId !== savedMappingId;
         });
       }
 
@@ -3150,168 +4375,145 @@
       if (e.target === modal) modal.remove();
     });
 
-    modal.querySelector('.tm-apply-btn').addEventListener('click', async () => {
-      const nameChoice = modal.querySelector('input[name="tm-name"]:checked').value;
-      const descChoice = modal.querySelector('input[name="tm-desc"]:checked').value;
-      const errorEl = modal.querySelector('#tm-diff-error');
+    // Pre-validation failed: explain the first conflict and offer fixes.
+    function showValidationError(errorEl, validationErrors, endpoint, sanitizedAliases) {
+      const err = validationErrors[0]; // Show first error
+      const conflictTag = err.conflictsWith;
 
-      // Hide any previous error
-      errorEl.style.display = 'none';
-      errorEl.innerHTML = '';
-
-      // Use the selected stash-box endpoint
-      const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
-      console.debug(`[tagManager] Saving stash_id with endpoint: ${endpoint}`);
-
-      // Determine final name
-      const finalName = nameChoice === 'stashdb' ? stashdbTag.name : tag.name;
-
-      // Sanitize aliases - remove final name to prevent self-referential alias
-      const sanitizedAliases = sanitizeAliasesForSave(editableAliases, finalName, tag.name);
-
-      console.debug('[tagManager] Applying match:', {
-        localTag: tag.name,
-        stashdbTag: stashdbTag.name,
-        nameChoice,
-        descChoice,
-        aliasCount: sanitizedAliases.length,
-        hasCategory,
-        selectedParentId
-      });
-
-      // Build update input - preserve existing stash_ids from other endpoints
-      const existingStashIds = tag.stash_ids || [];
-      const filteredStashIds = existingStashIds.filter(
-        sid => sid.endpoint !== endpoint
-      );
-
-      const updateInput = {
-        id: tag.id,
-        stash_ids: [...filteredStashIds, {
-          endpoint: endpoint,
-          stash_id: stashdbTag.id,
-        }],
-      };
-
-      if (nameChoice === 'stashdb') {
-        updateInput.name = stashdbTag.name;
+      if (err.type === 'name_conflict') {
+        errorEl.innerHTML = `
+          <div class="tm-error-message">
+            Cannot rename to "${escapeHtml(err.value)}" - this name already exists.
+          </div>
+          <div class="tm-error-actions">
+            <button type="button" class="btn btn-primary btn-sm tm-error-merge" data-conflict-id="${conflictTag.id}">
+              Merge into "${escapeHtml(conflictTag.name)}"
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
+              Keep local name instead
+            </button>
+            <a href="${escapeHtml(stashPath(`/tags/${conflictTag.id}`))}" target="_blank" class="btn btn-secondary btn-sm">
+              Edit "${escapeHtml(conflictTag.name)}"
+            </a>
+          </div>
+        `;
+      } else {
+        errorEl.innerHTML = `
+          <div class="tm-error-message">
+            Alias "${escapeHtml(err.value)}" conflicts with tag "${escapeHtml(conflictTag.name)}".
+          </div>
+          <div class="tm-error-actions">
+            <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(err.value)}">
+              Remove from aliases
+            </button>
+            <a href="${escapeHtml(stashPath(`/tags/${conflictTag.id}`))}" target="_blank" class="btn btn-secondary btn-sm">
+              Edit "${escapeHtml(conflictTag.name)}"
+            </a>
+          </div>
+        `;
       }
 
-      if (descChoice === 'stashdb') {
-        updateInput.description = stashdbTag.description || '';
+      errorEl.style.display = 'block';
+
+      // Attach action handlers
+      const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
+      if (keepLocalBtn) {
+        keepLocalBtn.addEventListener('click', () => {
+          modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
+          errorEl.style.display = 'none';
+        });
       }
 
-      // Use sanitized aliases
-      updateInput.aliases = sanitizedAliases;
+      const removeAliasBtn = errorEl.querySelector('.tm-error-remove-alias');
+      if (removeAliasBtn) {
+        removeAliasBtn.addEventListener('click', () => {
+          const aliasToRemove = removeAliasBtn.dataset.alias;
+          editableAliases.delete(aliasToRemove);
+          renderAliasPills();
+          errorEl.style.display = 'none';
+        });
+      }
 
-      // Handle parent tag from category (#126: skipped when leaving parents alone)
-      let parentTagId = null;
-      if (shouldResolveParents(settings) && hasCategory && selectedParentId) {
-        if (selectedParentId === '__create__') {
-          // Create the parent tag
-          try {
-            const newParent = await createTag({ name: stashdbTag.category.name });
-            parentTagId = newParent.id;
-            // Add to localTags for future reference
-            localTags.push({ id: newParent.id, name: newParent.name, aliases: [] });
-            console.debug(`[tagManager] Created parent tag: ${newParent.name}`);
-          } catch (e) {
-            console.error('[tagManager] Failed to create parent tag:', e);
-            errorEl.innerHTML = `<div class="tm-error-message">Failed to create parent tag: ${escapeHtml(e.message)}</div>`;
-            errorEl.style.display = 'block';
-            return;
+      // Merge button handler - merges current tag into the conflicting tag
+      const mergeBtn = errorEl.querySelector('.tm-error-merge');
+      if (mergeBtn) {
+        mergeBtn.addEventListener('click', async () => {
+          const destinationId = mergeBtn.dataset.conflictId;
+          const originalText = mergeBtn.textContent;
+
+          mergeBtn.disabled = true;
+          mergeBtn.textContent = 'Merging...';
+
+          const result = await performTagMerge({
+            sourceTag: tag,
+            destinationId,
+            stashdbTag,
+            endpoint,
+            sanitizedAliases,
+            modal,
+            container,
+            ...currentParentChoice(),
+          });
+          if (result.createdParent) createdParentId = result.createdParent.id;
+
+          if (result.cancelled) {
+            mergeBtn.disabled = false;
+            mergeBtn.textContent = originalText;
+          } else if (!result.success) {
+            errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
+            mergeBtn.disabled = false;
+            mergeBtn.textContent = originalText;
           }
-        } else {
-          parentTagId = selectedParentId;
-        }
-
-        // Merge new parent with existing parents (don't replace)
-        if (parentTagId) {
-          const existingParentIds = await fetchTagParentIds(tag.id);
-          // Add new parent if not already present
-          if (!existingParentIds.includes(parentTagId)) {
-            updateInput.parent_ids = [...existingParentIds, parentTagId];
-          }
-          // If already a parent, no need to update parent_ids
-        }
-
-        // Save mapping if checkbox is checked
-        const rememberCheckbox = modal.querySelector('#tm-remember-mapping');
-        if (rememberCheckbox?.checked && parentTagId) {
-          categoryMappings[stashdbTag.category.name] = parentTagId;
-          await saveCategoryMappings();
-        }
+        });
       }
+    }
 
-      // Pre-validation: check for conflicts before hitting API
-      const validationErrors = validateBeforeSave(finalName, sanitizedAliases, tag.id);
-      if (validationErrors.length > 0) {
-        const err = validationErrors[0]; // Show first error
-        const conflictTag = err.conflictsWith;
+    // The save itself failed: parse known server conflicts into actions.
+    function showSaveError(errorEl, message, endpoint, sanitizedAliases) {
+      // Parse "tag with name 'X' already exists"
+      const nameExistsMatch = message.match(/tag with name '([^']+)' already exists/i);
+      if (nameExistsMatch) {
+        const conflictName = nameExistsMatch[1];
+        const conflictTag = findConflictingTag(conflictName, tag.id);
 
-        if (err.type === 'name_conflict') {
-          errorEl.innerHTML = `
-            <div class="tm-error-message">
-              Cannot rename to "${escapeHtml(err.value)}" - this name already exists.
-            </div>
-            <div class="tm-error-actions">
-              <button type="button" class="btn btn-primary btn-sm tm-error-merge" data-conflict-id="${conflictTag.id}">
+        errorEl.innerHTML = `
+          <div class="tm-error-message">
+            Cannot save: "${escapeHtml(conflictName)}" conflicts with an existing tag.
+          </div>
+          <div class="tm-error-actions">
+            ${conflictTag ? `
+              <button type="button" class="btn btn-primary btn-sm tm-error-merge-api" data-conflict-id="${conflictTag.id}">
                 Merge into "${escapeHtml(conflictTag.name)}"
               </button>
-              <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
-                Keep local name instead
-              </button>
-              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+              <a href="${escapeHtml(stashPath(`/tags/${conflictTag.id}`))}" target="_blank" class="btn btn-secondary btn-sm">
                 Edit "${escapeHtml(conflictTag.name)}"
               </a>
-            </div>
-          `;
-        } else {
-          errorEl.innerHTML = `
-            <div class="tm-error-message">
-              Alias "${escapeHtml(err.value)}" conflicts with tag "${escapeHtml(conflictTag.name)}".
-            </div>
-            <div class="tm-error-actions">
-              <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(err.value)}">
-                Remove from aliases
-              </button>
-              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
-                Edit "${escapeHtml(conflictTag.name)}"
-              </a>
-            </div>
-          `;
-        }
-
+            ` : ''}
+            <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(conflictName)}">
+              Remove from aliases
+            </button>
+          </div>
+        `;
         errorEl.style.display = 'block';
 
-        // Attach action handlers
-        const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
-        if (keepLocalBtn) {
-          keepLocalBtn.addEventListener('click', () => {
-            modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
-            errorEl.style.display = 'none';
-          });
-        }
-
-        const removeAliasBtn = errorEl.querySelector('.tm-error-remove-alias');
-        if (removeAliasBtn) {
-          removeAliasBtn.addEventListener('click', () => {
-            const aliasToRemove = removeAliasBtn.dataset.alias;
-            editableAliases.delete(aliasToRemove);
+        const removeBtn = errorEl.querySelector('.tm-error-remove-alias');
+        if (removeBtn) {
+          removeBtn.addEventListener('click', () => {
+            editableAliases.delete(removeBtn.dataset.alias);
             renderAliasPills();
             errorEl.style.display = 'none';
           });
         }
 
-        // Merge button handler - merges current tag into the conflicting tag
-        const mergeBtn = errorEl.querySelector('.tm-error-merge');
-        if (mergeBtn) {
-          mergeBtn.addEventListener('click', async () => {
-            const destinationId = mergeBtn.dataset.conflictId;
-            const originalText = mergeBtn.textContent;
+        // Merge button handler for API error case
+        const mergeApiBtn = errorEl.querySelector('.tm-error-merge-api');
+        if (mergeApiBtn) {
+          mergeApiBtn.addEventListener('click', async () => {
+            const destinationId = mergeApiBtn.dataset.conflictId;
+            const originalText = mergeApiBtn.textContent;
 
-            mergeBtn.disabled = true;
-            mergeBtn.textContent = 'Merging...';
+            mergeApiBtn.disabled = true;
+            mergeApiBtn.textContent = 'Merging...';
 
             const result = await performTagMerge({
               sourceTag: tag,
@@ -3320,140 +4522,125 @@
               endpoint,
               sanitizedAliases,
               modal,
-              container
+              container,
+              ...currentParentChoice(),
             });
+            if (result.createdParent) createdParentId = result.createdParent.id;
 
-            if (!result.success) {
+            if (result.cancelled) {
+              mergeApiBtn.disabled = false;
+              mergeApiBtn.textContent = originalText;
+            } else if (!result.success) {
               errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
-              mergeBtn.disabled = false;
-              mergeBtn.textContent = originalText;
+              mergeApiBtn.disabled = false;
+              mergeApiBtn.textContent = originalText;
             }
           });
         }
-
-        return; // Don't proceed with save
+        return;
       }
 
-      try {
-        await updateTag(updateInput);
-        modal.remove();
+      // Parse "name 'X' is used as alias for 'Y'"
+      const aliasUsedMatch = message.match(/name '([^']+)' is used as alias for '([^']+)'/i);
+      if (aliasUsedMatch) {
+        const [, conflictName, otherTagName] = aliasUsedMatch;
+        const otherTag = localTags.find(t => t.name === otherTagName);
 
-        // Update local state
-        const idx = localTags.findIndex(t => t.id === tag.id);
-        if (idx >= 0) {
-          localTags[idx].stash_ids = updateInput.stash_ids;
-          if (updateInput.name) localTags[idx].name = updateInput.name;
-          if (updateInput.description !== undefined) localTags[idx].description = updateInput.description;
-          if (updateInput.aliases) localTags[idx].aliases = updateInput.aliases;
-        }
-        delete matchResults[tag.id];
-
-        showStatus(`Matched "${tag.name}" to "${stashdbTag.name}"`, 'success');
-        renderPage(container);
-      } catch (e) {
-        console.error('[tagManager] Save error:', e.message);
-
-        // Parse "tag with name 'X' already exists"
-        const nameExistsMatch = e.message.match(/tag with name '([^']+)' already exists/i);
-        if (nameExistsMatch) {
-          const conflictName = nameExistsMatch[1];
-          const conflictTag = findConflictingTag(conflictName, tag.id);
-
-          errorEl.innerHTML = `
-            <div class="tm-error-message">
-              Cannot save: "${escapeHtml(conflictName)}" conflicts with an existing tag.
-            </div>
-            <div class="tm-error-actions">
-              ${conflictTag ? `
-                <button type="button" class="btn btn-primary btn-sm tm-error-merge-api" data-conflict-id="${conflictTag.id}">
-                  Merge into "${escapeHtml(conflictTag.name)}"
-                </button>
-                <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
-                  Edit "${escapeHtml(conflictTag.name)}"
-                </a>
-              ` : ''}
-              <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(conflictName)}">
-                Remove from aliases
-              </button>
-            </div>
-          `;
-          errorEl.style.display = 'block';
-
-          const removeBtn = errorEl.querySelector('.tm-error-remove-alias');
-          if (removeBtn) {
-            removeBtn.addEventListener('click', () => {
-              editableAliases.delete(removeBtn.dataset.alias);
-              renderAliasPills();
-              errorEl.style.display = 'none';
-            });
-          }
-
-          // Merge button handler for API error case
-          const mergeApiBtn = errorEl.querySelector('.tm-error-merge-api');
-          if (mergeApiBtn) {
-            mergeApiBtn.addEventListener('click', async () => {
-              const destinationId = mergeApiBtn.dataset.conflictId;
-              const originalText = mergeApiBtn.textContent;
-
-              mergeApiBtn.disabled = true;
-              mergeApiBtn.textContent = 'Merging...';
-
-              const result = await performTagMerge({
-                sourceTag: tag,
-                destinationId,
-                stashdbTag,
-                endpoint,
-                sanitizedAliases,
-                modal,
-                container
-              });
-
-              if (!result.success) {
-                errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
-                mergeApiBtn.disabled = false;
-                mergeApiBtn.textContent = originalText;
-              }
-            });
-          }
-          return;
-        }
-
-        // Parse "name 'X' is used as alias for 'Y'"
-        const aliasUsedMatch = e.message.match(/name '([^']+)' is used as alias for '([^']+)'/i);
-        if (aliasUsedMatch) {
-          const [, conflictName, otherTagName] = aliasUsedMatch;
-          const otherTag = localTags.find(t => t.name === otherTagName);
-
-          errorEl.innerHTML = `
-            <div class="tm-error-message">
-              Cannot use "${escapeHtml(conflictName)}" - it's an alias on "${escapeHtml(otherTagName)}".
-            </div>
-            <div class="tm-error-actions">
-              ${otherTag ? `
-                <a href="/tags/${otherTag.id}" target="_blank" class="btn btn-secondary btn-sm">
-                  Edit "${escapeHtml(otherTagName)}"
-                </a>
-              ` : ''}
-              <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
-                Keep local name instead
-              </button>
-            </div>
-          `;
-          errorEl.style.display = 'block';
-
-          const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
-          if (keepLocalBtn) {
-            keepLocalBtn.addEventListener('click', () => {
-              modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
-              errorEl.style.display = 'none';
-            });
-          }
-          return;
-        }
-
-        // Fallback for unknown errors
-        errorEl.innerHTML = `<div class="tm-error-message">${escapeHtml(e.message)}</div>`;
+        errorEl.innerHTML = `
+          <div class="tm-error-message">
+            Cannot use "${escapeHtml(conflictName)}" - it's an alias on "${escapeHtml(otherTagName)}".
+          </div>
+          <div class="tm-error-actions">
+            ${otherTag ? `
+              <a href="${escapeHtml(stashPath(`/tags/${otherTag.id}`))}" target="_blank" class="btn btn-secondary btn-sm">
+                Edit "${escapeHtml(otherTagName)}"
+              </a>
+            ` : ''}
+            <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
+              Keep local name instead
+            </button>
+          </div>
+        `;
         errorEl.style.display = 'block';
+
+        const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
+        if (keepLocalBtn) {
+          keepLocalBtn.addEventListener('click', () => {
+            modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
+            errorEl.style.display = 'none';
+          });
+        }
+        return;
+      }
+
+      // Fallback for unknown errors
+      errorEl.innerHTML = `<div class="tm-error-message">${escapeHtml(message)}</div>`;
+      errorEl.style.display = 'block';
+    }
+
+    // F12: Apply validates first (applyDiff), stays disabled and ignores re-clicks
+    // until it finishes, and reuses a parent that a failed attempt already created.
+    const applyBtn = modal.querySelector('.tm-apply-btn');
+    let applying = false;
+    let createdParentId = null;
+
+    // The Parent row's current choice, as Apply and both Merge buttons send it.
+    // A '__create__' parent an earlier attempt already created is reused.
+    function currentParentChoice() {
+      return {
+        parentId: selectedParentId === '__create__' && createdParentId ? createdParentId : selectedParentId,
+        rememberMapping: !!modal.querySelector('#tm-remember-mapping')?.checked,
+      };
+    }
+
+    applyBtn.addEventListener('click', async () => {
+      if (applying) return;
+      applying = true;
+      applyBtn.disabled = true;
+      let closed = false;
+      try {
+        const nameChoice = modal.querySelector('input[name="tm-name"]:checked').value;
+        const descChoice = modal.querySelector('input[name="tm-desc"]:checked').value;
+        const errorEl = modal.querySelector('#tm-diff-error');
+
+        // Hide any previous error
+        errorEl.style.display = 'none';
+        errorEl.innerHTML = '';
+
+        // Use the selected stash-box endpoint
+        const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
+
+        const result = await applyDiff({
+          tag,
+          stashdbTag,
+          endpoint,
+          nameChoice,
+          descChoice,
+          aliases: editableAliases,
+          ...currentParentChoice(),
+        });
+        if (result.createdParent) createdParentId = result.createdParent.id;
+
+        if (result.ok) {
+          closed = true;
+          modal.remove();
+          showStatus(`Matched "${tag.name}" to "${stashdbTag.name}"`, 'success');
+          try {
+            renderPage(container);
+          } catch (renderErr) {
+            console.error('[tagManager] re-render after Apply failed:', renderErr);
+          }
+        } else if (result.validationErrors) {
+          showValidationError(errorEl, result.validationErrors, endpoint, result.sanitizedAliases);
+        } else if (result.stage === 'update') {
+          showSaveError(errorEl, result.error, endpoint, result.sanitizedAliases);
+        } else {
+          errorEl.innerHTML = `<div class="tm-error-message">${escapeHtml(result.error)}</div>`;
+          errorEl.style.display = 'block';
+        }
+      } finally {
+        applying = false;
+        if (!closed) applyBtn.disabled = false;
       }
     });
   }
@@ -3480,7 +4667,8 @@
   }
 
   /**
-   * Create a new tag via GraphQL
+   * Create a new tag via GraphQL. Returns the full tag (the fields localTags
+   * entries carry), so callers can track it without a refetch.
    */
   async function createTag(input) {
     const query = `
@@ -3488,6 +4676,16 @@
         tagCreate(input: $input) {
           id
           name
+          description
+          aliases
+          stash_ids {
+            endpoint
+            stash_id
+          }
+          parents {
+            id
+            name
+          }
         }
       }
     `;
@@ -3497,15 +4695,32 @@
   }
 
   /**
+   * Delete a tag via GraphQL (used to undo a create whose follow-up failed).
+   * @param {string} id
+   */
+  async function destroyTag(id) {
+    const query = `
+      mutation TagDestroy($input: TagDestroyInput!) {
+        tagDestroy(input: $input)
+      }
+    `;
+
+    const data = await graphqlRequest(query, { input: { id } });
+    return data?.tagDestroy;
+  }
+
+  /**
    * Merge tags via GraphQL - merges source tags into destination tag.
    * This reassigns all entities (scenes, images, galleries, performers, studios, groups, markers)
    * from source tags to destination, merges aliases and stash_ids, then deletes source tags.
    *
    * @param {string[]} sourceIds - Array of tag IDs to merge (will be deleted)
    * @param {string} destinationId - Tag ID to merge into (will be kept)
+   * @param {object} [values] - TagUpdateInput applied to the destination in the
+   *   same transaction (Stash v0.31+ only; check supportsMergeValues() first)
    * @returns {object} - The updated destination tag
    */
-  async function mergeTags(sourceIds, destinationId) {
+  async function mergeTags(sourceIds, destinationId, values) {
     const query = `
       mutation TagsMerge($input: TagsMergeInput!) {
         tagsMerge(input: $input) {
@@ -3521,9 +4736,9 @@
       }
     `;
 
-    const data = await graphqlRequest(query, {
-      input: { source: sourceIds, destination: destinationId }
-    });
+    const input = { source: sourceIds, destination: destinationId };
+    if (values) input.values = values;
+    const data = await graphqlRequest(query, { input });
     return data?.tagsMerge;
   }
 
@@ -3532,32 +4747,13 @@
    */
   function showMatchesModal(tagId, container) {
     const tag = localTags.find(t => t.id === tagId);
-    let matches = matchResults[tagId];
     if (!tag) return;
 
-    // Filter out blacklisted matches
-    const originalCount = matches?.length || 0;
-    const filteredMatches = matches?.filter(m => !isBlacklisted(m.tag.name)) || [];
-    const hiddenCount = originalCount - filteredMatches.length;
-    matches = filteredMatches;
-
-    const modal = document.createElement('div');
-    modal.className = 'tm-modal-backdrop';
-    modal.innerHTML = `
-      <div class="tm-modal tm-modal-wide">
-        <div class="tm-modal-header">
-          <h3>Matches for: ${escapeHtml(tag.name)}</h3>
-          ${hiddenCount > 0 ? `<div class="tm-blacklist-notice">${hiddenCount} tag${hiddenCount > 1 ? 's' : ''} hidden by blacklist</div>` : ''}
-          <button class="tm-close-btn">&times;</button>
-        </div>
-        <div class="tm-modal-body">
-          <div class="tm-search-row">
-            <input type="text" id="tm-manual-search" class="form-control" placeholder="Search StashDB..." value="${escapeHtml(tag.name)}">
-            <button class="btn btn-primary" id="tm-manual-search-btn">Search</button>
-          </div>
-          <div class="tm-matches-list" id="tm-matches-list">
-            ${matches?.length
-              ? matches.map((m, i) => `
+    // Blacklisted matches are dropped; data-index keeps the ORIGINAL index
+    // into matchResults[tagId] (showDiffDialog reads the unfiltered array).
+    const visible = visibleMatches(matchResults[tagId]);
+    const hiddenCount = (matchResults[tagId]?.length || 0) - visible.length;
+    const renderMatchItems = (list) => list.map(({ match: m, index: i }) => `
                 <div class="tm-match-item" data-index="${i}">
                   <div class="tm-match-info">
                     <span class="tm-match-name">${escapeHtml(m.tag.name)}</span>
@@ -3568,7 +4764,26 @@
                   <div class="tm-match-aliases">Aliases: ${escapeHtml(m.tag.aliases?.join(', ') || 'none')}</div>
                   <button class="btn btn-success btn-sm tm-select-match">Select</button>
                 </div>
-              `).join('')
+              `).join('');
+    const hiddenNotice = (n) => n > 0 ? `${n} tag${n > 1 ? 's' : ''} hidden by blacklist` : '';
+
+    const modal = document.createElement('div');
+    modal.className = 'tm-modal-backdrop';
+    modal.innerHTML = `
+      <div class="tm-modal tm-modal-wide">
+        <div class="tm-modal-header">
+          <h3>Matches for: ${escapeHtml(tag.name)}</h3>
+          <div class="tm-blacklist-notice" id="tm-blacklist-notice" ${hiddenCount > 0 ? '' : 'style="display:none"'}>${hiddenNotice(hiddenCount)}</div>
+          <button class="tm-close-btn">&times;</button>
+        </div>
+        <div class="tm-modal-body">
+          <div class="tm-search-row">
+            <input type="text" id="tm-manual-search" class="form-control" placeholder="Search StashDB..." value="${escapeHtml(tag.name)}">
+            <button class="btn btn-primary" id="tm-manual-search-btn">Search</button>
+          </div>
+          <div class="tm-matches-list" id="tm-matches-list">
+            ${visible.length
+              ? renderMatchItems(visible)
               : '<div class="tm-no-matches">No matches found. Try searching manually above.</div>'
             }
           </div>
@@ -3602,32 +4817,29 @@
       try {
         const result = await callBackend('search', {
           tag_name: term,
-          stashdb_tags: stashdbTags,
         });
         matchResults[tagId] = result.matches || [];
+        delete matchErrors[tagId];
+        if (result.fuzzy_unavailable) showFuzzyUnavailableHint();
 
         // Re-render matches list
         const listEl = modal.querySelector('#tm-matches-list');
-        const newMatches = matchResults[tagId];
-        listEl.innerHTML = newMatches?.length
-          ? newMatches.map((m, i) => `
-            <div class="tm-match-item" data-index="${i}">
-              <div class="tm-match-info">
-                <span class="tm-match-name">${escapeHtml(m.tag.name)}</span>
-                <span class="tm-match-type-badge tm-match-${m.match_type}">${m.match_type} (${m.score}%)</span>
-                ${m.tag.category ? `<span class="tm-match-category">${escapeHtml(m.tag.category.name)}</span>` : ''}
-              </div>
-              <div class="tm-match-desc">${escapeHtml(m.tag.description || '')}</div>
-              <div class="tm-match-aliases">Aliases: ${escapeHtml(m.tag.aliases?.join(', ') || 'none')}</div>
-              <button class="btn btn-success btn-sm tm-select-match">Select</button>
-            </div>
-          `).join('')
+        const newVisible = visibleMatches(matchResults[tagId]);
+        listEl.innerHTML = newVisible.length
+          ? renderMatchItems(newVisible)
           : '<div class="tm-no-matches">No matches found.</div>';
+
+        const noticeEl = modal.querySelector('#tm-blacklist-notice');
+        if (noticeEl) {
+          const hidden = (matchResults[tagId]?.length || 0) - newVisible.length;
+          noticeEl.textContent = hiddenNotice(hidden);
+          noticeEl.style.display = hidden > 0 ? '' : 'none';
+        }
 
         // Re-attach select handlers
         attachSelectHandlers();
       } catch (e) {
-        showStatus(`Search error: ${e.message}`, 'error');
+        showStatus(`Search error: ${backendErrorText(e)}`, 'error');
       } finally {
         searchBtn.disabled = false;
         searchBtn.textContent = 'Search';
@@ -3664,6 +4876,86 @@
   }
 
   /**
+   * Once per page visit, say that searches run without fuzzy matching: the
+   * backend has no stash-box tag cache yet (search result `fuzzy_unavailable`).
+   * Nothing when fuzzy search is turned off.
+   */
+  function showFuzzyUnavailableHint() {
+    if (fuzzyHintShown || !settings.enableFuzzySearch) return;
+    fuzzyHintShown = true;
+    showStatus('Fuzzy matching is unavailable until the stash-box tags are cached. Use Refresh Cache.', 'info');
+  }
+
+  /**
+   * Start the Tag Manager page in `container`: settings, blacklist, local tags
+   * and cache status, then the page. The stash-box tags (fetch_all, which can
+   * take tens of seconds on a cold cache) load in the background; the Browse
+   * tab and the cache badge show that until they arrive. Resolves true once the
+   * page is rendered, false when it stopped at an error screen.
+   */
+  async function initTagManagerPage(container) {
+    console.debug("[tagManager] Initializing...");
+    setPageTitle("Tag Matcher | Stash");
+    fuzzyHintShown = false;
+    container.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
+
+    // Ensure defaults are loaded/backfilled before reading settings, so
+    // loadSettings sees a populated DEFAULTS and the backfill can't race.
+    await ensureDefaultsInitialized();
+    await loadSettings();
+    await loadCategoryMappings();
+    await loadBlacklist();
+
+    // Check if any stash-box is configured
+    if (stashBoxes.length === 0) {
+      console.warn("[tagManager] No stash-boxes configured");
+      container.innerHTML = `
+        <div class="tag-manager">
+          <div class="tag-manager-error">
+            <h3>No Stash-Box Configured</h3>
+            <p>Please configure a stash-box endpoint in Settings → Metadata Providers → Stash-Box Endpoints</p>
+            <p>Or configure a StashDB endpoint in Settings → Plugins → Tag Manager</p>
+          </div>
+        </div>
+      `;
+      return false;
+    }
+
+    // Fetch local tags
+    container.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading local tags...</div></div>';
+    try {
+      localTags = await fetchLocalTags();
+      console.debug(`[tagManager] Loaded ${localTags.length} local tags`);
+    } catch (e) {
+      console.error("[tagManager] Failed to load local tags:", e);
+      container.innerHTML = `<div class="tag-manager"><div class="tag-manager-error">Error loading tags: ${escapeHtml(e.message)}</div></div>`;
+      return false;
+    }
+
+    // Load cache status for selected endpoint
+    await loadCacheStatus();
+
+    // Load tags from cache (or fetch if no cache) in the background; Browse
+    // needs them even without fuzzy search. An earlier visit's tags may be for
+    // another stash-box, so they are not shown meanwhile.
+    stashdbTags = null;
+    const load = loadTagsFromCache(container);
+    stashdbTagsLoad = load;
+    load.then(() => {
+      if (stashdbTagsLoad !== load) return; // stash-box switched (or page re-opened) meanwhile
+      stashdbTagsLoad = null;
+      if (_activeContainer !== container) return;
+      renderPage(container);
+      if (cacheStatus?.error) showStatus(cacheStatus.error, 'error');
+    });
+
+    console.debug("[tagManager] Initialization complete");
+    _activeContainer = container;
+    renderPage(container);
+    return true;
+  }
+
+  /**
    * Main page component
    */
   function TagManagerPage() {
@@ -3672,62 +4964,15 @@
     const [initialized, setInitialized] = React.useState(false);
 
     React.useEffect(() => {
-      async function init() {
-        if (!containerRef.current) return;
-
-        console.debug("[tagManager] Initializing...");
-        setPageTitle("Tag Matcher | Stash");
-        containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
-
-        // Ensure defaults are loaded/backfilled before reading settings, so
-        // loadSettings sees a populated DEFAULTS and the backfill can't race.
-        await ensureDefaultsInitialized();
-        await loadSettings();
-        await loadCategoryMappings();
-        await loadBlacklist();
-
-        // Check if any stash-box is configured
-        if (stashBoxes.length === 0) {
-          console.warn("[tagManager] No stash-boxes configured");
-          containerRef.current.innerHTML = `
-            <div class="tag-manager">
-              <div class="tag-manager-error">
-                <h3>No Stash-Box Configured</h3>
-                <p>Please configure a stash-box endpoint in Settings → Metadata Providers → Stash-Box Endpoints</p>
-                <p>Or configure a StashDB endpoint in Settings → Plugins → Tag Manager</p>
-              </div>
-            </div>
-          `;
-          return;
-        }
-
-        // Fetch local tags
-        containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading local tags...</div></div>';
-        try {
-          localTags = await fetchLocalTags();
-          console.debug(`[tagManager] Loaded ${localTags.length} local tags`);
-        } catch (e) {
-          console.error("[tagManager] Failed to load local tags:", e);
-          containerRef.current.innerHTML = `<div class="tag-manager"><div class="tag-manager-error">Error loading tags: ${escapeHtml(e.message)}</div></div>`;
-          return;
-        }
-
-        // Load cache status for selected endpoint
-        await loadCacheStatus();
-
-        // If fuzzy search enabled, load tags from cache (or fetch if no cache)
-        if (settings.enableFuzzySearch) {
-          containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading tag cache...</div></div>';
-          await loadTagsFromCache(containerRef.current);
-        }
-
-        setInitialized(true);
-        console.debug("[tagManager] Initialization complete");
-        _activeContainer = containerRef.current;
-        renderPage(containerRef.current);
+      if (containerRef.current) {
+        initTagManagerPage(containerRef.current).then((ok) => {
+          if (ok) setInitialized(true);
+        });
       }
 
-      init();
+      // F16: tag links navigate inside the SPA on a plain left click.
+      const linkRoot = containerRef.current;
+      if (linkRoot) linkRoot.addEventListener('click', handleInternalLinkClick);
 
       // #124: refresh tag data when returning to the tab (e.g. after fixing a
       // conflicting tag elsewhere). Listeners are cleaned up on unmount.
@@ -3739,6 +4984,7 @@
       document.addEventListener("visibilitychange", onVisibility);
 
       return () => {
+        if (linkRoot) linkRoot.removeEventListener('click', handleInternalLinkClick);
         window.removeEventListener("focus", onFocus);
         document.removeEventListener("visibilitychange", onVisibility);
         if (_refreshTimer) {
@@ -3766,6 +5012,7 @@
   let contextMenuTag = null;
   let contextMenuParentId = null;
   let contextMenuEscapeHandler = null;
+  let tagSearchEscHandler = null;
   let draggedTagId = null;
   let draggedFromParentId = null;
   let selectedTagId = null;
@@ -3775,6 +5022,23 @@
   let isEditMode = false;
   let pendingChanges = [];
   let originalParentMap = new Map(); // tagId -> array of parent ids (snapshot at edit start)
+
+  /**
+   * Drop all hierarchy edit/selection state. Runs when the hierarchy page
+   * mounts and unmounts so nothing stale leaks between visits.
+   */
+  function resetHierarchyEditState() {
+    isEditMode = false;
+    pendingChanges = [];
+    originalParentMap.clear();
+    selectedTagId = null;
+    copiedTagId = null;
+    draggedTagId = null;
+    draggedFromParentId = null;
+    hideContextMenu();
+    closeTagSearchDialog();
+    document.getElementById('th-changes-panel')?.remove();
+  }
 
   /**
    * Enter edit mode - snapshot current state and show changes panel
@@ -3870,7 +5134,13 @@
     if (!isEditMode) return;
 
     if (save && pendingChanges.length > 0) {
-      await savePendingChanges();
+      const allSaved = await savePendingChanges();
+      if (!allSaved) {
+        // Keep failed changes pending and stay in edit mode so they can be retried
+        applyPendingChangesToTree();
+        renderChangesPanel();
+        return;
+      }
     }
 
     isEditMode = false;
@@ -3942,47 +5212,57 @@
    * Save all pending changes to the server
    */
   async function savePendingChanges() {
-    if (pendingChanges.length === 0) return;
+    if (pendingChanges.length === 0) return true;
 
     console.debug('[tagManager] savePendingChanges: Saving', pendingChanges.length, 'changes:', pendingChanges);
 
-    // Compute final parent state for each modified tag
-    const tagUpdates = new Map(); // tagId -> Set of final parent ids
-
-    // Start with original parents
+    // Group pending changes by tag
+    const changesByTag = new Map(); // tagId -> changes
     for (const change of pendingChanges) {
-      if (!tagUpdates.has(change.tagId)) {
-        const original = originalParentMap.get(change.tagId) || [];
-        tagUpdates.set(change.tagId, new Set(original));
-      }
+      if (!changesByTag.has(change.tagId)) changesByTag.set(change.tagId, []);
+      changesByTag.get(change.tagId).push(change);
     }
 
-    // Apply changes
-    for (const change of pendingChanges) {
-      const parentSet = tagUpdates.get(change.tagId);
-      if (change.type === 'add-parent') {
-        parentSet.add(change.parentId);
-      } else {
-        parentSet.delete(change.parentId);
-      }
-    }
-
-    // Send mutations
+    const failedTagIds = new Set();
     const errors = [];
-    for (const [tagId, parentSet] of tagUpdates) {
+    let savedCount = 0;
+
+    for (const [tagId, changes] of changesByTag) {
+      const tag = hierarchyTags.find(t => t.id === tagId);
       try {
-        await updateTagParents(tagId, Array.from(parentSet));
+        // Read the tag's CURRENT parents so edits made elsewhere are not overwritten
+        const parentSet = new Set(await fetchTagParentIds(tagId));
+        for (const change of changes) {
+          if (change.type === 'add-parent') {
+            parentSet.add(change.parentId);
+          } else {
+            parentSet.delete(change.parentId);
+          }
+        }
+        const result = Array.from(parentSet);
+        await updateTagParents(tagId, result);
+
+        savedCount += changes.length;
+        // Keep local state in step with the server for the saved tag
+        originalParentMap.set(tagId, result);
+        if (tag) {
+          tag.parents = result.map(pid => ({ id: pid }));
+        }
       } catch (err) {
-        const tag = hierarchyTags.find(t => t.id === tagId);
+        failedTagIds.add(tagId);
         errors.push(`Failed to update "${tag?.name || tagId}": ${err.message}`);
       }
     }
 
+    // Successful changes are done; failed ones stay pending
+    pendingChanges = pendingChanges.filter(c => failedTagIds.has(c.tagId));
+
     if (errors.length > 0) {
-      showToast(`Some changes failed:\n${errors.join('\n')}`, 'error');
-    } else {
-      showToast(`Saved ${pendingChanges.length} change${pendingChanges.length !== 1 ? 's' : ''}`);
+      showToast(`Some changes failed (still pending):\n${errors.join('\n')}`, 'error');
+      return false;
     }
+    showToast(`Saved ${savedCount} change${savedCount !== 1 ? 's' : ''}`);
+    return true;
   }
 
   /**
@@ -4112,6 +5392,7 @@
     if (menu) menu.remove();
     contextMenuTag = null;
     contextMenuParentId = null;
+    document.removeEventListener('click', hideContextMenu);
     if (contextMenuEscapeHandler) {
       document.removeEventListener('keydown', contextMenuEscapeHandler);
       contextMenuEscapeHandler = null;
@@ -4148,6 +5429,7 @@
    */
   function showTagSearchDialog(mode, targetTag) {
     // mode: 'parent' or 'child'
+    closeTagSearchDialog(); // never stack a second dialog/listener
     const backdrop = document.createElement('div');
     backdrop.className = 'th-search-dialog-backdrop';
     backdrop.id = 'th-search-backdrop';
@@ -4185,12 +5467,10 @@
 
     // Close on backdrop click or escape
     backdrop.addEventListener('click', closeTagSearchDialog);
-    document.addEventListener('keydown', function escHandler(e) {
-      if (e.key === 'Escape') {
-        closeTagSearchDialog();
-        document.removeEventListener('keydown', escHandler);
-      }
-    });
+    tagSearchEscHandler = (e) => {
+      if (e.key === 'Escape') closeTagSearchDialog();
+    };
+    document.addEventListener('keydown', tagSearchEscHandler);
 
     input.focus();
   }
@@ -4199,6 +5479,10 @@
    * Close the tag search dialog
    */
   function closeTagSearchDialog() {
+    if (tagSearchEscHandler) {
+      document.removeEventListener('keydown', tagSearchEscHandler);
+      tagSearchEscHandler = null;
+    }
     document.getElementById('th-search-backdrop')?.remove();
     document.getElementById('th-search-dialog')?.remove();
   }
@@ -4551,7 +5835,10 @@
     // Children HTML (recursive)
     let childrenHtml = '';
     if (hasChildren) {
-      const childNodes = node.childNodes.map(child => renderTreeNode(child, false)).join('');
+      // Only build the DOM for expanded branches; expanding renders on demand
+      const childNodes = isExpanded
+        ? node.childNodes.map(child => renderTreeNode(child, false)).join('')
+        : '';
       childrenHtml = `<div class="th-children ${isExpanded ? 'th-expanded' : ''}" data-parent-id="${node.id}">${childNodes}</div>`;
     }
 
@@ -4569,7 +5856,7 @@
           <span class="th-toggle ${hasChildren ? '' : 'th-leaf'}" data-tag-id="${node.id}">${toggleIcon}</span>
           ${imageHtml}
           <div class="th-info">
-            <a href="/tags/${node.id}" class="th-name">${escapeHtml(node.name)}</a>${multiParentBadge}
+            <a ${internalLinkAttrs(`/tags/${node.id}`)} class="th-name">${escapeHtml(node.name)}</a>${multiParentBadge}
             ${metaText ? `<div class="th-meta">${metaText}</div>` : ''}
           </div>
         </div>
@@ -4633,12 +5920,42 @@
   /**
    * Keyboard shortcuts
    */
+  /**
+   * Is this element somewhere a user types (input, select, textarea, contentEditable)?
+   */
+  function isEditableElement(el) {
+    if (!el) return false;
+    const tag = String(el.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return true;
+    return el.isContentEditable === true || el.contentEditable === 'true';
+  }
+
+  /**
+   * Should a tree shortcut (copy/paste/delete) act for this key event?
+   * Rule: never while an editable element has focus; otherwise only when focus
+   * is inside the tree container, or nothing is focused (body) and the event
+   * target is inside the tree.
+   */
+  function shouldHandleHierarchyKey(e, activeElement) {
+    const inTree = (el) => !!(el && typeof el.closest === 'function' && el.closest('.tag-hierarchy-container'));
+    if (isEditableElement(activeElement) || isEditableElement(e && e.target)) return false;
+    if (inTree(activeElement)) return true;
+    const nothingFocused = !activeElement || activeElement === document.body;
+    return nothingFocused && inTree(e && e.target);
+  }
+
   function handleHierarchyKeyboard(e) {
     // Only handle if hierarchy page is active
     if (!document.querySelector('.tag-hierarchy-container')) return;
 
-    // Ctrl+C - copy selected tag
-    if (e.ctrlKey && e.key === 'c' && selectedTagId) {
+    const key = String(e.key || '').toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
+    const treeKey = shouldHandleHierarchyKey(e, document.activeElement);
+
+    // Ctrl/Cmd+C - copy selected tag (leave native copy alone if text is selected)
+    const hasTextSelection = typeof window.getSelection === 'function' &&
+      String(window.getSelection() || '') !== '';
+    if (treeKey && mod && key === 'c' && selectedTagId && !hasTextSelection) {
       e.preventDefault();
       copiedTagId = selectedTagId;
 
@@ -4654,8 +5971,8 @@
       showToast('Tag copied - select target and press Ctrl+V to add as child');
     }
 
-    // Ctrl+V - paste (add copied tag as child of selected)
-    if (e.ctrlKey && e.key === 'v' && copiedTagId && selectedTagId && copiedTagId !== selectedTagId) {
+    // Ctrl/Cmd+V - paste (add copied tag as child of selected)
+    if (treeKey && mod && key === 'v' && copiedTagId && selectedTagId && copiedTagId !== selectedTagId) {
       e.preventDefault();
 
       if (wouldCreateCircularRef(selectedTagId, copiedTagId)) {
@@ -4667,10 +5984,7 @@
     }
 
     // Delete/Backspace - remove selected tag from its current parent
-    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedTagId) {
-      // Don't handle if typing in an input
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
+    if (treeKey && (e.key === 'Delete' || e.key === 'Backspace') && selectedTagId) {
       e.preventDefault();
       const selectedNode = document.querySelector(`.th-node.th-selected[data-tag-id="${selectedTagId}"]`);
       // Use parentContext data attribute for correct parent identification
@@ -4699,40 +6013,51 @@
   /**
    * Attach event handlers for hierarchy page
    */
+  /**
+   * Find a tag's child nodes in the tree (every instance of a tag shares them).
+   */
+  function findTreeChildNodes(tagId) {
+    const seen = new Set();
+    function walk(nodes) {
+      for (const node of nodes) {
+        if (node.id === tagId) return node.childNodes;
+        if (seen.has(node.id)) continue;
+        seen.add(node.id);
+        const found = walk(node.childNodes);
+        if (found) return found;
+      }
+      return null;
+    }
+    return walk(hierarchyTree) || [];
+  }
+
+  /**
+   * Add every tag that has children to expandedNodes (for Expand All).
+   */
+  function expandAllNodes() {
+    const seen = new Set();
+    function walk(nodes) {
+      for (const node of nodes) {
+        if (node.childNodes.length === 0 || seen.has(node.id)) continue;
+        seen.add(node.id);
+        expandedNodes.add(node.id);
+        walk(node.childNodes);
+      }
+    }
+    walk(hierarchyTree);
+  }
+
   function attachHierarchyEventHandlers(container) {
-    // Toggle expand/collapse on node click
-    container.querySelectorAll('.th-toggle').forEach(toggle => {
-      toggle.addEventListener('click', (e) => {
-        const tagId = e.target.dataset.tagId;
-        if (!tagId) return;
-
-        const childrenContainer = container.querySelector(`.th-children[data-parent-id="${tagId}"]`);
-        if (!childrenContainer) return;
-
-        if (expandedNodes.has(tagId)) {
-          expandedNodes.delete(tagId);
-          childrenContainer.classList.remove('th-expanded');
-          e.target.innerHTML = '&#9654;';  // Right arrow
-        } else {
-          expandedNodes.add(tagId);
-          childrenContainer.classList.add('th-expanded');
-          e.target.innerHTML = '&#9660;';  // Down arrow
-        }
-      });
-    });
+    attachNodeHandlers(container, container);
 
     // Expand All button
     const expandAllBtn = container.querySelector('#th-expand-all');
     if (expandAllBtn) {
       expandAllBtn.addEventListener('click', () => {
-        container.querySelectorAll('.th-children').forEach(el => {
-          el.classList.add('th-expanded');
-          const parentId = el.dataset.parentId;
-          if (parentId) expandedNodes.add(parentId);
-        });
-        container.querySelectorAll('.th-toggle:not(.th-leaf)').forEach(el => {
-          el.innerHTML = '&#9660;';
-        });
+        // Collapsed branches have no DOM yet, so mark everything expanded and re-render
+        expandAllNodes();
+        renderHierarchyPage(container);
+        if (isEditMode) renderChangesPanel();
       });
     }
 
@@ -4761,8 +6086,80 @@
       });
     }
 
+    // Root drop zone handler
+    const rootDropZone = container.querySelector('#th-root-drop-zone');
+    if (rootDropZone) {
+      rootDropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (draggedTagId) {
+          rootDropZone.classList.add('drag-over');
+        }
+      });
+
+      rootDropZone.addEventListener('dragleave', () => {
+        rootDropZone.classList.remove('drag-over');
+      });
+
+      rootDropZone.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        rootDropZone.classList.remove('drag-over');
+
+        if (!draggedTagId) return;
+
+        // If dragged from a specific parent, just remove that parent
+        if (draggedFromParentId) {
+          await removeParent(draggedTagId, draggedFromParentId);
+        } else {
+          // Make completely root
+          await makeRoot(draggedTagId);
+        }
+      });
+    }
+  }
+
+  /**
+   * Attach per-node handlers (toggle, context menu, hover, drag/drop, select)
+   * to every node under `scope`. Used for the whole page and for lazily
+   * rendered subtrees.
+   */
+  function attachNodeHandlers(container, scope) {
+    // Toggle expand/collapse
+    scope.querySelectorAll('.th-toggle').forEach(toggle => {
+      toggle.addEventListener('click', () => {
+        const tagId = toggle.dataset.tagId;
+        if (!tagId) return;
+
+        const nodeEl = toggle.closest('.th-node');
+        const childrenContainer = nodeEl
+          ? Array.from(nodeEl.children).find(c => c.classList.contains('th-children'))
+          : null;
+        if (!childrenContainer) return;
+
+        // Decide from THIS copy's DOM: a multi-parent tag has one copy per
+        // parent, and expanding one copy must not make another copy collapse.
+        // expandedNodes keeps a tag while any of its copies is expanded.
+        if (childrenContainer.classList.contains('th-expanded')) {
+          childrenContainer.classList.remove('th-expanded');
+          toggle.innerHTML = '&#9654;';  // Right arrow
+          if (!container.querySelector(`.th-children.th-expanded[data-parent-id="${tagId}"]`)) {
+            expandedNodes.delete(tagId);
+          }
+        } else {
+          expandedNodes.add(tagId);
+          // Collapsed branches are not rendered up front; build them now
+          if (!childrenContainer.firstElementChild) {
+            childrenContainer.innerHTML = findTreeChildNodes(tagId)
+              .map(child => renderTreeNode(child, false)).join('');
+            attachNodeHandlers(container, childrenContainer);
+          }
+          childrenContainer.classList.add('th-expanded');
+          toggle.innerHTML = '&#9660;';  // Down arrow
+        }
+      });
+    });
+
     // Context menu on right-click
-    container.querySelectorAll('.th-node').forEach(node => {
+    scope.querySelectorAll('.th-node').forEach(node => {
       node.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         e.stopPropagation(); // Prevent bubbling to parent .th-node elements
@@ -4775,7 +6172,7 @@
     });
 
     // Highlight all instances of a tag on hover
-    container.querySelectorAll('.th-node').forEach(node => {
+    scope.querySelectorAll('.th-node').forEach(node => {
       node.addEventListener('mouseenter', () => {
         const tagId = node.dataset.tagId;
         container.querySelectorAll(`.th-node[data-tag-id="${tagId}"]`).forEach(n => {
@@ -4791,7 +6188,7 @@
     });
 
     // Drag and drop handlers
-    container.querySelectorAll('.th-node').forEach(node => {
+    scope.querySelectorAll('.th-node').forEach(node => {
       node.addEventListener('dragstart', (e) => {
         draggedTagId = node.dataset.tagId;
         // Use parentContext data attribute for correct parent identification
@@ -4844,38 +6241,8 @@
       });
     });
 
-    // Root drop zone handler
-    const rootDropZone = container.querySelector('#th-root-drop-zone');
-    if (rootDropZone) {
-      rootDropZone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        if (draggedTagId) {
-          rootDropZone.classList.add('drag-over');
-        }
-      });
-
-      rootDropZone.addEventListener('dragleave', () => {
-        rootDropZone.classList.remove('drag-over');
-      });
-
-      rootDropZone.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        rootDropZone.classList.remove('drag-over');
-
-        if (!draggedTagId) return;
-
-        // If dragged from a specific parent, just remove that parent
-        if (draggedFromParentId) {
-          await removeParent(draggedTagId, draggedFromParentId);
-        } else {
-          // Make completely root
-          await makeRoot(draggedTagId);
-        }
-      });
-    }
-
     // Click to select (for keyboard operations)
-    container.querySelectorAll('.th-node-content').forEach(content => {
+    scope.querySelectorAll('.th-node-content').forEach(content => {
       content.addEventListener('click', (e) => {
         // Don't select if clicking on a link or toggle
         if (e.target.closest('a') || e.target.closest('.th-toggle')) return;
@@ -4904,6 +6271,9 @@
     const containerRef = React.useRef(null);
 
     React.useEffect(() => {
+      // Start every visit from a clean edit/selection state
+      resetHierarchyEditState();
+
       // Register keyboard handler for this page
       document.addEventListener('keydown', handleHierarchyKeyboard);
 
@@ -4936,15 +6306,22 @@
 
       init();
 
+      // F16: tag links navigate inside the SPA on a plain left click.
+      const linkRoot = containerRef.current;
+      if (linkRoot) linkRoot.addEventListener('click', handleInternalLinkClick);
+
       // Cleanup: remove keyboard handler when component unmounts
       return () => {
+        if (linkRoot) linkRoot.removeEventListener('click', handleInternalLinkClick);
         document.removeEventListener('keydown', handleHierarchyKeyboard);
+        resetHierarchyEditState();
       };
     }, []);
 
     return React.createElement('div', {
       ref: containerRef,
-      className: 'tag-hierarchy-container'
+      className: 'tag-hierarchy-container',
+      tabIndex: 0  // focusable so clicks inside the tree scope keyboard shortcuts
     });
   }
 
@@ -5003,12 +6380,18 @@
     return svg;
   }
 
+  /** F16: on the Tags list page, under Stash's base path (e.g. /stash/tags). */
+  function isTagsListPage() {
+    const here = String(window.location.pathname || '').replace(/\/+$/, '');
+    return here === stashPath('/tags');
+  }
+
   /**
    * Inject Tag Manager and Tag Hierarchy buttons into Tags list page toolbar
    */
   function injectNavButtons() {
     // Only run on Tags list page
-    if (!window.location.pathname.endsWith('/tags')) {
+    if (!isTagsListPage()) {
       return;
     }
 
@@ -5055,9 +6438,7 @@
     tmBtn.title = 'Tag Matcher';
     tmBtn.style.marginLeft = '0.5rem';
     tmBtn.appendChild(createTagManagerIcon());
-    tmBtn.addEventListener('click', () => {
-      window.location.href = ROUTE_PATH;
-    });
+    tmBtn.addEventListener('click', () => navigateTo(ROUTE_PATH));
 
     // Create Tag Hierarchy button
     const thBtn = document.createElement('button');
@@ -5066,9 +6447,7 @@
     thBtn.title = 'Tag Hierarchy';
     thBtn.style.marginLeft = '0.25rem';
     thBtn.appendChild(createHierarchyIcon());
-    thBtn.addEventListener('click', () => {
-      window.location.href = HIERARCHY_ROUTE_PATH;
-    });
+    thBtn.addEventListener('click', () => navigateTo(HIERARCHY_ROUTE_PATH));
 
     // Insert both buttons after the insertion point
     insertionPoint.parentNode.insertBefore(tmBtn, insertionPoint.nextSibling);
@@ -5077,31 +6456,31 @@
   }
 
   /**
-   * Watch for navigation to Tags page and inject button
+   * F16: at most one pending injection check per animation frame (setTimeout 0
+   * where requestAnimationFrame is missing). The check is cheap and only calls
+   * injectNavButtons when on the Tags page with the button missing.
+   */
+  let _navInjectScheduled = false;
+  function scheduleNavButtonInjection() {
+    if (_navInjectScheduled) return;
+    _navInjectScheduled = true;
+    const run = () => {
+      _navInjectScheduled = false;
+      if (isTagsListPage() && !document.querySelector('#tm-nav-button')) injectNavButtons();
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    else setTimeout(run, 0);
+  }
+
+  /**
+   * Watch for the Tags page toolbar (SPA navigation, late renders) and inject the
+   * buttons: one call now, then one body observer for the page's lifetime whose
+   * callback is debounced to a frame.
    */
   function setupNavButtonInjection() {
-    // Try to inject immediately
     injectNavButtons();
-
-    // Watch for URL changes (SPA navigation)
-    let lastUrl = window.location.href;
-    const observer = new MutationObserver(() => {
-      if (window.location.href !== lastUrl) {
-        lastUrl = window.location.href;
-        // Wait a bit for DOM to update after navigation
-        setTimeout(injectNavButtons, 100);
-        setTimeout(injectNavButtons, 500);
-        setTimeout(injectNavButtons, 1000);
-      }
-    });
-
+    const observer = new MutationObserver(scheduleNavButtonInjection);
     observer.observe(document.body, { childList: true, subtree: true });
-
-    // Also try on initial load with delays (for refresh on Tags page)
-    setTimeout(injectNavButtons, 100);
-    setTimeout(injectNavButtons, 500);
-    setTimeout(injectNavButtons, 1000);
-    setTimeout(injectNavButtons, 2000);
   }
 
   // Initialize
@@ -5109,4 +6488,108 @@
   registerRoute();
   setupNavButtonInjection();
   console.log('[tagManager] Plugin loaded');
+  // Test hook: only active when a test harness sets window.__TAG_MANAGER_TEST__.
+  // Add functions/state here as tests need them.
+  if (window.__TAG_MANAGER_TEST__) {
+    window.__TAG_MANAGER_TEST__.exports = {
+      parseBlacklist,
+      isBlacklisted,
+      visibleMatches,
+      bestVisibleMatch,
+      saveBlacklist,
+      callBackend,
+      formatBackendError,
+      loadTagsFromCache,
+      buildParentOptions,
+      shouldShowParentControls,
+      supportsMergeValues,
+      confirmTagMerge,
+      performTagMerge,
+      detectImportConflicts,
+      sanitizeAliasesForImport,
+      buildMergeIntoExistingInput,
+      summarizeImportResult,
+      renderConflictResolutionModal,
+      createConflictSession,
+      resolveConflictRow,
+      recheckConflictRows,
+      conflictRowHtml,
+      handleImportSelected,
+      buildLocalTagIndex,
+      importAllCandidates,
+      tagsToSearchOnPage,
+      requestImportCancel,
+      findLocalTagByName,
+      findConflictingTag,
+      handleImportAll,
+      hasStashIdForEndpoint,
+      importSelectedTags,
+      handleUpdateLinkedTags,
+      showDiffDialog,
+      applyDiff,
+      wouldCreateCircularRef,
+      buildTagTree,
+      getTreeStats,
+      resetHierarchyEditState,
+      savePendingChanges,
+      exitEditMode,
+      fetchAllTagsWithHierarchy,
+      showTagSearchDialog,
+      closeTagSearchDialog,
+      renderTreeNode,
+      handleHierarchyKeyboard,
+      shouldHandleHierarchyKey,
+      stashPath,
+      navigateTo,
+      handleInternalLinkClick,
+      injectNavButtons,
+      isTagsListPage,
+      renderTagRow,
+      parseIntSetting,
+      loadSettings,
+      migrateCategoryMappings,
+      getCategoryMapping,
+      setCategoryMapping,
+      deleteCategoryMapping,
+      loadCategoryMappings,
+      saveCategoryMappings,
+      resolveCategoryParents,
+      renderPage,
+      searchAllOnPage,
+      searchSingleTag,
+      initTagManagerPage,
+      attachNodeHandlers,
+    };
+    window.__TAG_MANAGER_TEST__.getState = () => ({
+      localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults, matchErrors,
+      categoryMappings, tagBlacklist, isImporting, pendingChanges, isEditMode, cacheStatus,
+      selectedForImport, hierarchyTags, hierarchyTree, expandedNodes, selectedTagId, copiedTagId,
+      originalParentMap, blacklistDraft, blacklistPanelOpen, tagBlacklistRaw,
+    });
+    window.__TAG_MANAGER_TEST__.setState = (patch) => {
+      if ("localTags" in patch) localTags = patch.localTags;
+      if ("settings" in patch) settings = patch.settings;
+      if ("stashBoxes" in patch) stashBoxes = patch.stashBoxes;
+      if ("selectedStashBox" in patch) selectedStashBox = patch.selectedStashBox;
+      if ("stashdbTags" in patch) stashdbTags = patch.stashdbTags;
+      if ("matchResults" in patch) matchResults = patch.matchResults;
+      if ("matchErrors" in patch) matchErrors = patch.matchErrors;
+      if ("categoryMappings" in patch) categoryMappings = patch.categoryMappings;
+      if ("tagBlacklist" in patch) tagBlacklist = patch.tagBlacklist;
+      if ("isImporting" in patch) isImporting = patch.isImporting;
+      if ("pendingChanges" in patch) pendingChanges = patch.pendingChanges;
+      if ("isEditMode" in patch) isEditMode = patch.isEditMode;
+      if ("selectedForImport" in patch) selectedForImport = patch.selectedForImport;
+      if ("hierarchyTags" in patch) hierarchyTags = patch.hierarchyTags;
+      if ("hierarchyTree" in patch) hierarchyTree = patch.hierarchyTree;
+      if ("expandedNodes" in patch) expandedNodes = patch.expandedNodes;
+      if ("selectedTagId" in patch) selectedTagId = patch.selectedTagId;
+      if ("copiedTagId" in patch) copiedTagId = patch.copiedTagId;
+      if ("originalParentMap" in patch) originalParentMap = patch.originalParentMap;
+      if ("blacklistDraft" in patch) blacklistDraft = patch.blacklistDraft;
+      if ("blacklistPanelOpen" in patch) blacklistPanelOpen = patch.blacklistPanelOpen;
+      if ("tagBlacklistRaw" in patch) tagBlacklistRaw = patch.tagBlacklistRaw;
+      if ("activeTab" in patch) activeTab = patch.activeTab;
+    };
+  }
 })();

@@ -1,22 +1,32 @@
 """
-StashDB Scene Tag Sync
+Stash-box Scene Tag Sync
 
-Syncs tags from StashDB to local Stash scenes, replicating
-Stash's Tagger merge behavior.
+Syncs tags from each configured stash-box (StashDB, ThePornDB, ...) to the local
+scenes linked to it, replicating Stash's Tagger merge behavior: tags are only
+ever added, never removed.
+
+With a SyncHistory, a live sync records which stash-box tags matched a local tag
+on each scene, and later syncs don't add those again. So a tag the user removed
+from a scene stays removed, while tags the stash-box gains, or that only now
+match a local tag or are no longer blacklisted, are still added. A dry run reads
+the history (its preview leaves out removed tags) but never records.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 import log
 from blacklist import Blacklist
+from stash_client import StashError
 from tag_cache import TagCache
-from stashdb_api import RateLimiter, find_scene_by_id, find_scenes_by_fingerprints
+from stashdb_api import (
+    RateLimiter, StashDBAPIError, find_scene_by_id, find_scenes_by_fingerprints,
+)
 
 # Constants
-DRY_RUN_LIMIT = 200
-BATCH_SIZE = 100  # Scenes to fetch per page from local Stash
-FINGERPRINT_BATCH_SIZE = 40  # Max scenes per StashDB fingerprint query
+DRY_RUN_LIMIT = 200  # Scenes per dry run, across all stash-boxes
+FINGERPRINT_BATCH_SIZE = 40  # Max scenes per stash-box fingerprint query
+DEFAULT_REQUESTS_PER_SECOND = 2  # Also the cap when a box allows more
 
 
 @dataclass
@@ -25,23 +35,79 @@ class ProcessResult:
     status: str  # 'updated', 'no_changes', 'dry_run', 'error'
     tags_added: int = 0
     tags_skipped: int = 0
-    merged_tag_ids: List[str] = field(default_factory=list)
     error: Optional[str] = None
+
+
+@dataclass
+class SyncStats:
+    """Statistics for sync operation."""
+    total_scenes: int = 0
+    processed: int = 0  # Scenes synced without error
+    updated: int = 0
+    no_changes: int = 0
+    skipped: int = 0
+    errors: int = 0
+    tags_added_total: int = 0
+    tags_skipped_total: int = 0
+    error: Optional[str] = None  # Why the run stopped or failed, if it did
+    by_endpoint: dict = field(default_factory=dict)  # {endpoint: {"name", **counts()}}
+
+    def counts(self):
+        """The counters as a dict, keyed as the plugin reports them."""
+        return {
+            "total_scenes": self.total_scenes,
+            "processed": self.processed,
+            "updated": self.updated,
+            "no_changes": self.no_changes,
+            "skipped": self.skipped,
+            "errors": self.errors,
+            "tags_added": self.tags_added_total,
+            "tags_skipped": self.tags_skipped_total,
+        }
+
+    def add(self, other):
+        """Add another SyncStats' counters to this one."""
+        for name in ("total_scenes", "processed", "updated", "no_changes", "skipped",
+                     "errors", "tags_added_total", "tags_skipped_total"):
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+
+
+class SyncAborted(Exception):
+    """Internal: stops the whole run (a rejected API key, or the local Stash failing)."""
+
+
+@dataclass
+class _Run:
+    """What every scene in a run is processed with."""
+    client: object  # stash_client.LocalStash or a stand-in
+    tag_cache: TagCache
+    settings: dict
+    blacklist: Blacklist
+    history: object = None  # sync_history.SyncHistory, or None to sync without one
+
+
+@dataclass
+class _Box:
+    """The stash-box being synced."""
+    endpoint: str
+    api_key: str
+    name: str
+    rate_limiter: RateLimiter
 
 
 def match_stashdb_tag_to_local(stashdb_tag, tag_cache, endpoint):
     """
-    Match a StashDB tag to a local tag.
+    Match a stash-box tag to a local tag.
 
     Priority order (matches Stash's pkg/match/scraped.go:ScrapedTag):
-    1. StashID link - local tag has same StashDB ID for this endpoint
-    2. Name match - local tag name equals StashDB tag name (case-insensitive)
-    3. Alias match - local tag alias equals StashDB tag name (case-insensitive)
+    1. StashID link - local tag has same stash-box ID for this endpoint
+    2. Name match - local tag name equals stash-box tag name (case-insensitive)
+    3. Alias match - local tag alias equals stash-box tag name (case-insensitive)
 
     Args:
-        stashdb_tag: Dict with 'id', 'name' from StashDB
+        stashdb_tag: Dict with 'id', 'name' from the stash-box
         tag_cache: TagCache instance with lookup maps
-        endpoint: StashDB endpoint URL
+        endpoint: Stash-box endpoint URL
 
     Returns:
         Local tag ID (str) if matched, None if no match
@@ -68,118 +134,120 @@ def match_stashdb_tag_to_local(stashdb_tag, tag_cache, endpoint):
     return None
 
 
-def process_scene(scene, stashdb_scene, tag_cache, stash, settings, endpoint, blacklist):
+def process_scene(scene, remote_scene, tag_cache, client, settings, endpoint, blacklist, history=None):
     """
-    Process a single scene's tag merge.
+    Decide which tags a scene gains from its stash-box scene, and add them.
+
+    Writes only in live mode, and only the missing tags (ADD mode), so tags added
+    to the scene since it was fetched are kept.
+
+    With a history, stash-box tags recorded at the scene's last live sync are not
+    added again (the user may have removed them). After a live sync that didn't
+    fail, the stash-box tags that matched a local tag are recorded, whether added
+    now, already present, or left out as recorded before. Unmatched and
+    blacklisted tags are not recorded, so they are added once they match or are
+    no longer blacklisted.
 
     Args:
         scene: Local scene dict with id, tags
-        stashdb_scene: StashDB scene dict with tags
+        remote_scene: Stash-box scene dict with id, tags
         tag_cache: TagCache instance
-        stash: StashInterface (can be None for dry_run)
-        settings: Plugin settings dict with 'dry_run' key
-        endpoint: StashDB endpoint URL
+        client: LocalStash (not used in dry run)
+        settings: Sync settings dict with 'dry_run' key
+        endpoint: Stash-box endpoint URL
         blacklist: Blacklist instance for filtering tags
+        history: SyncHistory, or None to consider every stash-box tag
 
     Returns:
-        ProcessResult with status, tags_added, tags_skipped, merged_tag_ids
+        ProcessResult with status, tags_added, tags_skipped
     """
     scene_id = scene.get("id", "unknown")
+    remote_id = remote_scene.get("id")
+    dry_run = settings.get("dry_run", True)
     existing_tags = scene.get("tags", []) or []
     existing_tag_ids = set(str(t.get("id", "")) for t in existing_tags if t.get("id"))
 
-    new_tag_ids = set()
-    skipped_tags = []
-
-    # Get StashDB tags, filtering out blacklisted ones
-    stashdb_tags = stashdb_scene.get("tags", []) or []
-    stashdb_tags, hidden_count = blacklist.filter_tags(stashdb_tags)
+    # Which stash-box tags to consider
+    remote_tags = remote_scene.get("tags", []) or []
+    remote_tags, hidden_count = blacklist.filter_tags(remote_tags)
     if hidden_count > 0:
         log.LogDebug(f"Scene {scene_id}: Filtered {hidden_count} blacklisted tags")
+    # Tags that matched at the last live sync; None if never synced (or re-linked)
+    prior = history.get(endpoint, scene_id, remote_id) if history is not None else None
 
-    for stashdb_tag in stashdb_tags:
-        local_id = match_stashdb_tag_to_local(stashdb_tag, tag_cache, endpoint)
+    # Match them to local tags
+    new_tag_ids = set()
+    matched_remote_ids = set()  # what the history records
+    skipped_tags = []
+    for remote_tag in remote_tags:
+        name = remote_tag.get("name", "")
+        remote_tag_id = str(remote_tag.get("id") or "")
+        local_id = match_stashdb_tag_to_local(remote_tag, tag_cache, endpoint)
 
-        if local_id:
-            if local_id not in existing_tag_ids:
-                new_tag_ids.add(local_id)
-                log.LogDebug(f"Scene {scene_id}: matched '{stashdb_tag.get('name', '')}' -> local tag {local_id}")
-            else:
-                log.LogTrace(f"Scene {scene_id}: tag '{stashdb_tag.get('name', '')}' already present")
+        if not local_id:
+            skipped_tags.append(name)
+            log.LogDebug(f"Scene {scene_id}: no local match for '{name}'")
+            continue
+
+        if remote_tag_id:
+            matched_remote_ids.add(remote_tag_id)
+        if local_id in existing_tag_ids:
+            log.LogTrace(f"Scene {scene_id}: tag '{name}' already present")
+        elif prior is not None and remote_tag_id in prior:
+            log.LogDebug(f"Scene {scene_id}: not re-adding '{name}' (synced before, since removed)")
         else:
-            skipped_tags.append(stashdb_tag.get("name", ""))
-            log.LogDebug(f"Scene {scene_id}: no local match for '{stashdb_tag.get('name', '')}'")
+            new_tag_ids.add(local_id)
+            log.LogDebug(f"Scene {scene_id}: matched '{name}' -> local tag {local_id}")
 
-    merged_tag_ids = list(existing_tag_ids | new_tag_ids)
+    record = history is not None and not dry_run  # a dry run never records
 
     if not new_tag_ids:
-        return ProcessResult(
-            status="no_changes",
-            tags_added=0,
-            tags_skipped=len(skipped_tags),
-            merged_tag_ids=merged_tag_ids
-        )
+        if record:
+            history.record(endpoint, scene_id, remote_id, matched_remote_ids)
+        return ProcessResult(status="no_changes", tags_skipped=len(skipped_tags))
 
-    if settings.get("dry_run", True):
-        tag_names = [tag_cache.get_name(tid) or tid for tid in new_tag_ids]
-        log.LogInfo(f"[DRY RUN] Scene {scene_id}: would add {len(new_tag_ids)} tags: {tag_names}")
-        return ProcessResult(
-            status="dry_run",
-            tags_added=len(new_tag_ids),
-            tags_skipped=len(skipped_tags),
-            merged_tag_ids=merged_tag_ids
-        )
+    # What to write
+    tag_ids = sorted(new_tag_ids)
+    tag_names = [tag_cache.get_name(tid) or tid for tid in tag_ids]
 
-    # Live mode - update the scene
+    if dry_run:
+        log.LogInfo(f"[DRY RUN] Scene {scene_id}: would add {len(tag_ids)} tags: {tag_names}")
+        return ProcessResult(status="dry_run", tags_added=len(tag_ids), tags_skipped=len(skipped_tags))
+
     try:
-        stash.update_scene({"id": scene_id, "tag_ids": merged_tag_ids})
-        tag_names = [tag_cache.get_name(tid) or tid for tid in new_tag_ids]
-        log.LogInfo(f"Scene {scene_id}: added {len(new_tag_ids)} tags: {tag_names}")
-        return ProcessResult(
-            status="updated",
-            tags_added=len(new_tag_ids),
-            tags_skipped=len(skipped_tags),
-            merged_tag_ids=merged_tag_ids
-        )
-    except Exception as e:
+        client.add_scene_tags(scene_id, tag_ids)
+    except StashError as e:
         log.LogError(f"Scene {scene_id}: failed to update - {e}")
-        return ProcessResult(
-            status="error",
-            tags_added=0,
-            tags_skipped=len(skipped_tags),
-            merged_tag_ids=merged_tag_ids,
-            error=str(e)
-        )
+        return ProcessResult(status="error", tags_skipped=len(skipped_tags), error=str(e))
+
+    if record:
+        history.record(endpoint, scene_id, remote_id, matched_remote_ids)
+    log.LogInfo(f"Scene {scene_id}: added {len(tag_ids)} tags: {tag_names}")
+    return ProcessResult(status="updated", tags_added=len(tag_ids), tags_skipped=len(skipped_tags))
 
 
-@dataclass
-class SyncStats:
-    """Statistics for sync operation."""
-    total_scenes: int = 0
-    processed: int = 0
-    updated: int = 0
-    no_changes: int = 0
-    skipped: int = 0
-    errors: int = 0
-    tags_added_total: int = 0
-    tags_skipped_total: int = 0
-
-
-def sync_scene_tags(stash, stashdb_url, stashdb_api_key, settings):
+def sync_scene_tags(client, boxes, settings, history=None):
     """
     Main sync algorithm.
 
     1. Build tag lookup cache from local Stash
-    2. Query scenes with StashIDs (paginated, sorted by updated_at ASC)
-    3. Pass 1: Batch query StashDB by fingerprints (40 scenes per request)
-    4. Pass 2: Sequential query for retry queue (findScene by ID)
-    5. Log summary statistics
+    2. For each stash-box, in order:
+       a. Fetch the local scenes linked to it (sorted by updated_at ASC)
+       b. Pass 1: batch query the box by fingerprints (40 scenes per request)
+       c. Pass 2: query the retry queue one scene at a time (findScene by ID)
+    3. Log summary statistics
+
+    A rejected API key, or the local Stash failing to return tags or scenes, stops
+    the whole run and sets `error`. Other stash-box errors count the scenes
+    involved as errors and the run continues.
 
     Args:
-        stash: StashInterface instance
-        stashdb_url: StashDB GraphQL endpoint URL
-        stashdb_api_key: StashDB API key
-        settings: Plugin settings dict with 'dry_run' key
+        client: LocalStash for the local Stash
+        boxes: List of {endpoint, api_key, name, max_requests_per_minute} dicts,
+            each with an api_key
+        settings: Sync settings dict with 'dry_run' and 'tag_blacklist' keys
+        history: SyncHistory, so tags a scene was synced with before are not
+            added again; None to consider every stash-box tag
 
     Returns:
         SyncStats with operation statistics
@@ -187,137 +255,124 @@ def sync_scene_tags(stash, stashdb_url, stashdb_api_key, settings):
     stats = SyncStats()
     dry_run = settings.get("dry_run", True)
 
-    # Load blacklist
-    blacklist = Blacklist(settings.get('tagBlacklist', ''))
+    blacklist = Blacklist(settings.get("tag_blacklist") or "")
     log.LogDebug(f"Loaded blacklist with {blacklist.count} patterns")
 
-    log.LogInfo(f"Starting scene tag sync (dry_run={dry_run})")
+    names = ", ".join(_box_name(b) for b in boxes)
+    log.LogInfo(f"Starting scene tag sync from {names or 'no stash-boxes'} (dry_run={dry_run})")
 
-    # Step 1: Build tag cache from local tags
-    log.LogInfo("Building tag cache from local Stash...")
-    local_tags = _fetch_all_local_tags(stash)
-    tag_cache = TagCache.build(local_tags)
+    try:
+        tag_cache = _build_tag_cache(client)
+        run = _Run(client=client, tag_cache=tag_cache, settings=settings, blacklist=blacklist,
+                   history=history)
 
-    stashdb_linked_count = len(tag_cache.stashdb_id_map)
-    log.LogInfo(f"Tag cache built: {tag_cache.tag_count} tags ({stashdb_linked_count} with StashDB links)")
+        for index, box_config in enumerate(boxes):
+            limit = None
+            if dry_run:
+                limit = DRY_RUN_LIMIT - stats.total_scenes
+                if limit <= 0:
+                    log.LogInfo(f"[DRY RUN] Reached the {DRY_RUN_LIMIT}-scene limit; skipping {_box_name(box_config)}")
+                    break
 
-    # Step 2: Query scenes with StashIDs
-    log.LogInfo("Querying scenes with StashDB IDs...")
-    scenes = _fetch_scenes_with_stashdb_ids(stash, stashdb_url)
-    stats.total_scenes = len(scenes)
+            box_stats = SyncStats()
+            box = _make_box(box_config)
+            try:
+                _sync_box(run, box, box_stats, limit, _progress(index, len(boxes)))
+            finally:
+                stats.add(box_stats)
+                stats.by_endpoint[box.endpoint] = {"name": box.name, **box_stats.counts()}
+                _log_box_summary(box.name, box_stats, dry_run)
 
-    if stats.total_scenes == 0:
-        log.LogInfo("No scenes with StashDB IDs found")
-        return stats
+    except SyncAborted as e:
+        stats.error = str(e)
+        log.LogError(f"Scene tag sync stopped: {e}")
 
-    log.LogInfo(f"Found {stats.total_scenes} scenes with StashDB IDs")
+    if stats.error is None and stats.processed == 0 and stats.errors > 0:
+        stats.error = f"All {stats.errors} scenes failed to sync. See the Stash log for details."
+        log.LogError(stats.error)
 
-    # Apply dry run limit
-    if dry_run and stats.total_scenes > DRY_RUN_LIMIT:
-        log.LogInfo(f"[DRY RUN] Limiting to {DRY_RUN_LIMIT} scenes (of {stats.total_scenes})")
-        scenes = scenes[:DRY_RUN_LIMIT]
-
-    # Initialize rate limiter
-    rate_limiter = RateLimiter(requests_per_second=2)
-
-    # Step 3: Pass 1 - Batch by fingerprints
-    log.LogInfo("Pass 1: Batch processing by fingerprints...")
-    retry_queue = []
-
-    processed_in_pass1 = _process_pass_one(
-        scenes, stashdb_url, stashdb_api_key, tag_cache,
-        stash, settings, rate_limiter, stats, retry_queue, blacklist
-    )
-
-    log.LogInfo(f"Pass 1 complete: {processed_in_pass1} processed, {len(retry_queue)} in retry queue")
-
-    # Step 4: Pass 2 - Sequential fallback
-    if retry_queue:
-        log.LogInfo(f"Pass 2: Processing {len(retry_queue)} scenes sequentially...")
-        _process_pass_two(
-            retry_queue, stashdb_url, stashdb_api_key, tag_cache,
-            stash, settings, rate_limiter, stats, blacklist
-        )
-
-    # Step 5: Log summary
     _log_summary(stats, dry_run)
-
     return stats
 
 
-def _fetch_all_local_tags(stash):
-    """Fetch all tags from local Stash with stash_ids."""
-    all_tags = []
-    page = 1
-
-    while True:
-        result = stash.find_tags(
-            f={},
-            filter={"page": page, "per_page": BATCH_SIZE},
-            fragment="id name aliases stash_ids { endpoint stash_id }"
-        )
-
-        if not result:
-            break
-
-        all_tags.extend(result)
-
-        if len(result) < BATCH_SIZE:
-            break
-
-        page += 1
-
-    return all_tags
+def _box_name(box_config):
+    return box_config.get("name") or box_config.get("endpoint") or "stash-box"
 
 
-def _fetch_scenes_with_stashdb_ids(stash, stashdb_url):
-    """Fetch all scenes that have a StashDB ID for the given endpoint."""
-    all_scenes = []
-    page = 1
+def _make_box(box_config):
+    """A _Box with a rate limiter honoring the box's max_requests_per_minute."""
+    try:
+        mrpm = float(box_config.get("max_requests_per_minute") or 0)
+    except (TypeError, ValueError):
+        mrpm = 0
+    rps = min(DEFAULT_REQUESTS_PER_SECOND, mrpm / 60) if mrpm > 0 else DEFAULT_REQUESTS_PER_SECOND
+    return _Box(
+        endpoint=box_config.get("endpoint", ""),
+        api_key=box_config.get("api_key", ""),
+        name=_box_name(box_config),
+        rate_limiter=RateLimiter(requests_per_second=rps),
+    )
 
-    filter_query = {
-        "stash_id_endpoint": {
-            "endpoint": stashdb_url,
-            "modifier": "NOT_NULL",
-            "stash_id": ""
-        }
-    }
 
-    while True:
-        result = stash.find_scenes(
-            f=filter_query,
-            filter={
-                "page": page,
-                "per_page": BATCH_SIZE,
-                "sort": "updated_at",
-                "direction": "ASC"
-            },
-            fragment="""
-                id
-                tags { id }
-                stash_ids { endpoint stash_id }
-                files {
-                    fingerprints { type value }
-                }
-            """
-        )
+def _build_tag_cache(client):
+    log.LogInfo("Building tag cache from local Stash...")
+    try:
+        local_tags = client.find_all_tags()
+    except StashError as e:
+        raise SyncAborted(f"Could not read tags from Stash: {e}") from e
+    tag_cache = TagCache.build(local_tags)
+    linked_count = len(tag_cache.stashdb_id_map)
+    log.LogInfo(f"Tag cache built: {tag_cache.tag_count} tags ({linked_count} stash-box links)")
+    return tag_cache
 
-        if not result:
-            break
 
-        all_scenes.extend(result)
+def _progress(box_index, box_count):
+    """Report progress within one box as a slice of the whole run."""
+    def report(fraction):
+        log.LogProgress((box_index + min(max(fraction, 0.0), 1.0)) / box_count)
+    return report
 
-        if len(result) < BATCH_SIZE:
-            break
 
-        page += 1
-        log.LogDebug(f"Fetched {len(all_scenes)} scenes so far...")
+def _sync_box(run, box, stats, limit, progress):
+    """Sync the local scenes linked to one stash-box."""
+    log.LogInfo(f"{box.name}: querying scenes linked to {box.endpoint}...")
+    if limit is not None:
+        log.LogInfo(f"[DRY RUN] {box.name}: checking at most {limit} scenes")
+    try:
+        # Fetch them all before writing: writes bump updated_at, the sort key.
+        scenes = list(run.client.iter_scenes_with_stash_id(box.endpoint, limit=limit))
+    except StashError as e:
+        raise SyncAborted(f"Could not read scenes linked to {box.name} from Stash: {e}") from e
 
-    return all_scenes
+    stats.total_scenes = len(scenes)
+    if not scenes:
+        log.LogInfo(f"{box.name}: no linked scenes")
+        progress(1.0)
+        return
+    log.LogInfo(f"{box.name}: found {len(scenes)} linked scenes")
+
+    log.LogInfo(f"{box.name}: pass 1, batch lookup by fingerprints...")
+    retry_queue = []
+    processed = _process_pass_one(run, box, scenes, stats, retry_queue, progress)
+    log.LogInfo(f"{box.name}: pass 1 complete: {processed} processed, {len(retry_queue)} in retry queue")
+
+    if retry_queue:
+        log.LogInfo(f"{box.name}: pass 2, looking up {len(retry_queue)} scenes one at a time...")
+        _process_pass_two(run, box, retry_queue, stats, progress)
+    progress(1.0)
+
+
+def _aborted_by(box, error):
+    """The SyncAborted for a request the box rejected."""
+    reason = f"HTTP {error.status_code}" if error.status_code else "not authorized"
+    return SyncAborted(
+        f"{box.name} rejected the request ({reason}). "
+        "Check the API key in Settings → Metadata Providers."
+    )
 
 
 def _get_scene_stashdb_id(scene, endpoint):
-    """Extract StashDB ID for a scene from the given endpoint."""
+    """Extract a scene's stash-box ID for the given endpoint."""
     stash_ids = scene.get("stash_ids", []) or []
     for sid in stash_ids:
         if sid.get("endpoint") == endpoint:
@@ -326,7 +381,7 @@ def _get_scene_stashdb_id(scene, endpoint):
 
 
 def _get_scene_fingerprints(scene):
-    """Extract fingerprints from scene for StashDB query."""
+    """Extract fingerprints from scene for a stash-box query."""
     fingerprints = []
     files = scene.get("files", []) or []
 
@@ -344,125 +399,131 @@ def _get_scene_fingerprints(scene):
     return fingerprints
 
 
-def _process_pass_one(scenes, stashdb_url, stashdb_api_key, tag_cache,
-                       stash, settings, rate_limiter, stats, retry_queue, blacklist):
+def _process(run, box, scene, remote_scene, stats):
+    """Process one scene against its stash-box scene and count the result."""
+    result = process_scene(
+        scene, remote_scene, run.tag_cache,
+        run.client, run.settings, box.endpoint, run.blacklist, run.history
+    )
+    _update_stats(stats, result)
+    return result
+
+
+def _process_pass_one(run, box, scenes, stats, retry_queue, progress):
     """
     Process scenes in batches using fingerprint queries.
 
-    Returns number of scenes processed successfully.
+    Scenes without fingerprints, or whose fingerprints don't find their linked
+    stash-box scene, go to `retry_queue`. A failed batch (other than a rejected
+    API key) counts its scenes as errors.
+
+    Returns number of scenes processed.
     """
     processed = 0
 
-    # Group scenes into batches of FINGERPRINT_BATCH_SIZE
     for batch_start in range(0, len(scenes), FINGERPRINT_BATCH_SIZE):
         batch = scenes[batch_start:batch_start + FINGERPRINT_BATCH_SIZE]
 
-        # Build fingerprint batches
         fingerprint_batches = []
         batch_scenes = []
-
         for scene in batch:
             fps = _get_scene_fingerprints(scene)
             if fps:
                 fingerprint_batches.append(fps)
                 batch_scenes.append(scene)
             else:
-                # No fingerprints - add to retry queue
                 retry_queue.append(scene)
                 log.LogDebug(f"Scene {scene.get('id')}: no fingerprints, queued for pass 2")
 
-        if not fingerprint_batches:
-            continue
+        if fingerprint_batches:
+            try:
+                results = find_scenes_by_fingerprints(
+                    box.endpoint, box.api_key, fingerprint_batches, box.rate_limiter
+                ) or []
+            except StashDBAPIError as e:
+                if e.is_auth_error:
+                    raise _aborted_by(box, e) from e
+                log.LogError(f"{box.name}: fingerprint lookup failed for {len(batch_scenes)} scenes: {e}")
+                stats.errors += len(batch_scenes)
+            else:
+                for i, scene in enumerate(batch_scenes):
+                    expected_id = _get_scene_stashdb_id(scene, box.endpoint)
+                    candidates = (results[i] if i < len(results) else None) or []
+                    remote_scene = next((s for s in candidates if s and s.get("id") == expected_id), None)
 
-        # Query StashDB
-        stashdb_results = find_scenes_by_fingerprints(
-            stashdb_url, stashdb_api_key, fingerprint_batches, rate_limiter
-        )
+                    if not remote_scene:
+                        retry_queue.append(scene)
+                        log.LogDebug(f"Scene {scene.get('id')}: fingerprint didn't match {box.name} ID {expected_id}, queued for pass 2")
+                        continue
 
-        # Process results
-        for i, (scene, stashdb_scenes) in enumerate(zip(batch_scenes, stashdb_results)):
-            expected_stashdb_id = _get_scene_stashdb_id(scene, stashdb_url)
+                    _process(run, box, scene, remote_scene, stats)
+                    processed += 1
 
-            # Find matching StashDB scene by ID
-            matched_stashdb_scene = None
-            for sdb_scene in (stashdb_scenes or []):
-                if sdb_scene and sdb_scene.get("id") == expected_stashdb_id:
-                    matched_stashdb_scene = sdb_scene
-                    break
-
-            if not matched_stashdb_scene:
-                # No match by fingerprint - add to retry queue
-                retry_queue.append(scene)
-                log.LogDebug(f"Scene {scene.get('id')}: fingerprint didn't match expected StashDB ID, queued for pass 2")
-                continue
-
-            # Process the scene
-            result = process_scene(
-                scene, matched_stashdb_scene, tag_cache,
-                stash, settings, stashdb_url, blacklist
-            )
-
-            _update_stats(stats, result)
-            processed += 1
-
-        # Progress update
-        log.LogProgress(min(1.0, (batch_start + len(batch)) / len(scenes) * 0.8))
+        progress((batch_start + len(batch)) / len(scenes) * 0.8)
 
     return processed
 
 
-def _process_pass_two(retry_queue, stashdb_url, stashdb_api_key, tag_cache,
-                       stash, settings, rate_limiter, stats, blacklist):
-    """Process scenes individually by StashDB ID."""
+def _process_pass_two(run, box, retry_queue, stats, progress):
+    """Process scenes individually by stash-box ID."""
     for i, scene in enumerate(retry_queue):
-        stashdb_id = _get_scene_stashdb_id(scene, stashdb_url)
+        progress(0.8 + i / len(retry_queue) * 0.2)
+        remote_id = _get_scene_stashdb_id(scene, box.endpoint)
 
-        if not stashdb_id:
-            log.LogWarning(f"Scene {scene.get('id')}: no StashDB ID found, skipping")
+        if not remote_id:
+            log.LogWarning(f"Scene {scene.get('id')}: no {box.name} ID found, skipping")
             stats.skipped += 1
             continue
 
-        stashdb_scene = find_scene_by_id(
-            stashdb_url, stashdb_api_key, stashdb_id, rate_limiter
-        )
+        try:
+            remote_scene = find_scene_by_id(box.endpoint, box.api_key, remote_id, box.rate_limiter)
+        except StashDBAPIError as e:
+            if e.is_auth_error:
+                raise _aborted_by(box, e) from e
+            log.LogError(f"Scene {scene.get('id')}: {box.name} lookup of {remote_id} failed: {e}")
+            stats.errors += 1
+            continue
 
-        if not stashdb_scene:
-            log.LogWarning(f"Scene {scene.get('id')}: StashDB scene {stashdb_id} not found")
+        if not remote_scene:
+            log.LogWarning(f"Scene {scene.get('id')}: {box.name} scene {remote_id} not found")
             stats.skipped += 1
             continue
 
-        result = process_scene(
-            scene, stashdb_scene, tag_cache,
-            stash, settings, stashdb_url, blacklist
-        )
-
-        _update_stats(stats, result)
-
-        # Progress update (pass 2 is the remaining 20%)
-        log.LogProgress(0.8 + (i + 1) / len(retry_queue) * 0.2)
+        _process(run, box, scene, remote_scene, stats)
 
 
 def _update_stats(stats, result):
     """Update stats based on ProcessResult."""
-    stats.processed += 1
-    stats.tags_added_total += result.tags_added
     stats.tags_skipped_total += result.tags_skipped
 
-    if result.status == "updated":
+    if result.status == "error":
+        stats.errors += 1
+        return
+
+    stats.processed += 1
+    stats.tags_added_total += result.tags_added
+    if result.status in ("updated", "dry_run"):  # dry_run counts as would-be-updated
         stats.updated += 1
     elif result.status == "no_changes":
         stats.no_changes += 1
-    elif result.status == "dry_run":
-        stats.updated += 1  # Count as would-be-updated
-    elif result.status == "error":
-        stats.errors += 1
+
+
+def _log_box_summary(name, stats, dry_run):
+    """Log one line summing up a stash-box's part of the run."""
+    prefix = "[DRY RUN] " if dry_run else ""
+    log.LogInfo(
+        f"{prefix}{name}: {stats.total_scenes} scenes, "
+        f"{stats.updated} {'would be updated' if dry_run else 'updated'}, "
+        f"{stats.no_changes} unchanged, {stats.skipped} skipped, {stats.errors} errors, "
+        f"{stats.tags_added_total} tags {'would be ' if dry_run else ''}added"
+    )
 
 
 def _log_summary(stats, dry_run):
     """Log final summary statistics."""
     prefix = "[DRY RUN] " if dry_run else ""
 
-    log.LogInfo(f"{prefix}Sync complete!")
+    log.LogInfo(f"{prefix}Sync {'stopped' if stats.error else 'complete'}!")
     log.LogInfo(f"  Total scenes: {stats.total_scenes}")
     log.LogInfo(f"  Processed: {stats.processed}")
     log.LogInfo(f"  {'Would update' if dry_run else 'Updated'}: {stats.updated}")

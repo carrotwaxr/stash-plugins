@@ -7,6 +7,8 @@ Entry point for plugin operations. Handles different modes:
 - get_cache_status: Get cache info for an endpoint
 - refresh_cache: Force refresh cache for an endpoint
 - clear_cache: Clear cache for an endpoint
+- reset_sync_history: Forget which stash-box tags scene sync has applied, so the
+  next sync adds back tags removed from scenes
 
 Called via runPluginOperation from JavaScript UI.
 """
@@ -14,15 +16,18 @@ Called via runPluginOperation from JavaScript UI.
 import hashlib
 import json
 import os
-import ssl
+import re
+import sqlite3
 import sys
 import time
-import urllib.request
 
 import log
-from stashdb_api import search_tags_by_name, query_all_tags
+import plugin_data
+from stashdb_api import search_tags_by_name, query_all_tags, StashDBAPIError
 from matcher import TagMatcher, load_synonyms
 from blacklist import Blacklist
+from stash_client import LocalStash, StashError
+from sync_history import SyncHistory
 
 # Plugin ID must match yml
 PLUGIN_ID = "tagManager"
@@ -57,13 +62,15 @@ DEFAULT_PLUGIN_SETTINGS = load_default_settings()
 
 
 def get_cache_dir():
-    """Get the cache directory path for storing endpoint tag caches."""
-    # Use a cache directory within the plugin folder
-    cache_dir = os.path.join(get_plugin_dir(), "cache")
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
-        log.LogDebug(f"Created cache directory: {cache_dir}")
+    """Get the cache directory (inside Stash's config dir) for endpoint tag caches."""
+    cache_dir = os.path.join(plugin_data.current_dir(), "tag_cache")
+    os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
+
+
+def get_sync_history_path():
+    """The scene sync history file (inside Stash's config dir)."""
+    return os.path.join(plugin_data.current_dir(), "sync_history.sqlite")
 
 
 def get_cache_file_path(endpoint_url):
@@ -76,16 +83,19 @@ def get_cache_file_path(endpoint_url):
     url_hash = hashlib.md5(endpoint_url.encode('utf-8')).hexdigest()[:12]
     # Also include a readable portion of the URL
     readable_part = endpoint_url.replace('https://', '').replace('http://', '').replace('/', '_')[:30]
+    readable_part = re.sub(r"[^A-Za-z0-9._-]", "_", readable_part)
     filename = f"tags_{readable_part}_{url_hash}.json"
     return os.path.join(get_cache_dir(), filename)
 
 
-def load_cached_tags(endpoint_url):
+def load_cached_tags(endpoint_url, allow_expired=False):
     """
     Load cached tags for an endpoint if available and not expired.
 
     Args:
         endpoint_url: The stash-box endpoint URL
+        allow_expired: Return the cache even when older than the max age
+            (fuzzy matching uses stale tags rather than none)
 
     Returns:
         Dict with 'tags', 'timestamp', 'count' or None if cache miss
@@ -106,8 +116,10 @@ def load_cached_tags(endpoint_url):
         max_age = CACHE_MAX_AGE_HOURS
 
         if age_hours > max_age:
-            log.LogDebug(f"Cache expired: {age_hours:.1f} hours old (max: {max_age}h)")
-            return None
+            if not allow_expired:
+                log.LogDebug(f"Cache expired: {age_hours:.1f} hours old (max: {max_age}h)")
+                return None
+            log.LogDebug(f"Cache expired ({age_hours:.1f}h old, max {max_age}h), using it anyway")
 
         tag_count = len(cache_data.get('tags', []))
         log.LogInfo(f"Cache hit: {tag_count} tags from {endpoint_url} ({age_hours:.1f}h old)")
@@ -130,7 +142,12 @@ def save_tags_to_cache(endpoint_url, tags):
     Returns:
         Bool indicating success
     """
+    if not tags:
+        log.LogWarning(f"Refusing to cache empty tag list for {endpoint_url}")
+        return False
+
     cache_path = get_cache_file_path(endpoint_url)
+    tmp_path = cache_path + ".tmp"
 
     cache_data = {
         'endpoint': endpoint_url,
@@ -140,14 +157,19 @@ def save_tags_to_cache(endpoint_url, tags):
     }
 
     try:
-        with open(cache_path, 'w', encoding='utf-8') as f:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(cache_data, f, indent=2)
+        os.replace(tmp_path, cache_path)
 
         log.LogInfo(f"Saved {len(tags)} tags to cache: {cache_path}")
         return True
 
     except OSError as e:
         log.LogError(f"Cache write error: {e}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return False
 
 
@@ -245,44 +267,6 @@ def resolve_sync_dry_run(stash_config):
         return DEFAULT_PLUGIN_SETTINGS["syncDryRun"]
 
 
-# Stash runs on this host. With HTTPS its cert names a public host while we connect
-# via localhost, so hostname checks would fail. Don't verify.
-STASH_SSL_CONTEXT = ssl.create_default_context()
-STASH_SSL_CONTEXT.check_hostname = False
-STASH_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
-
-
-def stash_graphql(server_connection, query, variables=None):
-    """Query the Stash server that launched this plugin, using its session cookie."""
-    host = server_connection.get("Host", "localhost")
-    if host == "0.0.0.0":
-        host = "localhost"
-    url = f"{server_connection.get('Scheme', 'http')}://{host}:{server_connection.get('Port', 9999)}/graphql"
-
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    cookie = (server_connection.get("SessionCookie") or {}).get("Value")
-    if cookie:
-        headers["Cookie"] = f"session={cookie}"
-
-    data = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=30, context=STASH_SSL_CONTEXT) as response:
-        result = json.loads(response.read().decode("utf-8"))
-    if result.get("errors"):
-        raise RuntimeError(f"Stash GraphQL errors: {result['errors']}")
-    return result.get("data") or {}
-
-
-STASHBOX_CONFIG_QUERY = """
-query TagManagerStashBoxes {
-    configuration {
-        general { stashBoxes { endpoint api_key name } }
-        plugins
-    }
-}
-"""
-
-
 def _normalize_endpoint(url):
     return (url or "").strip().rstrip("/").lower()
 
@@ -352,7 +336,7 @@ def get_settings_from_config(stash_config):
     }
 
 
-def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags=None):
+def handle_search(tag_name, stashdb_url, stashdb_api_key, settings):
     """
     Search for StashDB matches for a local tag.
 
@@ -361,10 +345,10 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
         stashdb_url: StashDB GraphQL endpoint
         stashdb_api_key: StashDB API key
         settings: Plugin settings dict
-        stashdb_tags: Optional cached StashDB tags (avoids re-fetch)
 
     Returns:
-        Dict with matches and search info
+        Dict with matches and search info. `fuzzy_unavailable` is True when fuzzy
+        matching is enabled but there is no tag cache for this endpoint yet.
     """
     log.LogDebug(f"Searching for tag: {tag_name}")
 
@@ -382,6 +366,11 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
 
     # If we have cached tags, also do local fuzzy matching
     local_matches = []
+    fuzzy_unavailable = False
+    cache = load_cached_tags(stashdb_url, allow_expired=True) if enable_fuzzy else None
+    stashdb_tags = (cache or {}).get("tags") or []
+    if enable_fuzzy and not stashdb_tags:
+        fuzzy_unavailable = True
     if stashdb_tags and enable_fuzzy:
         synonyms_path = os.path.join(get_plugin_dir(), "synonyms.json")
         synonyms = load_synonyms(synonyms_path)
@@ -447,7 +436,8 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags
     return {
         "tag_name": tag_name,
         "matches": combined_matches[:20],  # Limit to top 20
-        "total_matches": len(combined_matches)
+        "total_matches": len(combined_matches),
+        "fuzzy_unavailable": fuzzy_unavailable,
     }
 
 
@@ -482,9 +472,9 @@ def handle_fetch_all(stashdb_url, stashdb_api_key, force_refresh=False):
 
     try:
         tags = query_all_tags(stashdb_url, stashdb_api_key)
-    except Exception as e:
+    except StashDBAPIError as e:
         log.LogError(f"Error fetching tags from {stashdb_url}: {e}")
-        raise
+        return {"error": str(e), "auth_error": e.is_auth_error}
 
     elapsed = time.time() - start_time
     log.LogInfo(f"Fetched {len(tags)} tags in {elapsed:.1f}s")
@@ -529,75 +519,119 @@ def handle_clear_cache(stashdb_url):
     return {"success": success, "endpoint": stashdb_url}
 
 
-def handle_sync_scene_tags(server_connection, stash_config, api_key):
+def handle_sync_scene_tags(server_connection):
     """
-    Handle sync_scene_tags mode - sync tags from StashDB to local scenes.
+    Handle sync_scene_tags mode - sync tags from every configured stash-box
+    that has an API key to the local scenes linked to it.
 
     Args:
         server_connection: Stash server connection info
-        stash_config: Full Stash configuration
-        api_key: Stash API key for authentication
 
     Returns:
-        Dict with sync results
+        Dict with sync results, or with `error` if the run stopped or no scene synced
     """
     from stashdb_scene_sync import sync_scene_tags
-    from stashapi.stashapp import StashInterface
 
-    # Initialize Stash interface with API key for long-running operations
-    # Session cookies can expire during long sync operations (see stash#5332)
-    connection_with_api_key = {**server_connection, "ApiKey": api_key}
-    stash = StashInterface(connection_with_api_key)
-
-    # Get StashDB configuration from Stash
     try:
-        stash_boxes = stash_config.get("general", {}).get("stashBoxes", [])
-    except Exception as e:
+        stash_config = LocalStash(server_connection).configuration()
+    except StashError as e:
         log.LogError(f"Failed to get Stash configuration: {e}")
         return {"error": f"Failed to get Stash configuration: {e}"}
 
-    if not stash_boxes:
-        log.LogWarning("No stash-box endpoints configured in Stash")
-        return {"error": "No stash-box endpoints configured. Go to Settings > Metadata Providers to add StashDB."}
+    general = stash_config.get("general") or {}
 
-    # Use first stash-box (typically StashDB)
-    stashdb_config = stash_boxes[0]
-    stashdb_url = stashdb_config.get("endpoint", "")
-    stashdb_api_key = stashdb_config.get("api_key", "")
+    # Session cookies can expire during a long sync (stash#5332), so prefer the API key.
+    api_key = general.get("apiKey") or None
+    if not api_key:
+        log.LogWarning("No Stash API key configured - using session cookie (may time out)")
+    client = LocalStash(server_connection, api_key=api_key)
 
-    if not stashdb_url or not stashdb_api_key:
-        log.LogError("StashDB endpoint or API key not configured")
-        return {"error": "StashDB endpoint or API key not configured"}
+    boxes = []
+    for box in general.get("stashBoxes") or []:
+        if not box.get("endpoint"):
+            continue
+        if not box.get("api_key"):
+            log.LogWarning(f"Skipping {box.get('name') or box['endpoint']}: no API key configured")
+            continue
+        boxes.append(box)
+    if not boxes:
+        log.LogWarning("No stash-box endpoints with an API key configured in Stash")
+        return {"error": "No stash-box endpoints with an API key are configured. "
+                         "Go to Settings > Metadata Providers to add StashDB."}
 
-    log.LogInfo(f"Using stash-box endpoint: {stashdb_url}")
-
-    # Get dry_run setting from plugin config (safe-defaults on malformed config)
+    # Settings come from what's saved in Stash (dry run safe-defaults on malformed config)
+    plugin_config = (stash_config.get("plugins") or {}).get(PLUGIN_ID) or {}
     dry_run = resolve_sync_dry_run(stash_config)
-
     sync_settings = {
-        "dry_run": dry_run
+        "dry_run": dry_run,
+        "tag_blacklist": plugin_config.get("tagBlacklist", DEFAULT_PLUGIN_SETTINGS["tagBlacklist"]),
     }
 
-    # Run sync
+    # A dry run reads the history too (so its preview leaves out removed tags) but doesn't record.
+    history_path = get_sync_history_path()
     try:
-        stats = sync_scene_tags(stash, stashdb_url, stashdb_api_key, sync_settings)
-        return {
-            "success": True,
-            "dry_run": dry_run,
-            "total_scenes": stats.total_scenes,
-            "processed": stats.processed,
-            "updated": stats.updated,
-            "no_changes": stats.no_changes,
-            "skipped": stats.skipped,
-            "errors": stats.errors,
-            "tags_added": stats.tags_added_total,
-            "tags_skipped": stats.tags_skipped_total
-        }
+        history = SyncHistory(history_path)
+    except sqlite3.Error as e:
+        log.LogError(f"Could not open the scene sync history {history_path}: {e}")
+        return {"error": f"Could not open the scene sync history {history_path}: {e}. "
+                         "Run the \"Reset Scene Tag Sync History\" task to delete it and start over."}
+    log.LogDebug(f"Scene sync history: {history_path}")
+
+    try:
+        stats = sync_scene_tags(client, boxes, sync_settings, history=history)
     except Exception as e:
         log.LogError(f"Sync failed: {e}")
         import traceback
         log.LogDebug(traceback.format_exc())
         return {"error": str(e)}
+    finally:
+        try:
+            history.close()
+        except sqlite3.Error as e:
+            log.LogError(f"Could not save the scene sync history: {e}")
+
+    result = {"dry_run": dry_run, **stats.counts(), "by_endpoint": stats.by_endpoint}
+    error = stats.error
+    if not error and stats.processed == 0 and stats.errors > 0:
+        error = f"All {stats.errors} scenes failed to sync. See the Stash log for details."
+    if error:
+        return {"error": error, **result}
+    return {"success": True, **result}
+
+
+def handle_reset_sync_history():
+    """
+    Handle reset_sync_history mode - empty the scene sync history, so the next
+    sync considers every stash-box tag again (adding back ones removed from scenes).
+
+    Returns:
+        Dict with `cleared` (scenes forgotten), or with `error`
+    """
+    path = get_sync_history_path()
+    if not os.path.exists(path):
+        log.LogInfo("Scene sync history is already empty")
+        return {"success": True, "cleared": 0}
+    cleared = None
+    try:
+        history = SyncHistory(path)
+        try:
+            cleared = history.reset()
+        finally:
+            history.close()
+    except sqlite3.Error as e:
+        log.LogWarning(f"Scene sync history {path} is unreadable ({e}); deleting it")
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(path + suffix):
+                os.remove(path + suffix)
+    except OSError as e:
+        log.LogError(f"Could not delete the scene sync history {path}: {e}")
+        return {"error": f"Could not delete the scene sync history: {e}"}
+    if cleared is None:
+        return {"success": True, "cleared": None,
+                "note": "History file was unreadable and has been deleted."}
+    log.LogInfo(f"Scene sync history reset: forgot {cleared} scenes")
+    return {"success": True, "cleared": cleared}
 
 
 def main():
@@ -617,17 +651,25 @@ def main():
     log.LogDebug(f"tagManager called with mode: {mode}")
     log.LogTrace(f"Args keys: {list(args.keys())}")
 
-    # Get settings from server connection or args
     server_connection = input_data.get("server_connection", {})
-    # For now, settings come from args (JS passes them)
-    settings = get_settings_from_config(args.get("settings", {}))
+    plugin_data.configure(server_connection)
+    settings = get_settings_from_config(DEFAULT_PLUGIN_SETTINGS)  # overridden from Stash's config below
+
+    # Needs no stash-box (nor Stash)
+    if mode == "reset_sync_history":
+        log.LogInfo("Resetting scene tag sync history")
+        print(json.dumps({"output": handle_reset_sync_history()}))
+        return
 
     # The UI says which stash-box it has selected; the URL we use (also the cache key)
     # and its API key come from Stash's config. Scene sync resolves its own below.
     if mode != "sync_scene_tags":
         try:
-            stash_config = stash_graphql(server_connection, STASHBOX_CONFIG_QUERY).get("configuration") or {}
+            stash_config = LocalStash(server_connection).configuration()
             stashdb_url, stashdb_api_key = resolve_stashbox(args.get("stashdb_url"), stash_config)
+            # Settings come from what's saved in Stash, never from the browser.
+            plugin_config = (stash_config.get("plugins") or {}).get(plugin_data.PLUGIN_ID) or {}
+            settings = get_settings_from_config({**DEFAULT_PLUGIN_SETTINGS, **plugin_config})
         except Exception as e:
             log.LogError(f"Could not resolve stash-box endpoint: {e}")
             print(json.dumps({"output": {"error": str(e)}}))
@@ -647,25 +689,7 @@ def main():
 
     if mode == "sync_scene_tags":
         log.LogInfo("Starting scene tag sync task")
-        
-        from stashapi.stashapp import StashInterface
-        
-        # Get stash config for stash-box credentials and API key
-        stash = StashInterface(server_connection)
-        try:
-            stash_config = stash.get_configuration()
-        except Exception as e:
-            log.LogError(f"Failed to get Stash configuration: {e}")
-            print(json.dumps({"output": {"error": f"Failed to get configuration: {e}"}}))
-            return
-
-        # Get the Stash API key for long-running sync operations
-        # Session cookies can expire during multi-hour syncs (stash#5332)
-        api_key = stash_config.get("general", {}).get("apiKey", "")
-        if not api_key:
-            log.LogWarning("No Stash API key configured - using session cookie (may timeout)")
-
-        result = handle_sync_scene_tags(server_connection, stash_config, api_key)
+        result = handle_sync_scene_tags(server_connection)
         print(json.dumps({"output": result}))
         return
 
@@ -685,11 +709,7 @@ def main():
 
             log.LogDebug(f"Searching for tag: {tag_name}")
 
-            # Pass cached tags if provided (from JS cache)
-            stashdb_tags = args.get("stashdb_tags")
-            if stashdb_tags:
-                log.LogDebug(f"Using {len(stashdb_tags)} cached tags from JS")
-            result = handle_search(tag_name, stashdb_url, stashdb_api_key, settings, stashdb_tags)
+            result = handle_search(tag_name, stashdb_url, stashdb_api_key, settings)
 
         elif mode == "fetch_all":
             force_refresh = args.get("force_refresh", False)
@@ -701,6 +721,10 @@ def main():
             result = {"error": f"Unknown mode: {mode}"}
 
         output = {"output": result}
+
+    except StashDBAPIError as e:
+        log.LogError(f"StashDB error in mode '{mode}': {e}")
+        output = {"output": {"error": str(e), "auth_error": e.is_auth_error}}
 
     except Exception as e:
         log.LogError(f"Error in mode '{mode}': {e}")

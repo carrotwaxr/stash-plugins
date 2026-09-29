@@ -1,7 +1,7 @@
 """Tests for scene sync blacklist integration.
 
-These tests verify that the blacklist filtering works correctly
-when processing scenes from StashDB.
+These tests verify that the blacklist from settings["tag_blacklist"] filters
+stash-box tags before they are matched and added to local scenes.
 
 Run with: python -m pytest plugins/tagManager/tests/test_scene_sync_blacklist.py -v
 """
@@ -11,157 +11,76 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tag_cache import TagCache
-from blacklist import Blacklist
+from tests.test_stashdb_scene_sync import (
+    FakeStash, FakeRemote, STASHDB, STASHDB_BOX, remote_tag, run_sync, scene, tag,
+)
 
 
-class TestProcessSceneWithBlacklist(unittest.TestCase):
-    """Test scene processing with blacklist filtering."""
+class TestSyncSceneTagsWithBlacklist(unittest.TestCase):
+    """Scene sync with blacklist filtering."""
 
     def setUp(self):
         """Set up test fixtures."""
-        self.endpoint = "https://stashdb.org/graphql"
         self.local_tags = [
-            {"id": "1", "name": "Anal", "aliases": [], "stash_ids": []},
-            {"id": "2", "name": "4K Available", "aliases": [], "stash_ids": []},
-            {"id": "3", "name": "1080p", "aliases": [], "stash_ids": []},
-            {"id": "4", "name": "Blonde", "aliases": [], "stash_ids": []},
+            tag("1", "Anal"),
+            tag("2", "4K Available"),
+            tag("3", "1080p"),
+            tag("4", "Blonde"),
         ]
-        self.tag_cache = TagCache.build(self.local_tags)
+        self.remote = FakeRemote()
+        self.remote.add(STASHDB, "sd-1", [
+            remote_tag("stashdb-1", "Anal"),
+            remote_tag("stashdb-2", "4K Available"),
+            remote_tag("stashdb-3", "1080p"),
+            remote_tag("stashdb-4", "Blonde"),
+        ])
+
+    def sync(self, tag_blacklist, dry_run=False):
+        client = FakeStash(tags=self.local_tags, scenes=[scene("scene-1", [(STASHDB, "sd-1")])])
+        stats = run_sync(client, self.remote, [STASHDB_BOX],
+                         {"dry_run": dry_run, "tag_blacklist": tag_blacklist})
+        added = [tag_id for _, tag_ids in client.add_calls for tag_id in tag_ids]
+        return stats, added
 
     def test_filters_blacklisted_tags_literal(self):
-        """Should not process tags that match literal blacklist."""
-        from stashdb_scene_sync import process_scene
+        """Should not add tags that match a literal blacklist entry."""
+        stats, added = self.sync("4K Available")
 
-        blacklist = Blacklist("4K Available")
-
-        local_scene = {"id": "scene-1", "tags": []}
-        stashdb_scene = {
-            "tags": [
-                {"id": "stashdb-1", "name": "Anal"},
-                {"id": "stashdb-2", "name": "4K Available"},  # Blacklisted
-                {"id": "stashdb-3", "name": "Blonde"}
-            ]
-        }
-        settings = {"dry_run": True}
-
-        result = process_scene(
-            local_scene, stashdb_scene, self.tag_cache,
-            stash=None, settings=settings, endpoint=self.endpoint,
-            blacklist=blacklist
-        )
-
-        # Should add Anal and Blonde, but NOT 4K Available
-        self.assertEqual(result.tags_added, 2)
-        self.assertIn("1", result.merged_tag_ids)  # Anal
-        self.assertIn("4", result.merged_tag_ids)  # Blonde
-        self.assertNotIn("2", result.merged_tag_ids)  # 4K Available is blacklisted
+        self.assertEqual(added, ["1", "3", "4"])  # Anal, 1080p, Blonde; not 4K Available
+        self.assertEqual(stats.tags_added_total, 3)
 
     def test_filters_blacklisted_tags_regex(self):
-        """Should not process tags that match regex blacklist."""
-        from stashdb_scene_sync import process_scene
-
+        """Should not add tags that match a regex blacklist entry."""
         # Regex to match resolution patterns like 1080p, 720p, etc.
-        blacklist = Blacklist(r"/^\d+p$")
+        stats, added = self.sync(r"/^\d+p$")
 
-        local_scene = {"id": "scene-1", "tags": []}
-        stashdb_scene = {
-            "tags": [
-                {"id": "stashdb-1", "name": "Anal"},
-                {"id": "stashdb-2", "name": "1080p"},  # Blacklisted by regex
-                {"id": "stashdb-3", "name": "Blonde"}
-            ]
-        }
-        settings = {"dry_run": True}
-
-        result = process_scene(
-            local_scene, stashdb_scene, self.tag_cache,
-            stash=None, settings=settings, endpoint=self.endpoint,
-            blacklist=blacklist
-        )
-
-        # Should add Anal and Blonde, but NOT 1080p
-        self.assertEqual(result.tags_added, 2)
-        self.assertIn("1", result.merged_tag_ids)  # Anal
-        self.assertIn("4", result.merged_tag_ids)  # Blonde
-        self.assertNotIn("3", result.merged_tag_ids)  # 1080p is blacklisted
+        self.assertEqual(added, ["1", "2", "4"])  # 1080p is blacklisted
 
     def test_blacklist_case_insensitive(self):
         """Blacklist literal matching should be case-insensitive."""
-        from stashdb_scene_sync import process_scene
+        stats, added = self.sync("4k available")  # Lowercase
 
-        blacklist = Blacklist("4k available")  # Lowercase
-
-        local_scene = {"id": "scene-1", "tags": []}
-        stashdb_scene = {
-            "tags": [
-                {"id": "stashdb-1", "name": "4K Available"},  # Different case
-            ]
-        }
-        settings = {"dry_run": True}
-
-        result = process_scene(
-            local_scene, stashdb_scene, self.tag_cache,
-            stash=None, settings=settings, endpoint=self.endpoint,
-            blacklist=blacklist
-        )
-
-        # Should NOT add 4K Available (blacklist is case-insensitive)
-        self.assertEqual(result.tags_added, 0)
+        self.assertEqual(added, ["1", "3", "4"])  # 4K Available is blacklisted
 
     def test_empty_blacklist_processes_all_tags(self):
         """Empty blacklist should process all tags normally."""
-        from stashdb_scene_sync import process_scene
+        stats, added = self.sync("")
 
-        blacklist = Blacklist("")
-
-        local_scene = {"id": "scene-1", "tags": []}
-        stashdb_scene = {
-            "tags": [
-                {"id": "stashdb-1", "name": "Anal"},
-                {"id": "stashdb-2", "name": "4K Available"},
-                {"id": "stashdb-3", "name": "1080p"}
-            ]
-        }
-        settings = {"dry_run": True}
-
-        result = process_scene(
-            local_scene, stashdb_scene, self.tag_cache,
-            stash=None, settings=settings, endpoint=self.endpoint,
-            blacklist=blacklist
-        )
-
-        # Should add all 3 tags
-        self.assertEqual(result.tags_added, 3)
+        self.assertEqual(added, ["1", "2", "3", "4"])
 
     def test_multiple_blacklist_patterns(self):
         """Should filter tags matching any blacklist pattern."""
-        from stashdb_scene_sync import process_scene
-
         # Multiple patterns: literal + regex
-        blacklist = Blacklist("4K Available\n/^\\d+p$")
+        stats, added = self.sync("4K Available\n/^\\d+p$")
 
-        local_scene = {"id": "scene-1", "tags": []}
-        stashdb_scene = {
-            "tags": [
-                {"id": "stashdb-1", "name": "Anal"},
-                {"id": "stashdb-2", "name": "4K Available"},  # Blacklisted (literal)
-                {"id": "stashdb-3", "name": "1080p"},         # Blacklisted (regex)
-                {"id": "stashdb-4", "name": "Blonde"}
-            ]
-        }
-        settings = {"dry_run": True}
+        self.assertEqual(added, ["1", "4"])  # Anal, Blonde
 
-        result = process_scene(
-            local_scene, stashdb_scene, self.tag_cache,
-            stash=None, settings=settings, endpoint=self.endpoint,
-            blacklist=blacklist
-        )
+    def test_blacklist_applies_in_dry_run(self):
+        """A dry run counts only the tags the blacklist lets through."""
+        stats, added = self.sync("4K Available, 1080p", dry_run=True)
 
-        # Should only add Anal and Blonde
-        self.assertEqual(result.tags_added, 2)
-        self.assertIn("1", result.merged_tag_ids)  # Anal
-        self.assertIn("4", result.merged_tag_ids)  # Blonde
+        self.assertEqual(added, [])
+        self.assertEqual(stats.tags_added_total, 2)
 
 
 if __name__ == '__main__':

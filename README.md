@@ -21,7 +21,7 @@ Most of these plugins run a Python script, using the Python that Stash finds. St
 | Plugin | Python packages |
 |---|---|
 | mcMetadata | `stashapp-tools` |
-| Tag Manager | `thefuzz` and `python-Levenshtein` for fuzzy matching; `stashapp-tools` for the Sync Scene Tags task |
+| Tag Manager | `thefuzz` and `python-Levenshtein`, optional (better fuzzy matching) |
 | Missing Scenes, Scene Matcher, Performer Image Search | none (standard library only) |
 | Studio Manager | none (no Python) |
 

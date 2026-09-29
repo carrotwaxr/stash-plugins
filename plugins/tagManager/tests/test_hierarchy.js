@@ -1,312 +1,329 @@
 /**
- * Unit tests for hierarchy editing functions.
+ * Tag Hierarchy page, against the REAL tag-manager.js (via the vm harness):
+ * tree building, circular-reference checks, edit state reset, re-fetched saves,
+ * alias search, lazy tree rendering (each copy of a multi-parent tag expands on
+ * its own), dialog listener cleanup and keyboard scoping.
  * Run with: node plugins/tagManager/tests/test_hierarchy.js
  */
+const { loadTagManager, createElement, createQueryableElement } = require("./harness");
 
-// Test runner
-let passed = 0;
 let failed = 0;
-
-function test(name, fn) {
-  try {
-    fn();
-    console.log(`✓ ${name}`);
-    passed++;
-  } catch (e) {
-    console.log(`✗ ${name}`);
-    console.log(`  Error: ${e.message}`);
-    failed++;
-  }
+function check(name, ok, detail) {
+  if (ok) console.log(`  ok  ${name}`);
+  else { failed++; console.log(`FAIL  ${name}${detail ? "\n      " + detail : ""}`); }
 }
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const show = (v) => JSON.stringify(v);
 
-function assertEqual(actual, expected, msg = '') {
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(`${msg}\n  Expected: ${JSON.stringify(expected)}\n  Actual: ${JSON.stringify(actual)}`);
-  }
-}
+const T = (id, name, parents = [], extra = {}) => ({
+  id, name, parents: parents.map((p) => ({ id: p })), children: [], ...extra,
+});
 
-// ============================================================================
-// wouldCreateCircularRef tests
-// ============================================================================
-
-// Mock hierarchy data for circular reference tests
-let hierarchyTags = [];
-
-/**
- * Check if making potentialParentId a parent of tagId would create a circular reference.
- * This happens if tagId is already an ancestor of potentialParentId.
- */
-function wouldCreateCircularRef(potentialParentId, tagId) {
-  const ancestors = new Set();
-
-  function collectAncestors(id) {
-    const tag = hierarchyTags.find(t => t.id === id);
-    if (!tag || !tag.parents) return;
-
-    for (const parent of tag.parents) {
-      if (ancestors.has(parent.id)) continue;
-      ancestors.add(parent.id);
-      collectAncestors(parent.id);
-    }
+(async () => {
+  // ---------------- wouldCreateCircularRef (real function) ----------------
+  console.log("\n=== wouldCreateCircularRef ===");
+  {
+    const tm = loadTagManager();
+    const circ = (tags, pending, a, b) => {
+      tm.setState({ hierarchyTags: tags, pendingChanges: pending || [] });
+      return tm.exports.wouldCreateCircularRef(a, b);
+    };
+    check("direct cycle", circ([T("1", "P"), T("2", "C", ["1"])], [], "2", "1") === true);
+    check("indirect cycle", circ([T("1", "G"), T("2", "P", ["1"]), T("3", "C", ["2"])], [], "3", "1") === true);
+    check("unrelated tags are fine", circ([T("1", "A"), T("2", "B")], [], "1", "2") === false);
+    check("sibling as parent is fine", circ([T("1", "P"), T("2", "A", ["1"]), T("3", "B", ["1"])], [], "2", "3") === false);
+    check("unknown tag is fine", circ([T("1", "Root")], [], "1", "999") === false);
+    const diamond = [T("A", "A"), T("B", "B", ["A"]), T("C", "C", ["A"]), T("D", "D", ["B", "C"])];
+    check("diamond: D above A is a cycle", circ(diamond, [], "D", "A") === true);
+    check("diamond: A above D is fine", circ(diamond, [], "A", "D") === false);
+    // pending changes count
+    const flat = [T("1", "A"), T("2", "B")];
+    check("wouldCreateCircularRef honors pending add",
+      circ(flat, [{ type: "add-parent", tagId: "2", parentId: "1" }], "2", "1") === true);
+    const linked = [T("1", "A"), T("2", "B", ["1"])];
+    check("wouldCreateCircularRef honors pending remove",
+      circ(linked, [{ type: "remove-parent", tagId: "2", parentId: "1" }], "2", "1") === false);
   }
 
-  collectAncestors(potentialParentId);
-  return ancestors.has(tagId);
-}
+  // ---------------- buildTagTree / getTreeStats (real functions) ----------------
+  console.log("\n=== buildTagTree / getTreeStats ===");
+  {
+    const tm = loadTagManager();
+    const { buildTagTree, getTreeStats } = tm.exports;
+    let tree = buildTagTree([T("1", "Root2"), T("2", "Root1")]);
+    check("roots sorted", eq(tree.map((n) => n.name), ["Root1", "Root2"]));
+    tree = buildTagTree([T("1", "P"), T("2", "Zed", ["1"]), T("3", "Apple", ["1"])]);
+    check("children sorted, parentContextId set",
+      eq(tree[0].childNodes.map((n) => n.name), ["Apple", "Zed"]) &&
+      tree[0].parentContextId === null && tree[0].childNodes[0].parentContextId === "1");
+    tree = buildTagTree([T("1", "PA"), T("2", "PB"), T("3", "M", ["1", "2"])]);
+    check("multi-parent tag appears under each parent",
+      tree.every((r) => r.childNodes.length === 1 && r.childNodes[0].name === "M"));
+    check("empty input", buildTagTree([]).length === 0);
+    const stats = getTreeStats([
+      T("1", "Root", [], { child_count: 2, parent_count: 0 }),
+      T("2", "C1", ["1"], { child_count: 0, parent_count: 1 }),
+      T("3", "C2", ["1"], { child_count: 1, parent_count: 1 }),
+      T("4", "G", ["3"], { child_count: 0, parent_count: 1 }),
+    ]);
+    check("stats", eq(stats, { totalTags: 4, rootTags: 1, tagsWithChildren: 2, tagsWithParents: 3 }), show(stats));
+  }
 
-console.log('\n=== wouldCreateCircularRef tests ===\n');
-
-test('detects direct circular reference (child becoming parent)', () => {
-  // Setup: Parent -> Child
-  hierarchyTags = [
-    { id: '1', name: 'Parent', parents: [] },
-    { id: '2', name: 'Child', parents: [{ id: '1' }] },
-  ];
-
-  // Adding Child as parent of Parent would create: Parent -> Child -> Parent
-  assertEqual(wouldCreateCircularRef('2', '1'), true);
-});
-
-test('detects indirect circular reference across multiple levels', () => {
-  // Setup: Grandparent -> Parent -> Child
-  hierarchyTags = [
-    { id: '1', name: 'Grandparent', parents: [] },
-    { id: '2', name: 'Parent', parents: [{ id: '1' }] },
-    { id: '3', name: 'Child', parents: [{ id: '2' }] },
-  ];
-
-  // Adding Child as parent of Grandparent would create a cycle
-  assertEqual(wouldCreateCircularRef('3', '1'), true);
-});
-
-test('allows valid parent-child relationship', () => {
-  hierarchyTags = [
-    { id: '1', name: 'TagA', parents: [] },
-    { id: '2', name: 'TagB', parents: [] },
-  ];
-
-  // Adding TagA as parent of TagB is fine - no existing relationship
-  assertEqual(wouldCreateCircularRef('1', '2'), false);
-});
-
-test('allows adding sibling as parent', () => {
-  // Setup: Parent has two children (siblings)
-  hierarchyTags = [
-    { id: '1', name: 'Parent', parents: [] },
-    { id: '2', name: 'ChildA', parents: [{ id: '1' }] },
-    { id: '3', name: 'ChildB', parents: [{ id: '1' }] },
-  ];
-
-  // Adding ChildA as parent of ChildB is allowed (creates multi-parent)
-  assertEqual(wouldCreateCircularRef('2', '3'), false);
-});
-
-test('handles tags with no parents', () => {
-  hierarchyTags = [
-    { id: '1', name: 'Root', parents: [] },
-  ];
-
-  assertEqual(wouldCreateCircularRef('1', '999'), false);
-});
-
-test('handles diamond inheritance pattern', () => {
-  // Diamond: A -> B, A -> C, B -> D, C -> D
-  hierarchyTags = [
-    { id: 'A', name: 'A', parents: [] },
-    { id: 'B', name: 'B', parents: [{ id: 'A' }] },
-    { id: 'C', name: 'C', parents: [{ id: 'A' }] },
-    { id: 'D', name: 'D', parents: [{ id: 'B' }, { id: 'C' }] },
-  ];
-
-  // Adding D as parent of A would create cycle through either B or C path
-  assertEqual(wouldCreateCircularRef('D', 'A'), true);
-
-  // Adding A as additional parent of D is fine (already exists via B and C)
-  assertEqual(wouldCreateCircularRef('A', 'D'), false);
-});
-
-// ============================================================================
-// buildTagTree tests
-// ============================================================================
-
-/**
- * Build a tree structure from flat tag list.
- * Tags with multiple parents appear under each parent.
- */
-function buildTagTree(tags) {
-  const tagMap = new Map();
-  tags.forEach(tag => {
-    tagMap.set(tag.id, {
-      ...tag,
-      childNodes: []
+  // ---------------- mount resets edit state ----------------
+  console.log("\n=== mount resets edit state ===");
+  {
+    const tm = loadTagManager();
+    check("resetHierarchyEditState is exported", typeof tm.exports.resetHierarchyEditState === "function");
+    const stale = () => tm.setState({
+      isEditMode: true, selectedTagId: "9", copiedTagId: "8",
+      pendingChanges: [{ type: "add-parent", tagId: "1", parentId: "2" }],
+      originalParentMap: new Map([["1", ["5"]]]),
     });
-  });
+    stale();
+    tm.exports.resetHierarchyEditState();
+    let st = tm.getState();
+    check("reset clears edit mode, pending, snapshot, selection",
+      st.isEditMode === false && st.pendingChanges.length === 0 && st.originalParentMap.size === 0 &&
+      st.selectedTagId === null && st.copiedTagId === null, show([st.isEditMode, st.pendingChanges, st.selectedTagId]));
 
-  const roots = [];
-
-  tags.forEach(tag => {
-    const node = tagMap.get(tag.id);
-
-    if (tag.parents.length === 0) {
-      roots.push({ ...node, parentContextId: null });
-    } else {
-      tag.parents.forEach(parent => {
-        const parentNode = tagMap.get(parent.id);
-        if (parentNode) {
-          parentNode.childNodes.push({ ...node, parentContextId: parent.id });
-        }
-      });
-    }
-  });
-
-  const sortByName = (a, b) => a.name.localeCompare(b.name);
-  roots.sort(sortByName);
-
-  function sortChildren(node) {
-    if (node.childNodes.length > 0) {
-      node.childNodes.sort(sortByName);
-      node.childNodes.forEach(sortChildren);
-    }
+    const page = tm.routes[1];
+    check("hierarchy route registered", !!page);
+    tm.effects.length = 0;
+    page.component();
+    check("component registers a mount effect", tm.effects.length === 1);
+    stale();
+    const cleanup = tm.effects[0]();
+    st = tm.getState();
+    check("mount effect clears stale pending changes and edit mode",
+      st.isEditMode === false && st.pendingChanges.length === 0, show(st.pendingChanges));
+    stale();
+    if (typeof cleanup === "function") cleanup();
+    st = tm.getState();
+    check("unmount cleanup clears edit state too",
+      typeof cleanup === "function" && st.isEditMode === false && st.pendingChanges.length === 0);
   }
-  roots.forEach(sortChildren);
 
-  return roots;
-}
+  // ---------------- savePendingChanges ----------------
+  console.log("\n=== savePendingChanges ===");
+  {
+    const mutations = [];
+    const tm = loadTagManager({
+      fetchResponses: {
+        FindTag: (body) => ({
+          data: { findTag: { parents: body.variables.id === "1" ? [{ id: "7" }, { id: "8" }] : [{ id: "50" }] } },
+        }),
+        TagUpdate: (body) => {
+          mutations.push(body.variables.input);
+          if (body.variables.input.id === "2") return { errors: [{ message: "boom" }] };
+          return { data: { tagUpdate: { id: body.variables.input.id, name: "x", parents: [] } } };
+        },
+      },
+    });
+    tm.setState({
+      hierarchyTags: [T("1", "One", ["3"]), T("2", "Two", ["4"]), T("3", "Three"), T("4", "Four"), T("9", "Nine")],
+      isEditMode: true,
+      originalParentMap: new Map([["1", ["3"]], ["2", ["4"]]]),
+      pendingChanges: [
+        { type: "add-parent", tagId: "1", tagName: "One", parentId: "9", parentName: "Nine" },
+        { type: "remove-parent", tagId: "1", tagName: "One", parentId: "8", parentName: "Eight" },
+        { type: "add-parent", tagId: "2", tagName: "Two", parentId: "9", parentName: "Nine" },
+      ],
+    });
+    const ok = await tm.exports.savePendingChanges();
+    const m1 = mutations.find((m) => m.id === "1");
+    check("save re-fetches parents (uses fresh FindTag, not the snapshot)",
+      m1 && eq([...m1.parent_ids].sort(), ["7", "9"]), show(mutations));
+    check("FindTag was queried per tag", tm.fetchCalls.filter((c) => c.op === "FindTag").length === 2);
+    const st = tm.getState();
+    check("failed change stays pending, successful ones are removed",
+      st.pendingChanges.length === 1 && st.pendingChanges[0].tagId === "2", show(st.pendingChanges));
+    check("save reports failure", ok === false);
+    const one = st.pendingChanges.length && tm.getState().hierarchyTags.find((t) => t.id === "1");
+    check("saved tag's local parents updated", one && eq(one.parents.map((p) => p.id).sort(), ["7", "9"]), show(one));
 
-console.log('\n=== buildTagTree tests ===\n');
+    // exitEditMode(true) with a failure stays in edit mode
+    tm.setState({ isEditMode: true });
+    await tm.exports.exitEditMode(true);
+    check("edit mode kept when a save fails", tm.getState().isEditMode === true && tm.getState().pendingChanges.length === 1);
+  }
 
-test('builds tree with root tags', () => {
-  const tags = [
-    { id: '1', name: 'Root1', parents: [] },
-    { id: '2', name: 'Root2', parents: [] },
-  ];
+  // ---------------- alias search ----------------
+  console.log("\n=== aliases fetched ===");
+  {
+    const tm = loadTagManager({ fetchResponses: { AllTagsWithHierarchy: { data: { allTags: [] } } } });
+    await tm.exports.fetchAllTagsWithHierarchy();
+    const call = tm.fetchCalls.find((c) => c.op === "AllTagsWithHierarchy");
+    check("AllTagsWithHierarchy query requests aliases", call && /\baliases\b/.test(call.body.query));
+  }
 
-  const tree = buildTagTree(tags);
-  assertEqual(tree.length, 2);
-  assertEqual(tree[0].name, 'Root1'); // Sorted alphabetically
-  assertEqual(tree[1].name, 'Root2');
-});
+  // ---------------- search dialog listener cleanup ----------------
+  console.log("\n=== search dialog listeners ===");
+  {
+    const tm = loadTagManager();
+    const mk = (t) => {
+      const el = createQueryableElement(t);
+      el.focus = () => {};
+      const q = el.querySelector;
+      el.querySelector = (sel) => { const c = q(sel); if (c && !c.focus) c.focus = () => {}; return c; };
+      return el;
+    };
+    tm.document.createElement = mk;
+    const counts = tm.document.listenerCounts;
+    const open = () => {
+      const made = [];
+      const orig = tm.document.createElement;
+      tm.document.createElement = (t) => { const el = orig(t); made.push(el); return el; };
+      tm.exports.showTagSearchDialog("parent", T("1", "One"));
+      tm.document.createElement = orig;
+      return made;
+    };
+    let a0 = counts.add, r0 = counts.remove;
+    let made = open();
+    made[0].listeners.click[0]();   // backdrop click
+    check("keydown listener removed on backdrop close", counts.add - a0 === counts.remove - r0 && counts.add - a0 >= 1,
+      `add=${counts.add - a0} remove=${counts.remove - r0}`);
 
-test('builds tree with parent-child relationships', () => {
-  const tags = [
-    { id: '1', name: 'Parent', parents: [] },
-    { id: '2', name: 'Child', parents: [{ id: '1' }] },
-  ];
+    a0 = counts.add; r0 = counts.remove;
+    made = open();
+    tm.exports.closeTagSearchDialog();
+    check("keydown listener removed on programmatic close (result click path)",
+      counts.add - a0 === counts.remove - r0, `add=${counts.add - a0} remove=${counts.remove - r0}`);
 
-  const tree = buildTagTree(tags);
-  assertEqual(tree.length, 1);
-  assertEqual(tree[0].name, 'Parent');
-  assertEqual(tree[0].childNodes.length, 1);
-  assertEqual(tree[0].childNodes[0].name, 'Child');
-});
+    // Escape handler still works and removes exactly once
+    a0 = counts.add; r0 = counts.remove;
+    open();
+    tm.exports.closeTagSearchDialog();
+    tm.exports.closeTagSearchDialog();
+    check("closing twice does not double-remove", counts.remove - r0 === counts.add - a0);
+  }
 
-test('sets parentContextId for children', () => {
-  const tags = [
-    { id: '1', name: 'Parent', parents: [] },
-    { id: '2', name: 'Child', parents: [{ id: '1' }] },
-  ];
+  // ---------------- lazy tree rendering ----------------
+  console.log("\n=== tree rendering ===");
+  {
+    const tm = loadTagManager();
+    const { buildTagTree, renderTreeNode } = tm.exports;
+    const tree = buildTagTree([T("1", "Root", [], { child_count: 1 }), T("2", "Kid", ["1"], { child_count: 1 }), T("3", "Grandkid", ["2"])]);
+    tm.setState({ expandedNodes: new Set() });
+    let html = renderTreeNode(tree[0], true);
+    check("collapsed branch renders no children", html.includes('data-tag-id="1"') && !html.includes('data-tag-id="2"'), html.slice(0, 300));
+    check("collapsed branch keeps an empty children container", /th-children\s*"[^>]*data-parent-id="1"/.test(html));
+    tm.setState({ expandedNodes: new Set(["1"]) });
+    html = renderTreeNode(tree[0], true);
+    check("expanded node renders its children, but not a collapsed grandchild level",
+      html.includes('data-tag-id="2"') && !html.includes('data-tag-id="3"'));
+    check("expanded container has th-expanded", /th-children th-expanded/.test(html));
+    tm.setState({ expandedNodes: new Set(["1", "2"]) });
+    check("nested expanded renders all", renderTreeNode(tree[0], true).includes('data-tag-id="3"'));
+  }
 
-  const tree = buildTagTree(tags);
-  assertEqual(tree[0].parentContextId, null); // Root has no parent context
-  assertEqual(tree[0].childNodes[0].parentContextId, '1'); // Child knows its parent
-});
+  // ---------------- multi-parent lazy expand ----------------
+  console.log("\n=== multi-parent expand ===");
+  {
+    const tm = loadTagManager();
+    const tags = [
+      T("1", "PA", [], { child_count: 1 }), T("2", "PB", [], { child_count: 1 }),
+      T("3", "Multi", ["1", "2"], { child_count: 1 }), T("4", "Kid", ["3"]),
+    ];
+    tm.setState({ hierarchyTags: tags, hierarchyTree: tm.exports.buildTagTree(tags), expandedNodes: new Set() });
+    // Two collapsed, not-yet-rendered DOM copies of "Multi" (one under each parent)
+    const copy = () => {
+      const children = createElement("div");
+      children.classList.add("th-children");
+      const nodeEl = createElement("div");
+      nodeEl.children = [children];
+      const toggle = createElement("span");
+      toggle.dataset.tagId = "3";
+      toggle.closest = (sel) => (sel === ".th-node" ? nodeEl : null);
+      return { toggle, children };
+    };
+    const a = copy();
+    const b = copy();
+    const openCopies = () => [a, b].map((c) => c.children).filter((c) => c.classList.contains("th-expanded"));
+    const container = createElement("div");
+    container.querySelectorAll = (sel) => (sel === ".th-toggle" ? [a.toggle, b.toggle] : []);
+    container.querySelector = (sel) => (sel === '.th-children.th-expanded[data-parent-id="3"]' ? openCopies()[0] || null : null);
+    tm.exports.attachNodeHandlers(container, container);
+    const click = (c) => c.toggle.listeners.click[0]();
+    const isOpen = (c) => c.children.classList.contains("th-expanded");
+    const hasKid = (c) => c.children.innerHTML.includes('data-tag-id="4"');
 
-test('handles multi-parent tags (tag appears under each parent)', () => {
-  const tags = [
-    { id: '1', name: 'ParentA', parents: [] },
-    { id: '2', name: 'ParentB', parents: [] },
-    { id: '3', name: 'MultiChild', parents: [{ id: '1' }, { id: '2' }] },
-  ];
+    click(a);
+    check("copy A expands and renders its children", isOpen(a) && hasKid(a));
+    check("tag marked expanded", tm.getState().expandedNodes.has("3"));
+    click(b);
+    check("copy B then expands too (it does not take the collapse branch)", isOpen(b) && hasKid(b), b.children.innerHTML);
+    check("copy B shows the expanded arrow", b.toggle.innerHTML === "&#9660;", b.toggle.innerHTML);
+    check("copy A stays expanded", isOpen(a));
+    click(b);
+    check("collapsing B leaves A open", !isOpen(b) && isOpen(a) && b.toggle.innerHTML === "&#9654;");
+    check("tag stays marked while a copy is open", tm.getState().expandedNodes.has("3"));
+    click(a);
+    check("collapsing the last open copy unmarks the tag", !isOpen(a) && !tm.getState().expandedNodes.has("3"));
+  }
 
-  const tree = buildTagTree(tags);
-  assertEqual(tree.length, 2); // Two roots
+  // ---------------- keyboard ----------------
+  console.log("\n=== keyboard ===");
+  {
+    const tm = loadTagManager();
+    const insideTree = { tagName: "DIV", closest: (s) => (s === ".tag-hierarchy-container" ? container : null) };
+    const container = { classList: { contains: () => true }, querySelectorAll: () => [], contains: (n) => n === insideTree };
+    const outside = { tagName: "DIV", closest: () => null };
+    const input = { tagName: "INPUT", closest: (s) => (s === ".tag-hierarchy-container" ? container : null) };
+    const select = { tagName: "SELECT", closest: (s) => (s === ".tag-hierarchy-container" ? container : null) };
+    const editable = { tagName: "DIV", isContentEditable: true, closest: (s) => (s === ".tag-hierarchy-container" ? container : null) };
+    const ev = (o, target) => ({ key: "c", ctrlKey: true, target, preventDefault() { this.prevented = true; }, ...o });
+    const { shouldHandleHierarchyKey } = tm.exports;
 
-  // MultiChild should appear under both parents
-  const parentA = tree.find(t => t.name === 'ParentA');
-  const parentB = tree.find(t => t.name === 'ParentB');
+    check("helper: focus inside tree", shouldHandleHierarchyKey(ev({}, insideTree), insideTree) === true);
+    check("helper: focus outside tree", shouldHandleHierarchyKey(ev({}, outside), outside) === false);
+    check("helper: input in tree is not handled", shouldHandleHierarchyKey(ev({}, input), input) === false);
+    check("helper: select in tree is not handled", shouldHandleHierarchyKey(ev({}, select), select) === false);
+    check("helper: contentEditable is not handled", shouldHandleHierarchyKey(ev({}, editable), editable) === false);
+    check("helper: nothing focused but target in tree", shouldHandleHierarchyKey(ev({}, insideTree), null) === true);
+    check("helper: nothing focused, target outside", shouldHandleHierarchyKey(ev({}, outside), null) === false);
 
-  assertEqual(parentA.childNodes.length, 1);
-  assertEqual(parentB.childNodes.length, 1);
-  assertEqual(parentA.childNodes[0].name, 'MultiChild');
-  assertEqual(parentB.childNodes[0].name, 'MultiChild');
+    tm.document.querySelector = (sel) => (sel === ".tag-hierarchy-container" ? container : null);
+    const run = (event, active) => {
+      tm.document.activeElement = active;
+      tm.setState({ selectedTagId: "5", copiedTagId: null });
+      tm.exports.handleHierarchyKeyboard(event);
+      return tm.getState().copiedTagId;
+    };
+    let e = ev({}, insideTree);
+    check("ctrl+c copies when the tree is focused", run(e, insideTree) === "5" && e.prevented === true);
+    e = ev({ key: "C" }, insideTree);
+    check("uppercase C also copies", run(e, insideTree) === "5");
+    e = ev({ ctrlKey: false, metaKey: true }, insideTree);
+    check("cmd+c copies", run(e, insideTree) === "5");
+    e = ev({}, input);
+    check("ctrl+c ignored in inputs (native copy kept)", run(e, input) === null && !e.prevented);
+    e = ev({}, outside);
+    check("ctrl+c ignored when the tree is not focused", run(e, outside) === null && !e.prevented);
 
-  // Each copy should have correct parent context
-  assertEqual(parentA.childNodes[0].parentContextId, '1');
-  assertEqual(parentB.childNodes[0].parentContextId, '2');
-});
+    // Ctrl+V: needs copied + selected; ignored in input
+    const runPaste = (event, active) => {
+      tm.document.activeElement = active;
+      tm.setState({ selectedTagId: "5", copiedTagId: "6", hierarchyTags: [T("5", "Five"), T("6", "Six")], pendingChanges: [], isEditMode: false });
+      tm.exports.handleHierarchyKeyboard(event);
+      return tm.getState().pendingChanges.length;
+    };
+    e = ev({ key: "v" }, input);
+    check("ctrl+v ignored in inputs", runPaste(e, input) === 0 && !e.prevented);
+    e = ev({ key: "V" }, insideTree);
+    check("ctrl+v pastes in the tree (case-insensitive)", runPaste(e, insideTree) === 1 && e.prevented === true);
 
-test('sorts children alphabetically', () => {
-  const tags = [
-    { id: '1', name: 'Parent', parents: [] },
-    { id: '2', name: 'Zebra', parents: [{ id: '1' }] },
-    { id: '3', name: 'Apple', parents: [{ id: '1' }] },
-    { id: '4', name: 'Mango', parents: [{ id: '1' }] },
-  ];
+    // Delete
+    e = ev({ key: "Delete", ctrlKey: false }, select);
+    tm.document.activeElement = select;
+    tm.setState({ selectedTagId: "5" });
+    tm.exports.handleHierarchyKeyboard(e);
+    check("Delete ignored in a select", !e.prevented);
+    e = ev({ key: "Backspace", ctrlKey: false }, outside);
+    tm.document.activeElement = outside;
+    tm.exports.handleHierarchyKeyboard(e);
+    check("Backspace ignored when tree not focused", !e.prevented);
+  }
 
-  const tree = buildTagTree(tags);
-  const children = tree[0].childNodes;
-
-  assertEqual(children[0].name, 'Apple');
-  assertEqual(children[1].name, 'Mango');
-  assertEqual(children[2].name, 'Zebra');
-});
-
-test('handles empty input', () => {
-  const tree = buildTagTree([]);
-  assertEqual(tree.length, 0);
-});
-
-test('handles deep nesting', () => {
-  const tags = [
-    { id: '1', name: 'Level1', parents: [] },
-    { id: '2', name: 'Level2', parents: [{ id: '1' }] },
-    { id: '3', name: 'Level3', parents: [{ id: '2' }] },
-    { id: '4', name: 'Level4', parents: [{ id: '3' }] },
-  ];
-
-  const tree = buildTagTree(tags);
-  assertEqual(tree.length, 1);
-  assertEqual(tree[0].childNodes[0].childNodes[0].childNodes[0].name, 'Level4');
-});
-
-// ============================================================================
-// getTreeStats tests
-// ============================================================================
-
-function getTreeStats(tags) {
-  const totalTags = tags.length;
-  const rootTags = tags.filter(t => t.parents.length === 0).length;
-  const tagsWithChildren = tags.filter(t => t.child_count > 0).length;
-  const tagsWithParents = tags.filter(t => t.parent_count > 0).length;
-
-  return { totalTags, rootTags, tagsWithChildren, tagsWithParents };
-}
-
-console.log('\n=== getTreeStats tests ===\n');
-
-test('calculates correct stats', () => {
-  const tags = [
-    { id: '1', name: 'Root', parents: [], child_count: 2, parent_count: 0 },
-    { id: '2', name: 'Child1', parents: [{ id: '1' }], child_count: 0, parent_count: 1 },
-    { id: '3', name: 'Child2', parents: [{ id: '1' }], child_count: 1, parent_count: 1 },
-    { id: '4', name: 'Grandchild', parents: [{ id: '3' }], child_count: 0, parent_count: 1 },
-  ];
-
-  const stats = getTreeStats(tags);
-  assertEqual(stats.totalTags, 4);
-  assertEqual(stats.rootTags, 1);
-  assertEqual(stats.tagsWithChildren, 2); // Root and Child2
-  assertEqual(stats.tagsWithParents, 3); // Child1, Child2, Grandchild
-});
-
-// ============================================================================
-// Summary
-// ============================================================================
-
-console.log('\n=== Summary ===\n');
-console.log(`Passed: ${passed}`);
-console.log(`Failed: ${failed}`);
-
-if (failed > 0) {
-  process.exit(1);
-}
+  console.log(failed ? `\n${failed} FAILED` : "\nAll hierarchy tests passed");
+  process.exit(failed ? 1 : 0);
+})();

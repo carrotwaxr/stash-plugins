@@ -7,8 +7,8 @@ Match and sync local tags with stash-box endpoints. Bulk cleanup your tag librar
 - **Tag Matching** - Smart layered search (exact, alias, fuzzy, synonym) to match local tags with StashDB
 - **Browse & Import** - Browse StashDB tags by category and bulk import new tags
 - **Tag Hierarchy** - Visual tree view with drag-and-drop editing for parent/child relationships
-- **Scene Tag Sync** - Batch task to sync tags from StashDB to all matched scenes
-- **Tag Blacklist** - Filter unwanted tags using literal strings or regex patterns
+- **Scene Tag Sync** - Batch task to add stash-box tags to matched scenes, without re-adding tags you removed
+- **Tag Blacklist** - Filter unwanted tags using literal strings or regex patterns, with an on-page editor
 - **Multi-endpoint Support** - Works with StashDB, FansDB, and other stash-box instances
 
 > **Note**: While multi-endpoint support exists, the plugin is primarily tested with a single stash-box (StashDB). Using multiple endpoints simultaneously may produce unexpected behavior.
@@ -19,7 +19,7 @@ For detailed usage instructions, see the [User Guide](USERGUIDE.md).
 
 - Stash v0.28+ (v0.30+ recommended for full `stash_ids` support)
 - At least one stash-box endpoint configured in Stash (Settings → Metadata Providers → Stash-Box Endpoints)
-- Python 3.8+ with required packages (see Installation)
+- Python 3.9+ (no packages required; `thefuzz` and `python-Levenshtein` are optional, see Installation)
 
 ## Installation
 
@@ -39,9 +39,9 @@ For detailed usage instructions, see the [User Guide](USERGUIDE.md).
    - **macOS**: `~/.stash/plugins/`
    - **Linux**: `~/.stash/plugins/`
 
-### Step 2: Install Python Dependencies
+### Step 2: Install Optional Python Packages
 
-Tag Manager requires Python packages for fuzzy string matching. Open a terminal/command prompt and run:
+Tag Manager needs no Python packages to run, and Scene Tag Sync needs nothing extra. `thefuzz` and `python-Levenshtein` are optional: they only improve fuzzy tag matching. Without them Tag Manager falls back to basic matching. To install them, open a terminal/command prompt and run:
 
 **Windows (Command Prompt or PowerShell):**
 ```cmd
@@ -83,17 +83,26 @@ Go to **Settings → Plugins → Tag Manager**:
 |---------|-------------|---------|
 | Enable Fuzzy Search | Use fuzzy matching for typos | Enabled |
 | Enable Synonym Search | Use custom synonym mappings | Enabled |
-| Fuzzy Match Threshold | Minimum score (0-100) for fuzzy matches | 80 |
-| Tags Per Page | Number of tags shown per page | 25 |
-| Scene Tag Sync - Dry Run | Preview sync without making changes | Enabled |
-| Leave Parent Tags Alone | Import/match tags flat — don't create or assign category parent tags, keeping your own hierarchy untouched | Off |
-| Tag Blacklist | Patterns to exclude from matching | Empty |
+| Fuzzy Match Threshold | Minimum score (0-100) for fuzzy matches. 0 is allowed | 80 |
+| Tags Per Page | Number of tags shown per page (at least 1) | 25 |
+| Scene Tag Sync - Dry Run | Preview sync without making changes. Checks at most 200 scenes | Enabled |
+| Default to Stash-Box Name | In the merge dialog, pick the stash-box name instead of keeping the local name | Off |
+| Default to Stash-Box Description | In the merge dialog, pick the stash-box description instead of keeping the local one | Off |
+| Leave Parent Tags Alone | Import/match tags flat: don't create or assign category parent tags, keeping your own hierarchy untouched | Off |
+| Category Mappings (Internal) | Saved category to parent tag choices, kept per stash-box. Managed automatically, don't edit by hand | `{}` |
+| Tag Blacklist | Patterns to exclude from matching and sync. Separate with `,` or `;`, or use the Blacklist button on the Match tab. See the [User Guide](USERGUIDE.md#tag-blacklist) | Empty |
+
+The backend reads these settings from Stash's saved plugin config, so a change applies after you save it in Stash.
+
+### Default Settings File
+
+Stash's plugin settings have no defaults of their own. `assets/default_settings.json` holds the default for each setting. Both the UI and the backend read it. Don't edit it to change your own settings: use the Settings page. If you add a setting to `tagManager.yml`, add it to this file too. A test checks that every setting is listed.
 
 ## Troubleshooting
 
-### "thefuzz not installed" or Fuzzy Matching Disabled
+### Fuzzy Matching Is Basic
 
-The Python packages aren't installed correctly. Verify installation:
+`thefuzz` is optional. Without it Tag Manager uses basic matching. To get better fuzzy matching, install it for the Python that Stash uses:
 
 ```bash
 # Check which Python Stash is using
@@ -120,18 +129,20 @@ python3 -m pip install thefuzz python-Levenshtein
 3. Check Stash logs (Settings → Logs) for error messages
 4. Reload plugins in Settings → Plugins
 
-### Cache Takes Too Long / Timeout Errors
+### Cache Takes Too Long / Fetch Errors
 
-First fetch from StashDB downloads ~20,000+ tags and takes 20-40 seconds. Subsequent loads use the local cache. If you get timeout errors:
+The first fetch from StashDB downloads 20,000+ tags in pages of 1,000 and takes about 5 seconds. Later loads use the local cache. If a stash-box rejects the page size, Tag Manager falls back to pages of 100, which is slower. A failed or partial fetch is never cached. If you get errors:
 
-1. Try clicking "Refresh Cache" again
-2. Check your internet connection
-3. StashDB may be temporarily overloaded - wait and retry
+1. Read the error shown in the UI. It comes from the stash-box.
+2. If it says the stash-box rejected the API key (HTTP 401 or 403), check the API key in Settings → Metadata Providers.
+3. Try "Refresh Cache" again. The stash-box may be busy.
 
 ### Scene Tag Sync Errors
 
-- Ensure scenes have StashDB IDs (use Stash's Tagger first)
+- Ensure scenes have stash-box IDs (use Stash's Tagger first)
 - Start with "Dry Run" enabled to preview changes
+- An error naming a stash-box and HTTP 401 or 403 means that stash-box rejected the API key. Check it in Settings → Metadata Providers.
+- If tags you removed from scenes keep coming back, or the history file can't be read, run the "Reset Scene Tag Sync History" task
 - Check Stash logs for detailed error messages
 
 ### SSL/Certificate Errors (Windows)
@@ -166,7 +177,11 @@ Tests that talk to a real Stash, StashDB or Whisparr skip unless `STASH_PLUGINS_
 tagManager/
 ├── tagManager.yml         # Plugin manifest
 ├── tag_manager.py         # Python backend (search, cache, sync)
-├── stashdb_api.py         # StashDB GraphQL client
+├── stashdb_api.py         # Stash-box GraphQL client
+├── stash_client.py        # Client for the local Stash server
+├── sync_history.py        # Scene sync history (SQLite)
+├── plugin_data.py         # Location of runtime state
+├── log.py                 # Plugin logging
 ├── stashdb_scene_sync.py  # Scene tag sync logic
 ├── matcher.py             # Tag matching algorithms
 ├── blacklist.py           # Blacklist pattern matching
@@ -175,12 +190,40 @@ tagManager/
 ├── tag-manager.css        # UI styles
 ├── synonyms.json          # Custom synonym mappings
 ├── assets/                # Files served to the UI (default_settings.json)
-├── requirements.txt       # Python dependencies
-├── cache/                 # Tag cache files (auto-created)
+├── requirements.txt       # Optional Python packages
 └── tests/                 # Test suite
 ```
 
+### Where Runtime State Is Stored
+
+Caches and sync history live in Stash's config folder, not the plugin folder, so plugin updates don't wipe them:
+
+```
+<Stash config dir>/plugin_data/tagManager/
+├── tag_cache/             # Stash-box tag caches
+└── sync_history.sqlite    # Scene Tag Sync history
+```
+
+The `cache/` folder inside the plugin folder from older versions is no longer used. You can delete it.
+
 ## Changelog
+
+### v0.7.0
+
+- **Requirements**: Python 3.9+ with no required packages. `thefuzz` and `python-Levenshtein` are optional. `stashapp-tools` is no longer used (fixes #129).
+- **Faster, clearer tag fetches**: 1,000 tags per page, so a full StashDB fetch takes about 5 seconds instead of 30-40+. Falls back to 100 per page if a stash-box rejects it. Failed or partial fetches are never cached. Stash-box errors show in the UI, and HTTP 401/403 tells you to check the API key. Requests send a `User-Agent`, which fixes HTTP 403 errors from ThePornDB and JAVStash. ThePornDB fetches now get every tag instead of the first 100.
+- **State moved to Stash's config folder** (`plugin_data/tagManager/`). Plugin updates no longer wipe caches. The old `cache/` folder can be deleted.
+- **Settings are read by the backend** from Stash's saved plugin config. The saved blacklist now applies to searches.
+- **Scene Tag Sync**: syncs each scene against every linked stash-box that has an API key, adds tags in a way that keeps tags added during a long sync, and remembers matched tags so tags you removed are not added back. New "Reset Scene Tag Sync History" task. The first live sync after upgrading can re-add tags you removed before 0.7.0 one last time. Dry run checks at most 200 scenes and previews the history-aware result. A rejected API key stops the sync with an error naming the stash-box. Respects each stash-box's max requests per minute.
+- **Blacklist**: `/regex/flags` syntax, patterns separated by newlines, `,` or `;`, and a Blacklist editor button on the Match tab. It now applies to the best match, Accept, "More matches" (Select now applies the tag you clicked), manual and backend searches, Import All and Scene Tag Sync.
+- **Accept/Apply dialog**: saved category mappings show as "(saved mapping)" and are pre-selected. Parent controls are hidden with "Leave Parent Tags Alone". The pre-selected `Create "<category>"` option now really creates the parent tag. Names and aliases are checked for conflicts first, and Apply is disabled while it runs.
+- **Category mappings are stored per stash-box endpoint.** Existing mappings move under StashDB automatically. A failed settings load can no longer overwrite them.
+- **Merging tags** asks for confirmation and shows what moves. On Stash 0.31+ the merge and the update happen in one transaction. Parents and children of the merged tag now carry over, and the parent you pick in the dialog is added.
+- **Import conflicts dialog**: failed reverse merges clean up, other rows are re-checked after each action, "strip" lists dropped aliases, replacing a stash ID asks first, and the dialog stays open with a "Done" button.
+- **Import**: shows progress and has a Cancel button. Import All skips blacklisted and already-linked tags and is much faster on large libraries.
+- **Tag Hierarchy**: edit mode resets when you leave the page, saving re-reads current parents and keeps failed changes pending, alias search works, large trees render lazily, and keyboard shortcuts only act when the tree has focus.
+- **Navigation** works when Stash is served under a sub-path and no longer reloads the page.
+- Fuzzy Match Threshold and Tags Per Page are parsed safely. 0 is a valid threshold.
 
 ### v0.6.1
 

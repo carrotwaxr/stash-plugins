@@ -1,143 +1,125 @@
 /**
- * Unit tests for blacklist functions.
+ * Blacklist parser tests against the REAL tag-manager.js, driven by the same
+ * cases the Python parser (blacklist.py) runs: tests/blacklist_cases.json.
  * Run with: node plugins/tagManager/tests/test_blacklist.js
  */
+const { loadTagManager, createElement, createQueryableElement } = require("./harness");
+const cases = require("./blacklist_cases.json");
 
-// Copy of parseBlacklist for testing
-function parseBlacklist(blacklistStr) {
-  if (!blacklistStr) return [];
+const tm = loadTagManager();
+const { parseBlacklist, isBlacklisted } = tm.exports;
 
-  return blacklistStr.split('\n')
-    .map(line => line.trim())
-    .filter(line => line.length > 0)
-    .map(pattern => {
-      if (pattern.startsWith('/')) {
-        const regexStr = pattern.slice(1);
-        try {
-          return { type: 'regex', pattern: regexStr, regex: new RegExp(regexStr, 'i') };
-        } catch (e) {
-          return null;
-        }
-      } else {
-        return { type: 'literal', pattern: pattern.toLowerCase() };
-      }
-    })
-    .filter(p => p !== null);
-}
-
-// Copy of isBlacklisted for testing
-let tagBlacklist = [];
-
-function isBlacklisted(tagName) {
-  if (!tagName || tagBlacklist.length === 0) return false;
-
-  const lowerName = tagName.toLowerCase();
-
-  for (const entry of tagBlacklist) {
-    if (entry.type === 'literal') {
-      if (lowerName === entry.pattern) return true;
-    } else if (entry.type === 'regex') {
-      if (entry.regex.test(tagName)) return true;
-    }
-  }
-
-  return false;
-}
-
-// Test runner
-let passed = 0;
 let failed = 0;
+function check(name, ok, detail) {
+  if (ok) console.log(`  ok  ${name}`);
+  else { failed++; console.log(`FAIL  ${name}${detail ? "\n      " + detail : ""}`); }
+}
 
-function test(name, fn) {
-  try {
-    fn();
-    console.log(`✓ ${name}`);
-    passed++;
-  } catch (e) {
-    console.log(`✗ ${name}`);
-    console.log(`  Error: ${e.message}`);
-    failed++;
+for (const c of cases) {
+  tm.setState({ tagBlacklist: parseBlacklist(c.input) });
+  for (const [name, expected] of Object.entries(c.matches)) {
+    const got = isBlacklisted(name);
+    check(`${JSON.stringify(c.input)} vs ${JSON.stringify(name)} -> ${expected}`,
+      got === expected, `got ${got}`);
   }
 }
 
-function assertEqual(actual, expected, msg = '') {
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(`${msg}\n  Expected: ${JSON.stringify(expected)}\n  Actual: ${JSON.stringify(actual)}`);
+// Shape kept for existing callers
+const p = parseBlacklist("Foo\n/^x/i");
+check("shape: literal", p[0].type === "literal" && p[0].pattern === "foo");
+check("shape: regex", p[1].type === "regex" && p[1].pattern === "^x" && p[1].regex.test("X"));
+check("empty input", parseBlacklist("").length === 0 && parseBlacklist(null).length === 0);
+check("empty regex body skipped", parseBlacklist("//").length === 0);
+check("invalid regex skipped", parseBlacklist("/(/").length === 0);
+
+(async () => {
+  // saveBlacklist: writes through configurePlugin, then reloads tagBlacklist
+  let store = {};
+  const tm2 = loadTagManager({
+    fetchResponses: {
+      Configuration: () => ({ data: { configuration: { plugins: { tagManager: { ...store } } } } }),
+      ConfigurePlugin: (body) => { store = { ...body.variables.input }; return { data: { configurePlugin: store } }; },
+    },
+  });
+  const ok = await tm2.exports.saveBlacklist("Foo; /^x/i");
+  check("saveBlacklist ok", ok === true);
+  check("saveBlacklist persisted raw text", store.tagBlacklist === "Foo; /^x/i", JSON.stringify(store));
+  const st = tm2.getState();
+  check("saveBlacklist reloaded parsed list", st.tagBlacklist.length === 2);
+
+  // Editor draft: unsaved text survives a re-render (the focus/visibility refresh
+  // calls renderPage) and is cleared by a successful Save.
+  {
+    let saved = { tagBlacklist: "Saved" };
+    let failWrite = false;
+    const tm3 = loadTagManager({
+      fetchResponses: {
+        Configuration: () => ({ data: { configuration: { plugins: { tagManager: { ...saved } } } } }),
+        ConfigurePlugin: (body) => {
+          if (failWrite) return { errors: [{ message: "refused" }] };
+          saved = { ...body.variables.input };
+          return { data: { configurePlugin: saved } };
+        },
+      },
+    });
+    await tm3.settle();
+    const box = { endpoint: "https://stashdb.org/graphql", name: "StashDB" };
+    tm3.setState({
+      settings: { ...tm3.getState().settings, pageSize: 25 },
+      stashBoxes: [box], selectedStashBox: box, localTags: [],
+      blacklistPanelOpen: true, tagBlacklistRaw: "Saved",
+    });
+    const textarea = createElement("textarea");
+    const saveBtn = createElement("button");
+    const container = createQueryableElement("div", {
+      query: (sel) => (sel === "#tm-blacklist-text" ? textarea : sel === "#tm-blacklist-save" ? saveBtn : undefined),
+    });
+    const editorText = () => {
+      const m = container.innerHTML.match(/<textarea id="tm-blacklist-text"[^>]*>([^]*?)<\/textarea>/);
+      return m ? m[1] : null;
+    };
+    const type = (value) => {
+      textarea.value = value;
+      (textarea.listeners.input || []).forEach((fn) => fn({ target: textarea }));
+    };
+
+    tm3.exports.renderPage(container);
+    check("editor shows the saved text", editorText() === "Saved", editorText());
+    type("Saved\nDraft");
+    check("typing records a draft", tm3.getState().blacklistDraft === "Saved\nDraft", JSON.stringify(tm3.getState().blacklistDraft));
+    tm3.exports.renderPage(container);
+    check("a re-render keeps the unsaved text", editorText() === "Saved\nDraft", editorText());
+    check("panel stays open across the re-render", tm3.getState().blacklistPanelOpen === true);
+
+    // Focus and caret are kept when the editor had focus during the re-render
+    const focused = [];
+    const ranges = [];
+    textarea.focus = () => focused.push(true);
+    textarea.setSelectionRange = (a, b) => ranges.push([a, b]);
+    textarea.id = "tm-blacklist-text";
+    textarea.selectionStart = 3;
+    textarea.selectionEnd = 5;
+    tm3.document.activeElement = textarea;
+    tm3.exports.renderPage(container);
+    check("focused editor is re-focused with its caret after a re-render",
+      focused.length === 1 && JSON.stringify(ranges) === "[[3,5]]", JSON.stringify({ focused, ranges }));
+    tm3.document.activeElement = null;
+
+    // A failed save keeps the draft
+    failWrite = true;
+    await saveBtn.listeners.click[0]({ target: saveBtn });
+    check("failed save keeps the draft", tm3.getState().blacklistDraft === "Saved\nDraft");
+    failWrite = false;
+    tm3.exports.renderPage(container);
+    await saveBtn.listeners.click[0]({ target: saveBtn });
+    check("successful save persisted the draft", saved.tagBlacklist === "Saved\nDraft", JSON.stringify(saved));
+    check("successful save clears the draft", tm3.getState().blacklistDraft === null, JSON.stringify(tm3.getState().blacklistDraft));
+    check("editor then shows the saved text", editorText() === "Saved\nDraft", editorText());
   }
-}
+  finish();
+})();
 
-// Tests
-console.log('\n=== parseBlacklist tests ===\n');
-
-test('returns empty array for null/undefined', () => {
-  assertEqual(parseBlacklist(null).length, 0);
-  assertEqual(parseBlacklist(undefined).length, 0);
-  assertEqual(parseBlacklist('').length, 0);
-});
-
-test('parses literal patterns', () => {
-  const result = parseBlacklist('4K Available\nFull HD');
-  assertEqual(result.length, 2);
-  assertEqual(result[0].type, 'literal');
-  assertEqual(result[0].pattern, '4k available');
-});
-
-test('parses regex patterns', () => {
-  const result = parseBlacklist('/Available$');
-  assertEqual(result.length, 1);
-  assertEqual(result[0].type, 'regex');
-  assertEqual(result[0].pattern, 'Available$');
-});
-
-test('skips invalid regex', () => {
-  const result = parseBlacklist('/[invalid/');
-  assertEqual(result.length, 0);
-});
-
-test('ignores blank lines', () => {
-  const result = parseBlacklist('Pattern1\n\n\nPattern2');
-  assertEqual(result.length, 2);
-});
-
-console.log('\n=== isBlacklisted tests ===\n');
-
-test('literal exact match (case-insensitive)', () => {
-  tagBlacklist = parseBlacklist('4K Available');
-  assertEqual(isBlacklisted('4K Available'), true);
-  assertEqual(isBlacklisted('4k available'), true);
-  assertEqual(isBlacklisted('Action'), false);
-});
-
-test('regex pattern matching', () => {
-  tagBlacklist = parseBlacklist('/Available$');
-  assertEqual(isBlacklisted('4K Available'), true);
-  assertEqual(isBlacklisted('Full HD Available'), true);
-  assertEqual(isBlacklisted('Available Now'), false);
-});
-
-test('resolution pattern', () => {
-  tagBlacklist = parseBlacklist('/^\\d+p$');
-  assertEqual(isBlacklisted('1080p'), true);
-  assertEqual(isBlacklisted('720p'), true);
-  assertEqual(isBlacklisted('1080p Video'), false);
-});
-
-test('empty name returns false', () => {
-  tagBlacklist = parseBlacklist('Pattern');
-  assertEqual(isBlacklisted(''), false);
-  assertEqual(isBlacklisted(null), false);
-});
-
-test('empty blacklist returns false', () => {
-  tagBlacklist = [];
-  assertEqual(isBlacklisted('Anything'), false);
-});
-
-// Summary
-console.log('\n=== Summary ===\n');
-console.log(`Passed: ${passed}`);
-console.log(`Failed: ${failed}`);
-
-if (failed > 0) {
-  process.exit(1);
+function finish() {
+if (failed) { console.log(`${failed} failed`); process.exit(1); }
+console.log("all blacklist tests passed");
 }
