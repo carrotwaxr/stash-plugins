@@ -14,11 +14,13 @@ Called via runPluginOperation from JavaScript UI.
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
 import log
-from stashdb_api import search_tags_by_name, query_all_tags
+import plugin_data
+from stashdb_api import search_tags_by_name, query_all_tags, StashDBAPIError
 from matcher import TagMatcher, load_synonyms
 from blacklist import Blacklist
 from stash_client import LocalStash, StashError
@@ -56,12 +58,9 @@ DEFAULT_PLUGIN_SETTINGS = load_default_settings()
 
 
 def get_cache_dir():
-    """Get the cache directory path for storing endpoint tag caches."""
-    # Use a cache directory within the plugin folder
-    cache_dir = os.path.join(get_plugin_dir(), "cache")
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
-        log.LogDebug(f"Created cache directory: {cache_dir}")
+    """Get the cache directory (inside Stash's config dir) for endpoint tag caches."""
+    cache_dir = os.path.join(plugin_data.current_dir(), "tag_cache")
+    os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
 
 
@@ -75,6 +74,7 @@ def get_cache_file_path(endpoint_url):
     url_hash = hashlib.md5(endpoint_url.encode('utf-8')).hexdigest()[:12]
     # Also include a readable portion of the URL
     readable_part = endpoint_url.replace('https://', '').replace('http://', '').replace('/', '_')[:30]
+    readable_part = re.sub(r"[^A-Za-z0-9._-]", "_", readable_part)
     filename = f"tags_{readable_part}_{url_hash}.json"
     return os.path.join(get_cache_dir(), filename)
 
@@ -129,7 +129,12 @@ def save_tags_to_cache(endpoint_url, tags):
     Returns:
         Bool indicating success
     """
+    if not tags:
+        log.LogWarning(f"Refusing to cache empty tag list for {endpoint_url}")
+        return False
+
     cache_path = get_cache_file_path(endpoint_url)
+    tmp_path = cache_path + ".tmp"
 
     cache_data = {
         'endpoint': endpoint_url,
@@ -139,14 +144,19 @@ def save_tags_to_cache(endpoint_url, tags):
     }
 
     try:
-        with open(cache_path, 'w', encoding='utf-8') as f:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(cache_data, f, indent=2)
+        os.replace(tmp_path, cache_path)
 
         log.LogInfo(f"Saved {len(tags)} tags to cache: {cache_path}")
         return True
 
     except OSError as e:
         log.LogError(f"Cache write error: {e}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return False
 
 
@@ -443,9 +453,9 @@ def handle_fetch_all(stashdb_url, stashdb_api_key, force_refresh=False):
 
     try:
         tags = query_all_tags(stashdb_url, stashdb_api_key)
-    except Exception as e:
+    except StashDBAPIError as e:
         log.LogError(f"Error fetching tags from {stashdb_url}: {e}")
-        raise
+        return {"error": str(e), "auth_error": e.is_auth_error}
 
     elapsed = time.time() - start_time
     log.LogInfo(f"Fetched {len(tags)} tags in {elapsed:.1f}s")
@@ -580,6 +590,7 @@ def main():
 
     # Get settings from server connection or args
     server_connection = input_data.get("server_connection", {})
+    plugin_data.configure(server_connection)
     # For now, settings come from args (JS passes them)
     settings = get_settings_from_config(args.get("settings", {}))
 
