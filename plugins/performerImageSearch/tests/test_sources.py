@@ -7,6 +7,7 @@ and made-up image paths on each site's real image hosts.
 
 import ast
 import email.message
+import http.server
 import io
 import json
 import os
@@ -292,6 +293,56 @@ def test_fetch_times_out_when_the_deadline_passes_mid_download(urlopen, monkeypa
     urlopen.outcome = FakeResponse(b"x" * 200000)
     with pytest.raises(SourceTimeout):
         image_search._fetch("https://www.example.com/page", 150.0)
+
+
+class TrickleHandler(http.server.BaseHTTPRequestHandler):
+    """Serves /slow at 1 KB every 0.2 s (40 KB in all) and /fast (200 KB) at once."""
+
+    def do_GET(self):
+        slow = self.path == "/slow"
+        size = 40 * 1024 if slow else 200 * 1024
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        try:
+            if not slow:
+                self.wfile.write(b"x" * size)
+                return
+            for _ in range(size // 1024):
+                self.wfile.write(b"x" * 1024)
+                self.wfile.flush()
+                time.sleep(0.2)
+        except OSError:  # the client hung up
+            pass
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def local_server():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), TrickleHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_fetch_stops_a_slow_download_at_the_deadline(local_server):
+    # read() would wait for a full buffer (64 KB), long past the deadline
+    started = time.monotonic()
+    with pytest.raises(SourceTimeout, match="did not finish sending in time"):
+        image_search._fetch(local_server + "/slow", image_search._now() + 1.0)
+    assert time.monotonic() - started < 2.5
+
+
+def test_fetch_reads_a_whole_body_in_chunks(local_server):
+    assert image_search._fetch(local_server + "/fast", image_search._now() + 10) == "x" * 200 * 1024
 
 
 @pytest.mark.parametrize("code", [403, 429])

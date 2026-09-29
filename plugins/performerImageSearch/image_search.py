@@ -225,9 +225,12 @@ def _fetch(url, deadline, headers=None):
     try:
         with urllib.request.urlopen(request, timeout=min(REQUEST_TIMEOUT_SECONDS, remaining)) as response:
             status = response.status
+            # read1 returns whatever has arrived; read(n) would wait for all n bytes,
+            # so a slow site could hold the download far past the deadline
+            read = getattr(response, "read1", None) or (lambda size: response.read(min(size, 8192)))
             chunks = []
             while True:
-                chunk = response.read(65536)
+                chunk = read(65536)
                 if not chunk:
                     break
                 chunks.append(chunk)
