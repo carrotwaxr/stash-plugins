@@ -476,6 +476,33 @@ test("a page fetch that started during a save does not undo what the save loaded
   assert.ok(!second.innerHTML.includes("restored"));
 });
 
+test("a page fetch that started during a save and failed does not replace what the save rendered", async () => {
+  const gates = gateSet();
+  const env = setup([["1"], ["2"]], {
+    gateUpdate: () => gates.get("update"),
+    gate: (call) => (call === 1 ? gates.get("page") : null),
+    failFetch: (call) => call === 1, // only the second mount's own fetch fails
+  });
+  const { sm, x } = env;
+  const leave = mount(env);
+  await sm.settle();
+  x.setParent("1", "2");
+  const saving = x.savePendingChanges();
+  await sm.settle();
+  leave();
+  const second = createQueryableElement("div");
+  mount(env, second);
+  await sm.settle();
+  gates.open("update");
+  await saving;
+  await sm.settle();
+  assert.ok(second.innerHTML.includes('data-studio-id="1"'), "the save rendered the tree");
+  gates.open("page");
+  await sm.settle();
+  assert.ok(!second.innerHTML.includes("Error"), second.innerHTML.slice(0, 200));
+  assert.ok(second.innerHTML.includes('data-studio-id="1"'), "the tree stays");
+});
+
 test("leaving while a save runs says the changes are being saved", async () => {
   let release;
   const gateUpdate = new Promise((r) => { release = r; });

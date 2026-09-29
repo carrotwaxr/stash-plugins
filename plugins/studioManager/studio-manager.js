@@ -1351,12 +1351,13 @@
         setPageTitle("Studio Hierarchy | Stash");
         container.innerHTML = '<div class="studio-hierarchy"><div class="sh-loading">Loading studios...</div></div>';
 
+        // A save that ends while this fetch runs loads newer data and renders this
+        // page itself; this fetch's result (or error) is then stale
+        const saves = savesFinished;
+        const stale = () => !live() || saves !== savesFinished;
         try {
-          const saves = savesFinished;
           const studios = await fetchAllStudiosWithHierarchy();
-          if (!live()) return;
-          // A save that ended meanwhile loaded newer data and rendered this page
-          if (saves !== savesFinished) return;
+          if (stale()) return;
           hierarchyStudios = studios;
           console.debug(`[studioManager] Loaded ${hierarchyStudios.length} studios`);
 
@@ -1371,7 +1372,7 @@
           renderChangesPanel();
           refreshView();
         } catch (e) {
-          if (!live()) return;
+          if (stale()) return;
           console.error("[studioManager] Failed to load hierarchy:", e);
           container.innerHTML = `<div class="studio-hierarchy"><div class="sh-loading">Error: ${escapeHtml(e.message)}</div></div>`;
         }
