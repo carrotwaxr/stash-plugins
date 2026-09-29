@@ -56,8 +56,10 @@ REQUEST_TIMEOUT_SECONDS = 10
 # Gallery pages fetched at the same time, per source
 GALLERY_WORKERS = 4
 
-# Text that only appears on Cloudflare's "checking your browser" challenge pages
-CLOUDFLARE_CHALLENGE_MARKERS = ("cf-chl", "Just a moment...")
+# Markup of Cloudflare's "checking your browser" challenge page. Cloudflare sends that
+# page with HTTP 403 or 503 (and a "cf-mitigated: challenge" header), never with 200,
+# so only error responses are checked: a normal page may contain the same words.
+CLOUDFLARE_CHALLENGE_MARKERS = ("/cdn-cgi/challenge-platform/", "_cf_chl_opt", "<title>Just a moment...</title>")
 
 # Image hosts each scraper returns. The Stash server fetches the chosen URL itself
 # (performerUpdate image:), so results pointing anywhere else are dropped.
@@ -145,7 +147,7 @@ class SourceTimeout(SourceError):
 
 
 class SourceBlocked(SourceError):
-    """The site refused us: HTTP 403 or 429, or a Cloudflare challenge page."""
+    """The site refused us: HTTP 403 or 429, or a Cloudflare challenge (sent with 403 or 503)."""
 
     result_status = "blocked"
 
@@ -195,8 +197,12 @@ def _host(url):
         return ""
 
 
-def _is_cloudflare_challenge(text):
-    return any(marker in text for marker in CLOUDFLARE_CHALLENGE_MARKERS)
+def _is_cloudflare_challenge(headers, body):
+    """True when an error response is Cloudflare's challenge: its header, or its page."""
+    mitigated = headers.get("cf-mitigated", "") if headers is not None else ""
+    if mitigated.strip().lower() == "challenge":
+        return True
+    return any(marker in body for marker in CLOUDFLARE_CHALLENGE_MARKERS)
 
 
 def _fetch(url, deadline, headers=None):
@@ -206,9 +212,10 @@ def _fetch(url, deadline, headers=None):
     operation waits longer than REQUEST_TIMEOUT_SECONDS or past it.
 
     Raises SourceTimeout (the deadline passed or the site stopped answering),
-    SourceBlocked (HTTP 403 or 429, or a Cloudflare challenge page), SourceNotFound
-    (HTTP 404), SourceHTTPError (any other status but 200) or SourceError (the site
-    could not be reached).
+    SourceBlocked (HTTP 403 or 429, or a Cloudflare challenge, which comes with 403 or
+    503), SourceNotFound (HTTP 404), SourceHTTPError (any other status but 200) or
+    SourceError (the site could not be reached). A 200 page is returned as it is,
+    whatever it says.
     """
     host = _host(url) or url
     remaining = deadline - _now()
@@ -233,10 +240,10 @@ def _fetch(url, deadline, headers=None):
             body = ""
         if e.code == 404:
             raise SourceNotFound(url) from None
+        if _is_cloudflare_challenge(e.headers, body):
+            raise SourceBlocked(f"{host} answered with a Cloudflare challenge page (HTTP {e.code})") from None
         if e.code in (403, 429):
             raise SourceBlocked(f"{host} blocked the request (HTTP {e.code})") from None
-        if _is_cloudflare_challenge(body):
-            raise SourceBlocked(f"{host} answered with a Cloudflare challenge page (HTTP {e.code})") from None
         raise SourceHTTPError(e.code, url) from None
     except urllib.error.URLError as e:
         if isinstance(e.reason, (socket.timeout, TimeoutError)):
@@ -247,12 +254,9 @@ def _fetch(url, deadline, headers=None):
     except (OSError, http.client.HTTPException) as e:
         raise SourceError(f"Could not read from {host}: {e}") from None
 
-    text = b"".join(chunks).decode("utf-8", errors="ignore")
     if status != 200:
         raise SourceHTTPError(status, url)
-    if _is_cloudflare_challenge(text):
-        raise SourceBlocked(f"{host} answered with a Cloudflare challenge page")
-    return text
+    return b"".join(chunks).decode("utf-8", errors="ignore")
 
 
 def _fetch_performer_page(label, name, url, deadline):
@@ -834,7 +838,8 @@ def _duckduckgo_images_once(query, size, layout, deadline):
     """One attempt: get a vqd token, then the image API's results (a list of dicts).
 
     Raises SourceBlocked on a 403 or 429, a page without a token or a reply that is
-    not JSON; those are how DDG turns away a search it is rate-limiting.
+    not JSON; those are how DDG turns away a search it is rate-limiting. The JSON
+    itself is never scanned for block pages: _fetch returns any 200 reply as it is.
     """
     search_params = urllib.parse.urlencode({
         "q": query,
@@ -978,7 +983,7 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
       empty    the source has nothing for this performer
       partial  results, but some pages failed (see warnings)
       error    the source failed (see error)
-      blocked  the site refused the request (403, 429 or a Cloudflare challenge)
+      blocked  the site refused the request (403, 429, or a Cloudflare challenge on 403 or 503)
       timeout  the site did not answer in time
     error is present only for error, blocked and timeout; warnings only when there are any.
     """

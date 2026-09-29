@@ -172,6 +172,7 @@ def freeones_photo(n, width, height, folder="gg/hh"):
 class FakeResponse:
     def __init__(self, body=b"<html>ok</html>", status=200):
         self.status = status
+        self.headers = email.message.Message()
         self._body = io.BytesIO(body)
 
     def read(self, size=-1):
@@ -184,14 +185,18 @@ class FakeResponse:
         return False
 
 
-def http_error(code, body=b""):
-    return urllib.error.HTTPError(
-        "https://www.example.com/page", code, "error", email.message.Message(), io.BytesIO(body)
-    )
+def http_error(code, body=b"", headers=None):
+    message = email.message.Message()
+    for key, value in (headers or {}).items():
+        message[key] = value
+    return urllib.error.HTTPError("https://www.example.com/page", code, "error", message, io.BytesIO(body))
 
 
 class FakeUrlopen:
-    """Replaces urllib.request.urlopen and records (request, timeout)."""
+    """Replaces urllib.request.urlopen and records (request, timeout).
+
+    outcome is a response, an exception to raise, or a callable(url) returning either.
+    """
 
     def __init__(self):
         self.calls = []
@@ -199,9 +204,10 @@ class FakeUrlopen:
 
     def __call__(self, request, timeout=None):
         self.calls.append((request, timeout))
-        if isinstance(self.outcome, BaseException):
-            raise self.outcome
-        return self.outcome
+        outcome = self.outcome(request.full_url) if callable(self.outcome) else self.outcome
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
 
 @pytest.fixture
@@ -296,16 +302,46 @@ def test_fetch_raises_blocked_on_403_and_429(urlopen, code):
     assert str(code) in str(caught.value)
 
 
+# A trimmed Cloudflare "checking your browser" page, as sent with HTTP 403 or 503
+CLOUDFLARE_CHALLENGE = (
+    b"<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>"
+    b"<script>window._cf_chl_opt={cType:'managed'};</script>"
+    b"<script src='/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray=0000'></script></body></html>"
+)
+
+
 @pytest.mark.parametrize("outcome", [
-    http_error(503, b"<html><head><title>Just a moment...</title></head><body></body></html>"),
-    FakeResponse(b"<html><script>window._cf_chl_opt={};</script><div id='cf-chl-widget'></div></html>"),
-    FakeResponse(b"<html><head><title>Just a moment...</title></head></html>"),
+    http_error(503, CLOUDFLARE_CHALLENGE),
+    http_error(403, CLOUDFLARE_CHALLENGE),
+    http_error(403, b"", headers={"cf-mitigated": "challenge"}),
+    http_error(503, b"", headers={"cf-mitigated": "challenge"}),
 ])
 def test_fetch_raises_blocked_on_a_cloudflare_challenge_page(urlopen, outcome):
     urlopen.outcome = outcome
     with pytest.raises(SourceBlocked) as caught:
         image_search._fetch("https://www.example.com/page", 150.0)
     assert "Cloudflare" in str(caught.value)
+    assert str(outcome.code) in str(caught.value)
+
+
+@pytest.mark.parametrize("body", [
+    b"<html><head><title>Just a moment...</title></head><body>Loading the gallery</body></html>",
+    b"<p>Her catchphrase is \"Just a moment...\"</p><a href='/wiki/cf-chl'>cf-chl</a>",
+    CLOUDFLARE_CHALLENGE,
+])
+def test_fetch_returns_a_200_page_whatever_words_it_contains(urlopen, body):
+    # Cloudflare sends its challenge with HTTP 403 or 503, never 200
+    urlopen.outcome = FakeResponse(body)
+    assert image_search._fetch("https://www.example.com/page", 150.0) == body.decode()
+
+
+def test_boobpedia_bio_that_says_just_a_moment_is_searched(urlopen):
+    page = fixture("boobpedia.html").replace(
+        '<ul class="gallery', '<p>Her catchphrase is "Just a moment..." (see cf-chl).</p>\n<ul class="gallery')
+    urlopen.outcome = lambda url: FakeResponse(page.encode()) if url == BOOBPEDIA_URL else http_error(404)
+    outcome = image_search.search_single_source("boobpedia", NAME, NAME)
+    assert outcome["status"] == "ok"
+    assert len(outcome["results"]) == 2
 
 
 def test_fetch_raises_not_found_on_404(urlopen):
@@ -319,6 +355,7 @@ def test_fetch_raises_not_found_on_404(urlopen):
 @pytest.mark.parametrize("outcome,status", [
     (http_error(500), 500),
     (http_error(502, b"<html>Bad gateway</html>"), 502),
+    (http_error(503, b"<html><title>Service Unavailable</title>Down for maintenance</html>"), 503),
     (FakeResponse(b"", status=204), 204),
 ])
 def test_fetch_raises_http_error_on_other_statuses(urlopen, outcome, status):
@@ -625,6 +662,26 @@ def test_duckduckgo_fixture(web):
     ]
     assert found[0]["title"] == "Jane Example & friends"
     assert (found[0]["width"], found[0]["height"]) == (1280, 1920)
+
+
+def test_duckduckgo_result_titled_just_a_moment_is_returned(urlopen, sleeps):
+    data = json.loads(fixture("duckduckgo.json"))
+    data["results"][0]["title"] = "Just a moment..."
+    data["results"][2]["title"] = "cf-chl"
+
+    def route(url):
+        if url.startswith("https://duckduckgo.com/i.js?"):
+            return FakeResponse(json.dumps(data).encode())
+        if url.startswith("https://duckduckgo.com/?"):
+            return FakeResponse(fixture("duckduckgo_vqd.html").encode())
+        return http_error(404)
+
+    urlopen.outcome = route
+    outcome = image_search.search_single_source("duckduckgo", NAME, "Jane Example pornstar")
+    assert outcome["status"] == "ok"
+    assert [r["title"] for r in outcome["results"]] == ["Just a moment...", "cf-chl"]
+    assert sleeps == []
+    assert len(urlopen.calls) == 2
 
 
 RATE_LIMITED = "DuckDuckGo rate-limited this search; try again later"
