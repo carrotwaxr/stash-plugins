@@ -2,7 +2,7 @@ name: Deploy repository to Github Pages
 
 on:
   push:
-    branches: [main, stable]
+    branches: [main]
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -13,6 +13,11 @@ permissions:
   pages: write
   id-token: write
 
+# One publish at a time. A queued run waits rather than cancelling one in progress.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   # A push to main publishes to every user, so nothing ships unless tests pass
   test:
@@ -20,34 +25,22 @@ jobs:
 
   build:
     needs: test
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout main
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          path: main
-          ref: main
+          # build_site.sh reads each plugin's version and date from git history
           fetch-depth: "0"
-      - run: |
-          cd main
-          ./build_site.sh ../_site/stable
-      - name: Checkout dev
-        uses: actions/checkout@v4
-        with:
-          path: dev
-          # change this ref to whatever dev branch/tag we need when necessary
-          ref: main
-          fetch-depth: "0"
-      - run: |
-          cd dev
-          ../main/build_site.sh ../_site/develop
+      - run: ./build_site.sh _site/stable
+      # develop has always published the same build as stable; keep its URL working
+      - run: cp -r _site/stable _site/develop
       - uses: actions/upload-pages-artifact@v3
 
   deploy:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: build
     steps:
       - name: Deploy to GitHub Pages
