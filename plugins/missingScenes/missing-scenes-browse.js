@@ -1,14 +1,23 @@
 (function () {
   "use strict";
 
-  const PLUGIN_ID = "missingScenes";
   const BROWSE_PATH = "/plugins/missing-scenes";
 
   // Use shared core module
   const Core = window.MissingScenesCore;
   const {
     runPluginOperation,
+    describeFailure,
     escapeHtml,
+    describeWhisparrAdd,
+    describeWhisparrStatusError,
+    buildFingerprintIndex,
+    describeFingerprintIndex,
+    describeFingerprintBuild,
+    fingerprintFields,
+    directionFor,
+    describeNoFavorites,
+    TRENDING_NOTE,
     createSceneCard,
   } = Core;
 
@@ -42,8 +51,10 @@
   // Page state (module-scoped for persistence)
   let missingScenes = [];
   let isLoading = false;
+  let requestToken = 0; // bumped by every new request and when the page is left
   let currentCursor = null;
   let hasMore = true;
+  let isComplete = false; // the last answer checked every stash-box page
   let sortField = "DATE";
   let sortDirection = "DESC";
   let filterFavoritePerformers = false;
@@ -52,9 +63,18 @@
   let activeFilterTagIds = [];
   let pageSize = 50;
   let whisparrConfigured = false;
+  let whisparrError = null; // set when the Whisparr status map could not be fetched
   let stashdbUrl = "";
+  let stashdbName = "";
   let availableEndpoints = [];
   let selectedEndpoint = null;
+
+  // Fingerprint index state (the note under the stats)
+  let fingerprintInfo = null; // fingerprint fields of the last response
+  let ownedByFingerprint = 0; // scenes left out as owned by fingerprint, over the pages loaded
+  let fingerprintBuild = { running: false, message: null }; // a build started from this page
+  let pageSession = 0; // bumped when the page is (re)entered or left
+  let lastRenderState = null; // for re-rendering while a build runs
 
   /**
    * Set page title with retry to overcome Stash's title management
@@ -71,7 +91,8 @@
    * Render the browse page content into the container
    */
   function renderPage(container, state) {
-    const { loading, error, scenes, stats } = state;
+    lastRenderState = state;
+    const { loading, error, warning, scenes, stats } = state;
 
     // Build filter checkboxes
     const filterPerformersChecked = filterFavoritePerformers ? 'checked' : '';
@@ -91,19 +112,27 @@
       .map(n => `<option value="${n}" ${pageSize === n ? 'selected' : ''}>${n}</option>`)
       .join('');
 
-    const directionOptions = [
-      { value: "DESC", label: "Newest First" },
-      { value: "ASC", label: "Oldest First" },
-    ].map(opt => `<option value="${opt.value}" ${sortDirection === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('');
+    // Labels follow the sort (Title: Descending/Ascending); Trending has no direction
+    const direction = directionFor(sortField);
+    const directionOptions = direction.options
+      .map(opt => `<option value="${opt.value}" ${sortDirection === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('');
+    const directionAttrs = direction.hidden
+      ? ' style="display: none;" title="Trending is always most active first"'
+      : '';
 
     // Build stats text
     let statsText = '';
     if (stats) {
+      // "missing" refers only to the missing estimate; the stash-box total is a different number
+      const estimate = stats.missing_count_estimate;
       statsText = `Showing ${scenes.length}`;
-      if (!stats.is_complete) {
-        statsText += ` of ~${stats.total_on_stashdb.toLocaleString()}`;
+      if (!stats.is_complete && typeof estimate === "number" && estimate >= scenes.length) {
+        statsText += ` of ~${estimate.toLocaleString()}`;
       }
       statsText += " missing scenes";
+      if (typeof stats.total_on_stashdb === "number") {
+        statsText += ` (${stats.total_on_stashdb.toLocaleString()} scenes on ${stats.stashdb_name || "StashDB"})`;
+      }
       if (stats.filters_active) statsText += " (filtered)";
       if (stats.excluded_tags_applied) statsText += " (content filtered)";
       if (stats.cache_info) {
@@ -114,6 +143,29 @@
           statsText += ` | Index: ${ci.count.toLocaleString()} scenes (cached)`;
         }
       }
+    }
+
+    // Trending results only cover recent activity (the empty list's placeholder says so too)
+    const trendingNote = stats && scenes.length > 0 && sortField === "TRENDING"
+      ? `<div class="ms-browse-note">${escapeHtml(TRENDING_NOTE)}</div>`
+      : '';
+
+    // ThePornDB takes one request per favorite, so only the first (most engaged) are searched
+    let favoritesNote = '';
+    if (stats && stats.favorites_limited) {
+      const n = Number(stats.favorites_query_limit) || 10;
+      favoritesNote = `<div class="ms-browse-note">${escapeHtml(`Only your first ${n} favorite performers/studios are searched on ThePornDB (most engaged first).`)}</div>`;
+    }
+
+    // Fingerprint note: the count owned by fingerprint, or the Build button
+    const fpNote = describeFingerprintIndex(fingerprintInfo, ownedByFingerprint, fingerprintBuild, stashdbName);
+    let fingerprintHtml = '';
+    if (fpNote.text || fpNote.button) {
+      const text = fpNote.text ? `<span class="ms-fingerprint-text">${escapeHtml(fpNote.text)}</span>` : '';
+      const button = fpNote.button
+        ? ` <button class="ms-btn ms-btn-secondary ms-build-fp-btn" id="ms-build-fp-btn" ${fpNote.running ? 'disabled' : ''}>${fpNote.running ? 'Building fingerprint index...' : 'Build fingerprint index'}</button>`
+        : '';
+      fingerprintHtml = `<div class="ms-fingerprint-note">${text}${button}</div>`;
     }
 
     // Build results content - placeholder for now, will be replaced with DOM elements
@@ -134,7 +186,26 @@
         <div class="ms-placeholder ms-error">
           <div class="ms-error-icon">!</div>
           <div>${escapeHtml(error)}</div>
+          <button class="ms-btn ms-retry-btn" id="ms-retry-btn">Retry</button>
         </div>
+      `;
+    } else if (scenes.length === 0 && warning) {
+      // A page failed before anything qualified: the warning above says what, never "none found"
+      resultsPlaceholder = '';
+    } else if (scenes.length === 0 && !isComplete) {
+      // Pages are left (Load More carries on from the cursor), so nothing is known yet
+      resultsPlaceholder = `
+        <div class="ms-placeholder">No missing scenes in the pages checked so far.${hasMore ? ' Load More checks the next pages.' : ''}</div>
+      `;
+    } else if (scenes.length === 0 && stats && (stats.empty_filter_types || []).length > 0) {
+      // A favorites filter with no favorites on this box: nothing to match, not "none missing"
+      resultsPlaceholder = `
+        <div class="ms-placeholder">${escapeHtml(describeNoFavorites(stats.empty_filter_types, stats.stashdb_name || stashdbName))}</div>
+      `;
+    } else if (scenes.length === 0 && sortField === "TRENDING") {
+      // Trending leaves out scenes with no recent activity, so an empty list says little
+      resultsPlaceholder = `
+        <div class="ms-placeholder">No missing scenes are trending. ${escapeHtml(TRENDING_NOTE)}</div>
       `;
     } else if (scenes.length === 0) {
       resultsPlaceholder = `
@@ -147,12 +218,12 @@
       resultsPlaceholder = ''; // Will be filled with DOM elements below
     }
 
-    // Load more button visibility
-    const showLoadMore = hasMore && scenes.length > 0;
+    // Load more button visibility (also with no scenes yet: the pages checked may have had none)
+    const showLoadMore = hasMore && !isComplete && currentCursor !== null && !error;
 
     let loadMoreText = 'Load More';
-    if (stats && hasMore) {
-      const estimatedRemaining = stats.total_on_stashdb - scenes.length;
+    if (stats && hasMore && typeof stats.missing_count_estimate === "number") {
+      const estimatedRemaining = stats.missing_count_estimate - scenes.length;
       if (estimatedRemaining > 0) {
         const nextBatch = Math.min(pageSize, estimatedRemaining);
         loadMoreText = `Load More (${nextBatch})`;
@@ -202,7 +273,7 @@
             <select id="ms-sort-field" class="ms-sort-select">
               ${sortOptions}
             </select>
-            <select id="ms-sort-direction" class="ms-sort-select">
+            <select id="ms-sort-direction" class="ms-sort-select"${directionAttrs}>
               ${directionOptions}
             </select>
             <label>Per page:</label>
@@ -212,7 +283,13 @@
           </div>
         </div>
 
-        <div class="ms-browse-stats">${statsText}</div>
+        <div class="ms-browse-stats">${escapeHtml(statsText)}</div>
+        ${favoritesNote}
+        ${trendingNote}
+        ${fingerprintHtml}
+        ${whisparrConfigured && whisparrError ? `<div class="ms-warning ms-whisparr-banner"><span class="ms-warning-text">${escapeHtml(describeWhisparrStatusError(whisparrError))}</span></div>` : ''}
+        <div class="ms-browse-whisparr-status" id="ms-browse-status"></div>
+        ${warning ? `<div class="ms-warning"><span class="ms-warning-text">${escapeHtml(warning)}</span> <button class="ms-btn ms-btn-secondary ms-retry-btn" id="ms-retry-btn">Retry from here</button></div>` : ''}
 
         <div class="ms-browse-results">
           ${resultsPlaceholder}
@@ -238,7 +315,18 @@
           const card = createSceneCard(scene, {
             stashdbUrl: stashdbUrl || "https://stashdb.org",
             whisparrConfigured: whisparrConfigured,
+            endpoint: selectedEndpoint || stashdbUrl,
             activeFilterTagIds: activeFilterTagIds,
+            onWhisparrAdd: (sc, success, detail) => {
+              const el = container.querySelector('#ms-browse-status');
+              if (!el) return;
+              const msg = success
+                ? describeWhisparrAdd(sc, detail)
+                : `Failed to add: ${detail?.message || "Unknown error"}`;
+              el.textContent = msg;
+              el.className = "ms-status " +
+                (!success || detail?.search_triggered === false ? "ms-status-error" : "ms-status-success");
+            },
           });
           grid.appendChild(card);
         }
@@ -246,20 +334,30 @@
         resultsDiv.appendChild(grid);
       }
     }
+
+    // Controls are rebuilt on every render; always re-attach so they work during a load
+    setupControlHandlers(container);
   }
 
   /**
    * Perform search/browse and update state
    */
   async function performSearch(container, reset = true) {
-    if (isLoading) return;
+    // Load More while another request is in flight would double-append
+    if (!reset && isLoading) return;
 
     if (reset) {
       currentCursor = null;
       missingScenes = [];
       hasMore = true;
+      isComplete = false;
+      // The note waits for this browse's answer (the endpoint may have changed)
+      fingerprintInfo = null;
+      ownedByFingerprint = 0;
     }
 
+    // A newer request (sort/filter/endpoint change) or leaving the page supersedes this one
+    const token = ++requestToken;
     isLoading = true;
     renderPage(container, { loading: true, error: null, scenes: missingScenes, stats: null });
 
@@ -273,36 +371,97 @@
         filterFavoriteStudios,
         filterFavoriteTags,
       });
+      if (token !== requestToken) return;
 
-      missingScenes = reset ? result.missing_scenes : [...missingScenes, ...result.missing_scenes];
-      currentCursor = result.cursor;
-      hasMore = result.has_more;
+      const failureText = describeFailure(result);
+      if (failureText && !result.partial) {
+        // Nothing new loaded: keep the scenes and the cursor, so a retry resends it
+        isLoading = false;
+        hasMore = currentCursor !== null;
+        renderPage(container, {
+          loading: false,
+          error: missingScenes.length === 0 ? failureText : null,
+          warning: missingScenes.length > 0 ? failureText : null,
+          scenes: missingScenes,
+          stats: null,
+        });
+        return;
+      }
+
+      const newScenes = result.missing_scenes || [];
+      missingScenes = reset ? newScenes : [...missingScenes, ...newScenes];
+      currentCursor = result.cursor || null;
+      hasMore = !!result.has_more;
+      isComplete = !!result.is_complete;
       whisparrConfigured = result.whisparr_configured;
+      whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
+      stashdbName = result.stashdb_name || stashdbName;
       activeFilterTagIds = result.active_filter_tag_ids || [];
+      fingerprintInfo = fingerprintFields(result);
+      ownedByFingerprint += Number(result.owned_by_fingerprint) || 0;
 
       isLoading = false;
       renderPage(container, {
         loading: false,
         error: null,
+        warning: failureText || null,
         scenes: missingScenes,
         stats: {
           total_on_stashdb: result.total_on_stashdb,
+          missing_count_estimate: result.missing_count_estimate,
+          stashdb_name: result.stashdb_name,
           is_complete: result.is_complete,
           filters_active: result.filters_active,
           excluded_tags_applied: result.excluded_tags_applied,
+          favorites_limited: result.favorites_limited,
+          empty_filter_types: result.empty_filter_types || [],
+          favorites_query_limit: result.favorites_query_limit,
           cache_info: result.cache_info || null,
         }
       });
-
-      // Re-attach filter/sort handlers after render
-      setupControlHandlers(container);
     } catch (error) {
+      if (token !== requestToken) return;
       console.error("[MissingScenes] Browse failed:", error);
       isLoading = false;
-      renderPage(container, { loading: false, error: error.message, scenes: [], stats: null });
-      setupControlHandlers(container);
+      const msg = error.message || "Failed to load missing scenes";
+      renderPage(container, {
+        loading: false,
+        error: missingScenes.length === 0 ? msg : null,
+        warning: missingScenes.length > 0 ? msg : null,
+        scenes: missingScenes,
+        stats: null,
+      });
     }
+  }
+
+  /**
+   * Build the fingerprint index for this stash-box, then browse again so it counts
+   */
+  async function handleBuildFingerprintIndex(container) {
+    if (fingerprintBuild.running) return;
+    const session = pageSession;
+    fingerprintBuild = { running: true, message: null };
+    if (lastRenderState) renderPage(container, lastRenderState);
+
+    let result;
+    try {
+      result = await buildFingerprintIndex(selectedEndpoint);
+    } catch (error) {
+      if (session !== pageSession) return;
+      fingerprintBuild = { running: false, message: `Fingerprint index: ${error.message || "the build failed"}` };
+      if (lastRenderState) renderPage(container, lastRenderState);
+      return;
+    }
+    if (session !== pageSession) return;
+
+    fingerprintBuild = { running: false, message: describeFingerprintBuild(result) };
+    if (result.error && !result.partial) {
+      // Nothing new was stored, so browsing again would look the same
+      if (lastRenderState) renderPage(container, lastRenderState);
+      return;
+    }
+    await performSearch(container, true);
   }
 
   /**
@@ -351,6 +510,15 @@
     container.querySelector('#ms-load-more-btn')?.addEventListener('click', () => {
       performSearch(container, false);
     });
+
+    // Retry: from the current cursor when there is one (even with no scenes yet), else from scratch
+    container.querySelector('#ms-retry-btn')?.addEventListener('click', () => {
+      performSearch(container, currentCursor === null);
+    });
+
+    container.querySelector('#ms-build-fp-btn')?.addEventListener('click', () => {
+      handleBuildFingerprintIndex(container);
+    });
   }
 
   /**
@@ -368,10 +536,16 @@
         setPageTitle("Missing Scenes | Stash");
 
         // Reset state for fresh page load
+        requestToken++;
+        pageSession++;
         missingScenes = [];
         currentCursor = null;
         hasMore = true;
+        isComplete = false;
         isLoading = false;
+        fingerprintInfo = null;
+        ownedByFingerprint = 0;
+        fingerprintBuild = { running: false, message: null };
 
         // Fetch available endpoints before first search
         try {
@@ -384,11 +558,13 @@
 
         // Initial render and load
         renderPage(containerRef.current, { loading: true, error: null, scenes: [], stats: null });
-        setupControlHandlers(containerRef.current);
         performSearch(containerRef.current, true);
       }
 
       init();
+
+      // Leaving the page: ignore any response still in flight
+      return () => { requestToken++; pageSession++; };
     }, []);
 
     return React.createElement('div', {
@@ -486,6 +662,19 @@
   function registerRoute() {
     PluginApi.register.route(BROWSE_PATH, MissingScenesBrowsePage);
     console.log('[MissingScenes] Route registered:', BROWSE_PATH);
+  }
+
+  // Test hook: active only when a test sets window.__MISSING_SCENES_TEST__
+  if (window.__MISSING_SCENES_TEST__) {
+    window.__MISSING_SCENES_TEST__.browse = {
+      getAllEndpoints,
+      browseStashdb,
+      renderPage,
+      performSearch,
+      setupControlHandlers,
+      handleBuildFingerprintIndex,
+      MissingScenesBrowsePage,
+    };
   }
 
   // Initialize

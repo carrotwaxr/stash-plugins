@@ -1,6 +1,6 @@
 name: Missing Scenes
-description: Discover scenes from StashDB that you don't have locally. View missing scenes for performers and studios, with optional Whisparr integration for automated downloading and cleanup.
-version: 1.4.1
+description: Discover scenes from StashDB, other stash-boxes and ThePornDB that you don't have locally. View missing scenes for performers, studios and tags, with optional Whisparr v3 integration (StashDB scenes) for automated downloading and cleanup.
+version: 1.5.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer/studio pages
@@ -24,7 +24,7 @@ settings:
   # Whisparr integration (optional)
   whisparrUrl:
     displayName: Whisparr URL
-    description: Optional. URL to your Whisparr instance (e.g., http://localhost:6969). Leave empty to disable Whisparr integration.
+    description: Optional. Address of your Whisparr v3 instance (e.g., 192.168.1.10:6969 or http://host:6969/whisparr; include the URL Base if set). Leave empty to disable Whisparr integration.
     type: STRING
   whisparrApiKey:
     displayName: Whisparr API Key
@@ -44,7 +44,7 @@ settings:
     type: BOOLEAN
   whisparrSearchOnAdd:
     displayName: Search on Add
-    description: Automatically search for scenes when adding to Whisparr. Enabled by default.
+    description: Automatically search for scenes when adding to Whisparr. Off by default, so adding a scene doesn't start a download.
     type: BOOLEAN
 
   # Automation settings
@@ -58,7 +58,7 @@ settings:
     type: BOOLEAN
   scanPath:
     displayName: Scan Path for New Scenes
-    description: Path to scan for new downloaded scenes (e.g., /data/unsorted). Used by the "Scan for New Scenes" task.
+    description: Path to scan for new downloaded scenes (e.g., /data/unsorted). Must be inside a Stash library. Separate several paths with ;. Used by the "Scan for New Scenes" task.
     type: STRING
 
   # StashDB API settings (advanced - for rate limiting and error handling)
@@ -69,14 +69,6 @@ settings:
   stashbox_max_retries:
     displayName: Max Retries
     description: Number of times to retry failed StashDB requests (for 504, 503, connection errors). Default is 3.
-    type: NUMBER
-  stashbox_max_pages_performer:
-    displayName: Max Pages (Performer)
-    description: Maximum pages to fetch when querying performer scenes (100 scenes per page). Default is 25 (2500 scenes max). Reduce for faster results.
-    type: NUMBER
-  stashbox_max_pages_studio:
-    displayName: Max Pages (Studio)
-    description: Maximum pages to fetch when querying studio scenes (100 scenes per page). Default is 25 (2500 scenes max). Reduce for faster results.
     type: NUMBER
 
   # Content filtering
@@ -89,6 +81,12 @@ settings:
     description: Maximum number of favorites to use per filter type (default 100). Favorites are sorted by engagement (performers by last activity, studios/tags by scene count).
     type: NUMBER
 
+  # Fingerprint index
+  ignoreFingerprintMatches:
+    displayName: Ignore Fingerprint Matches
+    description: Off by default, so a stash-box scene counts as owned when one of your scenes without its stash ID (untagged, or tagged on another stash-box) matches it by phash, oshash or md5. The matches come from the Build Fingerprint Index task. Turn on to count only scenes linked by stash ID.
+    type: BOOLEAN
+
 # Tasks that can be run manually or scheduled
 tasks:
   - name: Scan for New Scenes
@@ -99,13 +97,25 @@ tasks:
     description: Remove scenes from Whisparr that are now tagged in Stash. Prevents duplicate downloads.
     defaultArgs:
       mode: cleanup
+  - name: Test Whisparr Connection
+    description: Check the Whisparr URL, API key, version, root folder and quality profile, and log what is wrong.
+    defaultArgs:
+      mode: test_whisparr
+  - name: Build Fingerprint Index
+    description: For every configured stash-box, look up your scenes that have no stash ID for it (untagged, or tagged on another box) by phash, oshash and md5, so Missing Scenes counts the scenes they match as owned. Later runs only look up new or changed scenes. Can take a while on a large library.
+    defaultArgs:
+      mode: build_fingerprint_index
 
-# Hook to automatically cleanup Whisparr when a scene is tagged
+# Hooks: keep the local indexes current, and clean up Whisparr when a scene is tagged
 hooks:
   - name: Whisparr Auto-Cleanup
-    description: Remove scene from Whisparr when it receives a StashDB ID (gets tagged)
+    description: When a scene's stash IDs change, refresh the local indexes. With Auto-cleanup Whisparr on, remove the scene from Whisparr once it has a StashDB ID.
     triggeredBy:
       - Scene.Update.Post
+  - name: Forget Deleted Scenes
+    description: When a scene is deleted, drop it from the local indexes so its stash IDs and fingerprint matches stop counting as owned.
+    triggeredBy:
+      - Scene.Destroy.Post
 
 # Python backend for StashDB queries (called via runPluginOperation from JS)
 exec:

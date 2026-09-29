@@ -1,14 +1,23 @@
 (function () {
   "use strict";
 
-  const PLUGIN_ID = "missingScenes";
-
   // Use shared core module
   const Core = window.MissingScenesCore;
   const {
     runPluginOperation,
+    describeFailure,
     escapeHtml,
     addToWhisparr,
+    isStashdbEndpoint,
+    describeWhisparrAdd,
+    describeWhisparrStatusError,
+    buildFingerprintIndex,
+    describeFingerprintIndex,
+    describeFingerprintBuild,
+    fingerprintFields,
+    directionFor,
+    describeNoFavorites,
+    TRENDING_NOTE,
     createSceneCard: coreCreateSceneCard,
   } = Core;
 
@@ -19,8 +28,18 @@
   let currentEntityName = null;
   let missingScenes = [];
   let isLoading = false;
+  let requestToken = 0; // bumped by every new search and when the modal closes
+  let currentWarning = null; // {message, retryLabel} shown above partial results
   let whisparrConfigured = false;
+  let whisparrError = null; // set when the Whisparr status map could not be fetched
   let stashdbUrl = "";
+  let stashdbName = "";
+
+  // Fingerprint index state (the note under the stats)
+  let fingerprintInfo = null; // fingerprint fields of the last response
+  let ownedByFingerprint = 0; // scenes left out as owned by fingerprint, over the pages loaded
+  let fingerprintBuild = { running: false, message: null }; // a build started from the modal
+  let modalSession = 0; // bumped when the modal closes, so a late build result is dropped
 
   // Endpoint selection state (for entities with multiple stash-box links)
   let availableEndpoints = []; // [{endpoint, name, stash_id}]
@@ -33,6 +52,8 @@
   let totalOnStashdb = 0;
   let totalLocal = 0;
   let sortField = "DATE";
+  // No scenes yet, but the stash-box has pages left (the 50-page cap of one request)
+  const NOT_FOUND_YET = "No missing scenes in the pages checked so far.";
   let sortDirection = "DESC";
 
   // Favorite entity filter state (persists within session)
@@ -40,6 +61,7 @@
   let filterFavoriteStudios = false;
   let filterFavoriteTags = false;
   let activeFilterTagIds = [];
+  let emptyFilterTypes = []; // favorites filters with no favorites linked to this box
 
   /**
    * Find missing scenes for the current entity (paginated)
@@ -117,6 +139,12 @@
     stats.className = "ms-stats-bar";
     stats.id = "ms-stats";
 
+    // Fingerprint index note (count owned by fingerprint, or the Build button)
+    const fingerprintNote = document.createElement("div");
+    fingerprintNote.className = "ms-fingerprint-note";
+    fingerprintNote.id = "ms-fingerprint";
+    fingerprintNote.style.display = "none";
+
     // Sort controls
     const sortControls = document.createElement("div");
     sortControls.className = "ms-sort-controls";
@@ -124,16 +152,11 @@
     sortControls.innerHTML = `
       <label for="ms-sort-field">Sort by:</label>
       <select id="ms-sort-field" class="ms-sort-select">
-        <option value="DATE">Release Date</option>
-        <option value="TITLE">Title</option>
-        <option value="CREATED_AT">Added to StashDB</option>
-        <option value="UPDATED_AT">Last Updated</option>
+        ${SORT_OPTIONS.map((o) => `<option value="${o.value}">${o.label}</option>`).join("")}
       </select>
-      <select id="ms-sort-direction" class="ms-sort-select">
-        <option value="DESC">Newest First</option>
-        <option value="ASC">Oldest First</option>
-      </select>
+      <select id="ms-sort-direction" class="ms-sort-select"></select>
     `;
+    applyDirectionOptions(sortControls.querySelector("#ms-sort-direction"), sortField, sortDirection);
 
     // Filter controls - show 2 checkboxes for the entity types NOT being searched
     const filterControls = document.createElement("div");
@@ -160,6 +183,7 @@
     // Assemble modal
     modal.appendChild(header);
     modal.appendChild(stats);
+    modal.appendChild(fingerprintNote);
     modal.appendChild(sortControls);
     modal.appendChild(filterControls);
     modal.appendChild(body);
@@ -190,6 +214,22 @@
     return modal;
   }
 
+  const SORT_OPTIONS = [
+    { value: "DATE", label: "Release Date" },
+    { value: "TITLE", label: "Title" },
+    { value: "CREATED_AT", label: "Added to StashDB" },
+    { value: "UPDATED_AT", label: "Last Updated" },
+    { value: "TRENDING", label: "Trending" },
+  ];
+
+  function applyDirectionOptions(selectEl, sort, current) {
+    const { hidden, options } = directionFor(sort);
+    selectEl.innerHTML = options.map((o) => `<option value="${o.value}">${o.label}</option>`).join("");
+    selectEl.value = current;
+    selectEl.style.display = hidden ? "none" : "";
+    selectEl.title = hidden ? "Trending is always most active first" : "";
+  }
+
   /**
    * Handle sort control changes
    */
@@ -197,8 +237,10 @@
     const sortFieldEl = document.getElementById("ms-sort-field");
     const sortDirEl = document.getElementById("ms-sort-direction");
     if (sortFieldEl && sortDirEl) {
+      const fieldChanged = sortFieldEl.value !== sortField;
       sortField = sortFieldEl.value;
-      sortDirection = sortDirEl.value;
+      if (fieldChanged) applyDirectionOptions(sortDirEl, sortField, sortDirection);
+      sortDirection = sortDirEl.value || sortDirection;
       // Reset pagination and re-search
       performSearch(true);
     }
@@ -332,6 +374,71 @@
       modalRoot.remove();
       modalRoot = null;
     }
+    // Invalidate any in-flight request so a late response cannot touch a closed modal
+    requestToken++;
+    isLoading = false;
+    modalSession++;
+    fingerprintInfo = null;
+    ownedByFingerprint = 0;
+    fingerprintBuild = { running: false, message: null };
+  }
+
+  /**
+   * Render the fingerprint note: how many scenes count as owned by fingerprint, or a
+   * "Build fingerprint index" button when the stash-box has no (complete) index
+   */
+  function renderFingerprintNote() {
+    const el = document.getElementById("ms-fingerprint");
+    if (!el) return;
+    const note = describeFingerprintIndex(fingerprintInfo, ownedByFingerprint, fingerprintBuild, stashdbName);
+    el.innerHTML = "";
+    el.style.display = note.text || note.button ? "" : "none";
+    if (note.text) {
+      const span = document.createElement("span");
+      span.className = "ms-fingerprint-text";
+      span.textContent = note.text;
+      el.appendChild(span);
+    }
+    if (note.button) {
+      const btn = document.createElement("button");
+      btn.className = "ms-btn ms-btn-secondary ms-build-fp-btn";
+      btn.textContent = note.running ? "Building fingerprint index..." : "Build fingerprint index";
+      btn.disabled = note.running;
+      btn.onclick = handleBuildFingerprintIndex;
+      el.appendChild(btn);
+    }
+  }
+
+  /**
+   * Build the fingerprint index for this stash-box, then search again so it counts
+   */
+  async function handleBuildFingerprintIndex() {
+    if (fingerprintBuild.running) return;
+    const session = modalSession;
+    fingerprintBuild = { running: true, message: null };
+    renderFingerprintNote();
+    setStatus("Building the fingerprint index...", "loading");
+
+    let result;
+    try {
+      result = await buildFingerprintIndex(selectedEndpoint);
+    } catch (error) {
+      if (session !== modalSession) return;
+      fingerprintBuild = { running: false, message: `Fingerprint index: ${error.message || "the build failed"}` };
+      renderFingerprintNote();
+      setStatus(fingerprintBuild.message, "error");
+      return;
+    }
+    if (session !== modalSession) return;
+
+    fingerprintBuild = { running: false, message: describeFingerprintBuild(result) };
+    renderFingerprintNote();
+    if (result.error && !result.partial) {
+      // Nothing new was stored, so a new search would look the same
+      setStatus(fingerprintBuild.message, "error");
+      return;
+    }
+    await performSearch(true);
   }
 
   /**
@@ -359,29 +466,23 @@
     // Check if filters are active
     const filtersActive = data.filters_active || false;
 
-    // Handle both legacy (missing_count) and paginated (missing_count_estimate/loaded) responses
+    // Paginated response: complete, estimated, or just the loaded count
     let missingDisplay;
-    if (data.is_complete !== undefined) {
-      // Paginated response
-      const estimate = data.missing_count_estimate;
-      const loaded = missingScenes.length;
-      if (data.is_complete) {
-        missingDisplay = `${loaded}`;
-      } else if (estimate !== null) {
-        missingDisplay = `~${estimate} (${loaded} loaded)`;
-      } else {
-        // When filters are active or no estimate, just show loaded count
-        missingDisplay = `${loaded} loaded`;
-      }
+    const estimate = data.missing_count_estimate;
+    const loaded = missingScenes.length;
+    if (data.is_complete) {
+      missingDisplay = `${loaded}`;
+    } else if (estimate !== null && estimate !== undefined && Number(estimate) >= 0) {
+      missingDisplay = `~${Math.max(0, Number(estimate))} (${loaded} loaded)`;
     } else {
-      // Legacy response
-      missingDisplay = `${data.missing_count || 0}`;
+      // When filters are active or no estimate, just show loaded count
+      missingDisplay = `${loaded} loaded`;
     }
 
     // Build stats HTML - when filters are active, indicate filtered results
     const stashdbName = escapeHtml(data.stashdb_name || "StashDB");
     let stashdbLabel = `On ${stashdbName}:`;
-    let stashdbValue = escapeHtml(data.total_on_stashdb || 0);
+    let stashdbValue = escapeHtml(data.total_on_stashdb === null || data.total_on_stashdb === undefined ? "?" : data.total_on_stashdb);
     if (filtersActive) {
       stashdbLabel = `Total on ${stashdbName}:`;
     }
@@ -411,6 +512,44 @@
   }
 
   /**
+   * Warning banner (partial results) with a retry button
+   */
+  function buildWarningBanner(message, retryLabel, onRetry) {
+    const banner = document.createElement("div");
+    banner.className = "ms-warning";
+    const msg = document.createElement("span");
+    msg.className = "ms-warning-text";
+    msg.innerHTML = escapeHtml(message);
+    banner.appendChild(msg);
+    const btn = document.createElement("button");
+    btn.className = "ms-btn ms-btn-secondary ms-retry-btn";
+    btn.textContent = retryLabel;
+    btn.onclick = onRetry;
+    banner.appendChild(btn);
+    return banner;
+  }
+
+  /**
+   * The stash-box endpoint the current results came from
+   */
+  function currentEndpoint() {
+    return selectedEndpoint || stashdbUrl;
+  }
+
+  /**
+   * Whisparr status-unavailable banner
+   */
+  function buildWhisparrBanner(error) {
+    const banner = document.createElement("div");
+    banner.className = "ms-warning ms-whisparr-banner";
+    const msg = document.createElement("span");
+    msg.className = "ms-warning-text";
+    msg.innerHTML = escapeHtml(describeWhisparrStatusError(error));
+    banner.appendChild(msg);
+    return banner;
+  }
+
+  /**
    * Render the results grid
    */
   function renderResults() {
@@ -418,12 +557,28 @@
     if (!container) return;
 
     if (missingScenes.length === 0) {
-      container.innerHTML = `
+      container.innerHTML = "";
+      if (currentWarning) {
+        // A page failed before anything qualified: say what failed, never "all found"
+        container.appendChild(buildWarningBanner(currentWarning.message, currentWarning.retryLabel, currentWarning.onRetry));
+      } else if (!isComplete) {
+        // Pages are left (Load More carries on from the cursor), so nothing is known yet
+        const note = sortField === "TRENDING" ? ` ${TRENDING_NOTE}` : "";
+        container.innerHTML = `<div class="ms-placeholder">${NOT_FOUND_YET}${hasMore ? " Load More checks the next pages." : ""}${note}</div>`;
+      } else if (emptyFilterTypes.length > 0) {
+        container.innerHTML = `<div class="ms-placeholder">${escapeHtml(describeNoFavorites(emptyFilterTypes, stashdbName))}</div>`;
+      } else if (sortField === "TRENDING") {
+        // Trending leaves out scenes with no recent activity, so an empty list
+        // says nothing about the rest of the catalogue
+        container.innerHTML = `<div class="ms-placeholder">No missing scenes are trending. ${TRENDING_NOTE}</div>`;
+      } else {
+        container.innerHTML = `
         <div class="ms-placeholder ms-success">
           <div class="ms-success-icon">&#10003;</div>
           <div>You have all available scenes!</div>
         </div>
       `;
+      }
       updateLoadMoreButton();
       return;
     }
@@ -436,12 +591,13 @@
       const item = coreCreateSceneCard(scene, {
         stashdbUrl: stashdbUrl,
         whisparrConfigured: whisparrConfigured,
+        endpoint: currentEndpoint(),
         activeFilterTagIds: activeFilterTagIds,
-        onWhisparrAdd: (scene, success, error) => {
+        onWhisparrAdd: (scene, success, detail) => {
           if (success) {
-            setStatus(`Added "${scene.title}" to Whisparr`, "success");
+            setStatus(describeWhisparrAdd(scene, detail), detail && detail.search_triggered === false ? "error" : "success");
           } else {
-            setStatus(`Failed to add: ${error?.message || "Unknown error"}`, "error");
+            setStatus(`Failed to add: ${detail?.message || "Unknown error"}`, "error");
           }
         }
       });
@@ -449,16 +605,25 @@
     }
 
     container.innerHTML = "";
+    if (whisparrConfigured && whisparrError) {
+      container.appendChild(buildWhisparrBanner(whisparrError));
+    }
+    if (currentWarning) {
+      container.appendChild(buildWarningBanner(currentWarning.message, currentWarning.retryLabel, currentWarning.onRetry));
+    }
     container.appendChild(grid);
 
     // Show "Add All" button if Whisparr is configured
     const addAllBtn = document.getElementById("ms-add-all-btn");
-    if (addAllBtn && whisparrConfigured) {
+    if (addAllBtn) {
       const notInWhisparr = missingScenes.filter((s) => !s.in_whisparr);
-      if (notInWhisparr.length > 0) {
+      // Whisparr matches StashDB IDs only, so no bulk add elsewhere
+      if (whisparrConfigured && isStashdbEndpoint(currentEndpoint()) && notInWhisparr.length > 0) {
         addAllBtn.style.display = "inline-block";
         addAllBtn.textContent = `Add All to Whisparr (${notInWhisparr.length})`;
         addAllBtn.onclick = () => handleAddAll(notInWhisparr);
+      } else {
+        addAllBtn.style.display = "none";
       }
     }
 
@@ -472,10 +637,17 @@
     const loadMoreBtn = document.getElementById("ms-load-more-btn");
     if (!loadMoreBtn) return;
 
-    if (hasMore && !isComplete && missingScenes.length > 0) {
+    // Also with no scenes yet: the pages checked so far may just have had none
+    if (hasMore && !isComplete && currentCursor) {
       loadMoreBtn.style.display = "inline-block";
-      const estimate = totalOnStashdb - totalLocal;
-      loadMoreBtn.textContent = `Load More (${missingScenes.length} of ~${estimate})`;
+      const estimate = Math.max(0, totalOnStashdb - totalLocal);
+      if (missingScenes.length === 0) {
+        loadMoreBtn.textContent = "Load More";
+      } else {
+        loadMoreBtn.textContent = estimate > missingScenes.length
+          ? `Load More (${missingScenes.length} of ~${estimate})`
+          : `Load More (${missingScenes.length} loaded)`;
+      }
       loadMoreBtn.onclick = handleLoadMore;
       loadMoreBtn.disabled = isLoading;
     } else {
@@ -498,11 +670,17 @@
     const addAllBtn = document.getElementById("ms-add-all-btn");
     if (!addAllBtn) return;
 
+    if (!isStashdbEndpoint(currentEndpoint())) {
+      setStatus("Whisparr needs StashDB: it matches StashDB scene IDs only", "error");
+      return;
+    }
+
     addAllBtn.disabled = true;
     addAllBtn.classList.add("ms-btn-loading");
 
     let added = 0;
     let failed = 0;
+    const failures = [];
 
     for (const scene of scenes) {
       if (scene.in_whisparr) continue;
@@ -510,7 +688,7 @@
       setStatus(`Adding ${added + failed + 1}/${scenes.length}: ${scene.title}...`, "loading");
 
       try {
-        await addToWhisparr(scene.stash_id, scene.title);
+        await addToWhisparr(scene.stash_id, scene.title, currentEndpoint());
         scene.in_whisparr = true;
         added++;
 
@@ -527,6 +705,7 @@
       } catch (error) {
         console.error(`[MissingScenes] Failed to add ${scene.title}:`, error);
         failed++;
+        failures.push(`${scene.title}: ${error.message || "Unknown error"}`);
       }
 
       // Small delay between requests
@@ -542,7 +721,7 @@
     } else {
       addAllBtn.textContent = `Added ${added}, ${failed} failed`;
       addAllBtn.classList.add("ms-btn-error");
-      setStatus(`Added ${added} scenes, ${failed} failed`, "error");
+      setStatus(`Added ${added} scenes, ${failed} failed. ${failures.join("; ")}`, "error");
     }
 
     // Hide button after all are added
@@ -587,7 +766,7 @@
   /**
    * Show error state
    */
-  function showError(message) {
+  function showError(message, onRetry = null) {
     const container = document.getElementById("ms-results");
     if (container) {
       container.innerHTML = `
@@ -596,6 +775,13 @@
           <div>${escapeHtml(message)}</div>
         </div>
       `;
+      if (onRetry) {
+        const btn = document.createElement("button");
+        btn.className = "ms-btn ms-retry-btn";
+        btn.textContent = "Retry";
+        btn.onclick = onRetry;
+        container.appendChild(btn);
+      }
     }
   }
 
@@ -610,13 +796,15 @@
     }
 
     isLoading = true;
-    createModal();
+    createModal(); // closes any previous modal, which invalidates its requests
+    const token = ++requestToken;
     showLoading();
     setStatus("Checking endpoints...", "loading");
 
     try {
       // Check available endpoints for this entity
       const endpointInfo = await getEndpoints(currentEntityType, currentEntityId);
+      if (token !== requestToken) return;
       availableEndpoints = endpointInfo.available_endpoints || [];
       selectedEndpoint = endpointInfo.default_endpoint;
 
@@ -649,7 +837,8 @@
       await performSearch(true);
     } catch (error) {
       console.error("[MissingScenes] Search failed:", error);
-      showError(error.message || "Failed to search for missing scenes");
+      if (token !== requestToken) return;
+      showError(error.message || "Failed to search for missing scenes", handleSearch);
       setStatus(error.message || "Search failed", "error");
       isLoading = false;
     }
@@ -666,11 +855,22 @@
       hasMore = true;
       isComplete = false;
       missingScenes = [];
+      currentWarning = null;
+      emptyFilterTypes = [];
+      // The note waits for this search's answer (the endpoint may have changed)
+      fingerprintInfo = null;
+      ownedByFingerprint = 0;
+      renderFingerprintNote();
       showLoading();
     }
 
+    // Each call owns a token; a newer call (or closing the modal) supersedes it
+    const token = ++requestToken;
     isLoading = true;
     setStatus(reset ? "Searching..." : "Loading more...", "loading");
+    const retryFromHere = () => performSearch(false);
+    // With a cursor (a failed Load More), a retry resends it instead of starting over
+    const retryAll = () => performSearch(!currentCursor);
 
     try {
       const result = await findMissingScenes(currentEntityType, currentEntityId, selectedEndpoint, {
@@ -682,38 +882,82 @@
         filterFavoriteStudios: filterFavoriteStudios,
         filterFavoriteTags: filterFavoriteTags,
       });
+      if (token !== requestToken) return;
+
+      const failureText = describeFailure(result);
+      if (failureText && !result.partial) {
+        // Nothing new loaded: keep what we have and offer a retry
+        if (missingScenes.length === 0) {
+          showError(failureText, retryAll);
+          updateLoadMoreButton();
+        } else {
+          currentWarning = { message: failureText, retryLabel: "Retry from here", onRetry: retryFromHere };
+          renderResults();
+        }
+        setStatus(failureText, "error");
+        return;
+      }
 
       // Append new scenes to existing list
       const newScenes = result.missing_scenes || [];
       missingScenes = [...missingScenes, ...newScenes];
 
       whisparrConfigured = result.whisparr_configured || false;
+      whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
+      stashdbName = result.stashdb_name || stashdbName;
       activeFilterTagIds = result.active_filter_tag_ids || [];
+      emptyFilterTypes = result.empty_filter_types || [];
+      fingerprintInfo = fingerprintFields(result);
+      ownedByFingerprint += Number(result.owned_by_fingerprint) || 0;
 
       // Update pagination state
       currentCursor = result.cursor;
       hasMore = result.has_more || false;
       isComplete = result.is_complete || false;
 
+      currentWarning = failureText
+        ? { message: failureText, retryLabel: "Retry from here", onRetry: retryFromHere }
+        : null;
+
       updateStats(result);
+      renderFingerprintNote();
       renderResults();
 
-      if (missingScenes.length > 0) {
+      if (failureText) {
+        setStatus(missingScenes.length > 0
+          ? `Loaded ${missingScenes.length} missing scenes, then failed: ${failureText}`
+          : failureText, "error");
+      } else if (missingScenes.length > 0) {
         const statusText = isComplete
           ? `Found ${missingScenes.length} missing scenes`
           : `Loaded ${missingScenes.length} missing scenes`;
-        setStatus(statusText, "success");
+        setStatus(sortField === "TRENDING" ? `${statusText}. ${TRENDING_NOTE}` : statusText, "success");
+      } else if (!isComplete) {
+        setStatus(NOT_FOUND_YET);
+      } else if (emptyFilterTypes.length > 0) {
+        setStatus(describeNoFavorites(emptyFilterTypes, stashdbName));
+      } else if (sortField === "TRENDING") {
+        setStatus(`No missing scenes are trending. ${TRENDING_NOTE}`);
       } else {
         setStatus("You have all available scenes!", "success");
       }
     } catch (error) {
+      if (token !== requestToken) return;
       console.error("[MissingScenes] Search failed:", error);
-      showError(error.message || "Failed to search for missing scenes");
-      setStatus(error.message || "Search failed", "error");
+      const msg = error.message || "Failed to search for missing scenes";
+      if (missingScenes.length === 0) {
+        showError(msg, retryAll);
+      } else {
+        currentWarning = { message: msg, retryLabel: "Retry from here", onRetry: retryFromHere };
+        renderResults();
+      }
+      setStatus(msg, "error");
     } finally {
-      isLoading = false;
-      updateLoadMoreButton();
+      if (token === requestToken) {
+        isLoading = false;
+        updateLoadMoreButton();
+      }
     }
   }
 
@@ -844,6 +1088,31 @@
     } else {
       waitForPage();
     }
+  }
+
+  // Test hook: active only when a test sets window.__MISSING_SCENES_TEST__
+  if (window.__MISSING_SCENES_TEST__) {
+    window.__MISSING_SCENES_TEST__.modal = {
+      findMissingScenes,
+      getEndpoints,
+      performSearch,
+      handleSearch,
+      handleLoadMore,
+      handleAddAll,
+      updateStats,
+      renderResults,
+      updateLoadMoreButton,
+      setStatus,
+      showLoading,
+      showError,
+      createModal,
+      removeModal,
+      renderFingerprintNote,
+      handleBuildFingerprintIndex,
+      SORT_OPTIONS,
+      directionFor,
+      setSortField: (value) => { sortField = value; },
+    };
   }
 
   // Start the plugin

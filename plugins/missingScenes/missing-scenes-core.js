@@ -7,6 +7,10 @@
 
   const PLUGIN_ID = "missingScenes";
 
+  // A response with one of these keys carries results to render even when it has an
+  // error: scenes (find_missing, browse_stashdb) or a fingerprint index build's counts
+  const RESULT_KEYS = ["missing_scenes", "scanned"];
+
   /**
    * Get the GraphQL endpoint URL
    */
@@ -70,11 +74,128 @@
       throw new Error("Invalid response from plugin");
     }
 
-    if (output.error) {
+    // A response that carries results plus an error is a (partial) result the UI
+    // must render; only a plain error (no results key) is thrown.
+    if (output.error && !RESULT_KEYS.some((key) => key in output)) {
       throw new Error(output.error);
     }
 
     return output;
+  }
+
+  /**
+   * Human-readable text for a failed find_missing / browse_stashdb response.
+   * Returns "" when the response carries no error. Plain text (escape before HTML).
+   */
+  function describeFailure(output) {
+    if (!output || !output.error) return "";
+    let msg = String(output.error);
+    if (output.auth_error && !/api key/i.test(msg)) {
+      msg += " Check the stash-box API key in Settings > Metadata Providers.";
+    }
+    if (output.rate_limited) {
+      const wait = output.retry_after;
+      msg += wait !== undefined && wait !== null
+        ? ` The stash-box is rate-limited, try again in ${wait} s.`
+        : " The stash-box is rate-limited, try again shortly.";
+    }
+    return msg;
+  }
+
+  /**
+   * Build or update the fingerprint index for a stash-box (the backend's default box when
+   * endpoint is empty). Resolves with the counts, which carry `error` when the build
+   * stopped early; throws when nothing could be done (no such box, Stash unreachable).
+   */
+  async function buildFingerprintIndex(endpoint) {
+    const args = { operation: "build_fingerprint_index" };
+    if (endpoint) args.endpoint = endpoint;
+    return runPluginOperation(args);
+  }
+
+  const FINGERPRINT_TASK_HINT = "Build it from Settings > Tasks (Build Fingerprint Index), or here.";
+
+  /**
+   * The fingerprint note under a view's stats. Plain text (escape before HTML).
+   * info: the last response's fingerprint fields; owned: scenes left out as owned by
+   * fingerprint so far; build: {running, message} of a build started from the view.
+   * Returns {text, button, running}; button is true when "Build fingerprint index" shows.
+   */
+  function describeFingerprintIndex(info, owned, build, boxName) {
+    const parts = [];
+    let button = false;
+    const box = boxName || "this stash-box";
+    if (info && info.fingerprint_matching !== false && typeof info.fingerprint_index === "boolean") {
+      if (!info.fingerprint_index) {
+        parts.push(`No fingerprint index for ${box} yet, so scenes you have without a ${box} ID show as missing. ${FINGERPRINT_TASK_HINT}`);
+        button = true;
+      } else {
+        if (owned > 0) parts.push(`${owned} counted as owned by fingerprint.`);
+        if (info.fingerprint_index_complete === false) {
+          parts.push(`The fingerprint index is incomplete: its last build stopped early. ${FINGERPRINT_TASK_HINT}`);
+          button = true;
+        }
+      }
+    }
+    const running = !!(build && build.running);
+    if (running) {
+      parts.push("Building the fingerprint index. On a large library this takes minutes; the task in Settings > Tasks runs it in the background.");
+    }
+    if (build && build.message) parts.push(build.message);
+    return { text: parts.join(" "), button, running };
+  }
+
+  /**
+   * Text for a finished build_fingerprint_index result. Plain text.
+   */
+  function describeFingerprintBuild(result) {
+    if (!result) return "";
+    // The backend's message already names the box and says what to do
+    if (result.error) return `Fingerprint index: ${result.error}`;
+    const box = result.stashdb_name || "the stash-box";
+    let msg = `Fingerprint index built: ${result.matched} of ${result.scanned} scenes without a ${box} ID match a ${box} scene.`;
+    if (result.no_fingerprints > 0) {
+      msg += ` ${result.no_fingerprints} have no fingerprints to look up yet.`;
+    }
+    return msg;
+  }
+
+  /**
+   * The fingerprint fields of a find_missing / browse_stashdb response.
+   */
+  function fingerprintFields(output) {
+    return {
+      fingerprint_matching: output.fingerprint_matching,
+      fingerprint_index: output.fingerprint_index,
+      fingerprint_index_complete: output.fingerprint_index_complete,
+    };
+  }
+
+  // Trending is stash-box's recent-activity ordering, so an empty list says little
+  const TRENDING_NOTE = "Trending only includes scenes with activity on the stash-box in the last 7 days.";
+
+  /**
+   * Text for a response whose favorites filter has nothing to match: the user has no
+   * favorites of these types (empty_filter_types) linked to the box. Plain text; "" for none.
+   */
+  function describeNoFavorites(types, boxName) {
+    const list = (types || []).filter(Boolean).map(String);
+    if (list.length === 0) return "";
+    const joined = list.length > 1 ? `${list.slice(0, -1).join(", ")} or ${list[list.length - 1]}` : list[0];
+    return `You have no favorite ${joined} linked to ${boxName || "this stash-box"}, so this filter matches no scenes.`;
+  }
+
+  /**
+   * Direction options for a sort, shared by the modal and the browse page. Dates read
+   * Newest/Oldest, Title reads Descending/Ascending. stash-box orders TRENDING by recent
+   * fingerprint count, always descending, and ignores the direction, so that control is hidden.
+   */
+  function directionFor(sort) {
+    if (sort === "TITLE") {
+      return { hidden: false, options: [{ value: "DESC", label: "Descending" }, { value: "ASC", label: "Ascending" }] };
+    }
+    const options = [{ value: "DESC", label: "Newest First" }, { value: "ASC", label: "Oldest First" }];
+    return { hidden: sort === "TRENDING", options };
   }
 
   /**
@@ -124,14 +245,55 @@
   }
 
   /**
-   * Add a scene to Whisparr
+   * True when the endpoint URL is StashDB (host stashdb.org, case-insensitive).
+   * Mirrors is_stashdb_endpoint() in the backend: Whisparr matches StashDB IDs only.
    */
-  async function addToWhisparr(stashId, title) {
-    return runPluginOperation({
+  function isStashdbEndpoint(url) {
+    if (!url) return false;
+    try {
+      return new URL(String(url).trim()).hostname.toLowerCase() === "stashdb.org";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * Status-line text for a successful add_to_whisparr result. Plain text.
+   */
+  function describeWhisparrAdd(scene, result) {
+    const title = scene && scene.title ? scene.title : "scene";
+    if (result && result.already_exists) return `"${title}" is already in Whisparr`;
+    if (result && result.search_triggered === false) {
+      const why = result.search_error ? ` (${result.search_error})` : "";
+      return `Added "${title}" to Whisparr without starting a search${why}`;
+    }
+    return `Added "${title}" to Whisparr`;
+  }
+
+  /**
+   * Banner text when the Whisparr status map could not be fetched. Plain text.
+   */
+  function describeWhisparrStatusError(error) {
+    return `Whisparr status unavailable: ${error}. Run Test Whisparr Connection.`;
+  }
+
+  const WHISPARR_STASHDB_HINT = "Whisparr needs StashDB";
+
+  /**
+   * Add a scene to Whisparr. Resolves with the result; throws when the add fails.
+   */
+  async function addToWhisparr(stashId, title, endpoint) {
+    const args = {
       operation: "add_to_whisparr",
       stash_id: stashId,
       title: title,
-    });
+    };
+    if (endpoint) args.endpoint = endpoint;
+    const result = await runPluginOperation(args);
+    if (result && result.success === false) {
+      throw new Error(result.error || "Whisparr add failed");
+    }
+    return result;
   }
 
   /**
@@ -139,7 +301,8 @@
    * @param {Object} scene - Scene object with stash_id and title
    * @param {HTMLElement} button - The button element to update
    * @param {Object} config - Configuration object
-   * @param {Function} config.onSuccess - Optional callback on success
+   * @param {string} config.endpoint - The view's stash-box endpoint URL
+   * @param {Function} config.onSuccess - Optional callback on success (scene, result)
    * @param {Function} config.onError - Optional callback on error
    */
   async function handleAddToWhisparr(scene, button, config = {}) {
@@ -149,7 +312,7 @@
     button.classList.add("ms-btn-loading");
 
     try {
-      await addToWhisparr(scene.stash_id, scene.title);
+      const result = await addToWhisparr(scene.stash_id, scene.title, config.endpoint);
 
       // Update button state
       button.textContent = "Added!";
@@ -160,7 +323,7 @@
       scene.in_whisparr = true;
 
       if (config.onSuccess) {
-        config.onSuccess(scene);
+        config.onSuccess(scene, result);
       }
 
       // After a delay, update button to show final state
@@ -193,11 +356,12 @@
    * @param {Object} config - Configuration
    * @param {string} config.stashdbUrl - Base URL for StashDB links
    * @param {boolean} config.whisparrConfigured - Whether Whisparr is configured
-   * @param {Function} config.onWhisparrAdd - Callback when Whisparr add completes (success or error)
+   * @param {string} config.endpoint - Stash-box endpoint of the view (Whisparr is StashDB only)
+   * @param {Function} config.onWhisparrAdd - Callback when Whisparr add completes: (scene, true, result) or (scene, false, error)
    * @returns {HTMLElement} The scene card element
    */
   function createSceneCard(scene, config) {
-    const { stashdbUrl = "https://stashdb.org", whisparrConfigured = false, onWhisparrAdd } = config;
+    const { stashdbUrl = "https://stashdb.org", whisparrConfigured = false, onWhisparrAdd, endpoint } = config;
 
     const card = document.createElement("div");
     card.className = "ms-scene-card";
@@ -295,8 +459,32 @@
     stashdbLink.onclick = (e) => e.stopPropagation();
     actions.appendChild(stashdbLink);
 
+    // Site links: one per distinct stash-box site
+    const seenSites = new Set();
+    for (const u of Array.isArray(scene.urls) ? scene.urls : []) {
+      if (!u || typeof u.url !== "string" || !/^https?:\/\//i.test(u.url)) continue;
+      const site = String(u.site || "").trim() || u.url;
+      if (seenSites.has(site)) continue;
+      seenSites.add(site);
+      const link = document.createElement("a");
+      link.className = "ms-btn ms-btn-small ms-site-link";
+      link.href = u.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = site;
+      link.title = u.url;
+      link.onclick = (e) => e.stopPropagation();
+      actions.appendChild(link);
+    }
+
     // Whisparr button (if configured)
-    if (whisparrConfigured) {
+    if (whisparrConfigured && !isStashdbEndpoint(endpoint || stashdbUrl)) {
+      const hint = document.createElement("span");
+      hint.className = "ms-whisparr-hint";
+      hint.textContent = WHISPARR_STASHDB_HINT;
+      hint.title = "Whisparr matches StashDB scene IDs only";
+      actions.appendChild(hint);
+    } else if (whisparrConfigured) {
       const whisparrBtn = document.createElement("button");
       whisparrBtn.className = "ms-btn ms-btn-small ms-btn-whisparr";
 
@@ -342,7 +530,8 @@
         whisparrBtn.onclick = (e) => {
           e.stopPropagation();
           handleAddToWhisparr(scene, whisparrBtn, {
-            onSuccess: onWhisparrAdd ? () => onWhisparrAdd(scene, true) : undefined,
+            endpoint: endpoint || stashdbUrl,
+            onSuccess: onWhisparrAdd ? (sc, result) => onWhisparrAdd(scene, true, result) : undefined,
             onError: onWhisparrAdd ? (err) => onWhisparrAdd(scene, false, err) : undefined,
           });
         };
@@ -368,6 +557,14 @@
     getGraphQLUrl,
     graphqlRequest,
     runPluginOperation,
+    describeFailure,
+    buildFingerprintIndex,
+    describeFingerprintIndex,
+    describeFingerprintBuild,
+    fingerprintFields,
+    directionFor,
+    describeNoFavorites,
+    TRENDING_NOTE,
     escapeHtml,
     formatDate,
     formatDuration,
@@ -375,10 +572,39 @@
     // Whisparr
     addToWhisparr,
     handleAddToWhisparr,
+    isStashdbEndpoint,
+    describeWhisparrAdd,
+    describeWhisparrStatusError,
 
     // Components
     createSceneCard,
   };
+
+  // Test hook: active only when a test sets window.__MISSING_SCENES_TEST__
+  if (window.__MISSING_SCENES_TEST__) {
+    window.__MISSING_SCENES_TEST__.core = {
+      getGraphQLUrl,
+      graphqlRequest,
+      runPluginOperation,
+      describeFailure,
+      buildFingerprintIndex,
+      describeFingerprintIndex,
+      describeFingerprintBuild,
+      fingerprintFields,
+      directionFor,
+      describeNoFavorites,
+      TRENDING_NOTE,
+      escapeHtml,
+      formatDate,
+      formatDuration,
+      addToWhisparr,
+      handleAddToWhisparr,
+      isStashdbEndpoint,
+      describeWhisparrAdd,
+      describeWhisparrStatusError,
+      createSceneCard,
+    };
+  }
 
   console.log("[MissingScenes] Core module loaded");
 })();

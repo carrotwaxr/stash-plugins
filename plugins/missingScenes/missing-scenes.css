@@ -739,3 +739,64 @@
     margin-top: 10px;
   }
 }
+
+/* Partial-result warning and retry */
+.ms-warning {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid #ffc107;
+  border-radius: 4px;
+  background: rgba(255, 193, 7, 0.12);
+  color: #ffc107;
+}
+
+.ms-retry-btn {
+  margin-top: 8px;
+}
+
+.ms-warning .ms-retry-btn {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
+.ms-whisparr-hint {
+  font-size: 12px;
+  color: #ffc107;
+  align-self: center;
+}
+
+/* Fingerprint index note: the count owned by fingerprint, or the Build button */
+.ms-fingerprint-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 20px;
+  background: #1c1c1c;
+  border-bottom: 1px solid #333;
+  font-size: 13px;
+  color: #bbb;
+}
+
+.ms-browse-page .ms-fingerprint-note {
+  margin-bottom: 15px;
+  padding: 8px 15px;
+  border: 1px solid #333;
+  border-radius: 6px;
+}
+
+.ms-browse-note {
+  margin-bottom: 15px;
+  padding: 8px 15px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #bbb;
+}
+
+.ms-fingerprint-note .ms-build-fp-btn {
+  flex-shrink: 0;
+}
