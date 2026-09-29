@@ -328,6 +328,27 @@ test("selectedStudioId is cleared when nothing is rendered selected", () => {
   assert.strictEqual(sm.getState().selectedStudioId, null);
 });
 
+test("studios on a parent cycle are marked, with a warning; their descendants are not", () => {
+  // 1 and 2 are each other's parent; 3 is under 1; 4 is unrelated
+  const env = setup([["1", "2"], ["2", "1"], ["3", "1"], ["4"]]);
+  const { container, x } = env;
+  container.querySelector = () => null;
+  x.renderHierarchyPage(container);
+  const html = container.innerHTML;
+  const badged = (id) => new RegExp(`class="sh-node[^"]*\\bsh-in-cycle\\b[^"]*" data-studio-id="${id}"`).test(html);
+  assert.ok(badged("1") && badged("2"), "cycle members are badged");
+  assert.ok(!badged("3") && !badged("4"), "a descendant or an unrelated studio is not");
+  assert.ok(html.includes('class="sh-cycle-warning"'), "a warning is shown");
+  assert.ok(/2 studios are in a parent cycle/.test(html), html.slice(0, 400));
+});
+
+test("no cycle warning without a cycle", () => {
+  const env = setup([["1"], ["2", "1"]]);
+  env.container.querySelector = () => null;
+  env.x.renderHierarchyPage(env.container);
+  assert.ok(!env.container.innerHTML.includes("sh-cycle"));
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {

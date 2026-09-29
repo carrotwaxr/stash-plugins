@@ -83,12 +83,12 @@ A page reload or closing the tab loses pending changes. The browser warns you fi
 
 - Drag and drop works with a mouse only.
 - The whole tree is rendered at once. A very large library can be slow.
-- Studios in an existing parent cycle stay visible. The studio with the smallest id in each cycle is shown at the top level, with the rest of the cycle beneath it. The plugin doesn't mark them yet.
+- Studios in an existing parent cycle stay visible. The studio with the smallest id in each cycle is shown at the top level, with the rest of the cycle beneath it. Each studio on the loop is marked "cycle", and a warning above the tree counts them. Give one studio in the loop a different parent, or none, to fix it.
 
 ## Changelog
 
 ### 0.1.1
-- Studios in an existing parent cycle are no longer hidden.
+- Studios in an existing parent cycle are no longer hidden, and are marked "cycle" with a warning.
 - Removing one pending change keeps the others. Cancel restores the tree without a refetch. Stats and the context menu reflect pending changes, and the ancestors of a moved studio are expanded.
 - Saves lock editing, run in a safe order, refuse cycles, and keep failed changes pending with the error shown.
 - Navigation stays inside Stash and respects a sub-path. The plugin warns before you lose unsaved changes and restores them when you return.

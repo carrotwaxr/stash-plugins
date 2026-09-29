@@ -396,6 +396,23 @@
   }
 
   /**
+   * Ids of studios that are their own ancestor (on a loop), not their descendants.
+   */
+  function studiosOnCycle(parentMap) {
+    const on = new Set();
+    for (const start of parentMap.keys()) {
+      const seen = new Set([start]);
+      let current = parentMap.get(start);
+      while (current != null && !seen.has(current)) {
+        seen.add(current);
+        current = parentMap.get(current);
+      }
+      if (current === start) on.add(start);
+    }
+    return on;
+  }
+
+  /**
    * Parent map of the server state, with the edit snapshot when one exists.
    */
   function baseParentMap() {
@@ -921,8 +938,11 @@
   /**
    * Render a single tree node (recursive)
    */
-  function renderTreeNode(node, isRoot = false) {
+  function renderTreeNode(node, isRoot = false, onCycle = new Set()) {
     const hasChildren = node.childNodes.length > 0;
+    const cycleBadge = onCycle.has(node.id)
+      ? '<span class="sh-cycle-badge" title="This studio is its own ancestor. Give one studio in the loop a different parent, or none.">cycle</span>'
+      : '';
     const isExpanded = expandedNodes.has(node.id);
 
     // Build metadata
@@ -953,7 +973,7 @@
     // Children (recursive)
     let childrenHtml = '';
     if (hasChildren) {
-      const childNodes = node.childNodes.map(child => renderTreeNode(child, false)).join('');
+      const childNodes = node.childNodes.map(child => renderTreeNode(child, false, onCycle)).join('');
       childrenHtml = `<div class="sh-children ${isExpanded ? 'sh-expanded' : ''}" data-parent-id="${node.id}">${childNodes}</div>`;
     }
 
@@ -963,12 +983,12 @@
       : '';
 
     return `
-      <div class="sh-node ${isRoot ? 'sh-root' : ''} ${node.id === selectedStudioId ? 'sh-selected' : ''}" data-studio-id="${node.id}" draggable="true">
+      <div class="sh-node ${isRoot ? 'sh-root' : ''} ${node.id === selectedStudioId ? 'sh-selected' : ''} ${cycleBadge ? 'sh-in-cycle' : ''}" data-studio-id="${node.id}" draggable="true">
         <div class="sh-node-content">
           <span class="sh-toggle ${hasChildren ? '' : 'sh-leaf'}" data-studio-id="${node.id}">${toggleIcon}</span>
           ${imageHtml}
           <div class="sh-info">
-            <a class="sh-name" href="${escapeHtml(stashPath(`/studios/${node.id}`))}" data-sh-route="/studios/${escapeHtml(node.id)}">${escapeHtml(node.name)}</a>
+            <a class="sh-name" href="${escapeHtml(stashPath(`/studios/${node.id}`))}" data-sh-route="/studios/${escapeHtml(node.id)}">${escapeHtml(node.name)}</a>${cycleBadge}
             <div class="sh-meta">${metaText}</div>
           </div>
         </div>
@@ -981,7 +1001,11 @@
    * Render the full hierarchy page
    */
   function renderHierarchyPage(container) {
-    const treeHtml = hierarchyTree.map(root => renderTreeNode(root, true)).join('');
+    const onCycle = studiosOnCycle(effectiveParentMap(baseParentMap(), pendingChanges));
+    const treeHtml = hierarchyTree.map(root => renderTreeNode(root, true, onCycle)).join('');
+    const cycleHtml = onCycle.size > 0
+      ? `<div class="sh-cycle-warning">${onCycle.size} studio${onCycle.size === 1 ? ' is' : 's are'} in a parent cycle (marked "cycle"). Stash can't save a new parent under them until one studio in each loop gets a different parent, or none.</div>`
+      : '';
     if (pendingChanges.length === 0) restoredCount = 0;
     const bannerHtml = restoredCount > 0
       ? `<div class="sh-restored-banner">${restoredCount} unsaved change${restoredCount === 1 ? '' : 's'} restored</div>`
@@ -1001,6 +1025,7 @@
           </div>
         </div>
         ${bannerHtml}
+        ${cycleHtml}
         <div class="sh-stats">
           <span class="stat"><strong>${hierarchyStats.totalStudios}</strong> total studios</span>
           <span class="stat"><strong>${hierarchyStats.rootStudios}</strong> root studios</span>

@@ -467,3 +467,21 @@
   border: 1px solid var(--bs-warning, #ffc107);
   background: rgba(255, 193, 7, 0.1);
 }
+
+.sh-cycle-warning {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--bs-danger, #dc3545);
+  background: rgba(220, 53, 69, 0.1);
+}
+
+.sh-cycle-badge {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 0.75em;
+  background: var(--bs-danger, #dc3545);
+  color: #fff;
+  vertical-align: middle;
+}
