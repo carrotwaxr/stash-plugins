@@ -320,6 +320,46 @@ class TestSyncHistoryModes(unittest.TestCase):
         self.assertEqual(self.run_main("reset_sync_history", local_stash=no_stash),
                          {"success": True, "cleared": 0})
 
+    def write_corrupt_history(self):
+        os.makedirs(self.data_dir, exist_ok=True)
+        path = os.path.join(self.data_dir, "sync_history.sqlite")
+        with open(path, "wb") as f:
+            f.write(b"this is not a sqlite database " * 20)
+        return path
+
+    def test_reset_deletes_corrupt_file(self):
+        path = self.write_corrupt_history()
+
+        output = self.run_main("reset_sync_history")
+
+        self.assertTrue(output["success"])
+        self.assertIsNone(output["cleared"])
+        self.assertIn("unreadable", output["note"])
+        self.assertFalse(os.path.exists(path))
+
+    def test_reset_removes_file(self):
+        self.run_main("sync_scene_tags")
+        path = os.path.join(self.data_dir, "sync_history.sqlite")
+        for suffix in ("-wal", "-shm"):
+            with open(path + suffix, "wb") as f:
+                f.write(b"x")
+
+        output = self.run_main("reset_sync_history")
+
+        self.assertEqual(output, {"success": True, "cleared": 1})
+        for suffix in ("", "-wal", "-shm"):
+            self.assertFalse(os.path.exists(path + suffix))
+        self.assertTrue(self.run_main("sync_scene_tags")["success"])
+        self.assertTrue(os.path.isfile(path))
+
+    def test_sync_error_mentions_reset_task(self):
+        path = self.write_corrupt_history()
+
+        output = self.run_main("sync_scene_tags")
+
+        self.assertIn("Reset Scene Tag Sync History", output["error"])
+        self.assertIn(path, output["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

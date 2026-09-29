@@ -569,7 +569,8 @@ def handle_sync_scene_tags(server_connection):
         history = SyncHistory(history_path)
     except sqlite3.Error as e:
         log.LogError(f"Could not open the scene sync history {history_path}: {e}")
-        return {"error": f"Could not open the scene sync history {history_path}: {e}"}
+        return {"error": f"Could not open the scene sync history {history_path}: {e}. "
+                         "Run the \"Reset Scene Tag Sync History\" task to delete it and start over."}
     log.LogDebug(f"Scene sync history: {history_path}")
 
     try:
@@ -606,6 +607,7 @@ def handle_reset_sync_history():
     if not os.path.exists(path):
         log.LogInfo("Scene sync history is already empty")
         return {"success": True, "cleared": 0}
+    cleared = None
     try:
         history = SyncHistory(path)
         try:
@@ -613,8 +615,17 @@ def handle_reset_sync_history():
         finally:
             history.close()
     except sqlite3.Error as e:
-        log.LogError(f"Could not reset the scene sync history {path}: {e}")
-        return {"error": f"Could not reset the scene sync history: {e}"}
+        log.LogWarning(f"Scene sync history {path} is unreadable ({e}); deleting it")
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(path + suffix):
+                os.remove(path + suffix)
+    except OSError as e:
+        log.LogError(f"Could not delete the scene sync history {path}: {e}")
+        return {"error": f"Could not delete the scene sync history: {e}"}
+    if cleared is None:
+        return {"success": True, "cleared": None,
+                "note": "History file was unreadable and has been deleted."}
     log.LogInfo(f"Scene sync history reset: forgot {cleared} scenes")
     return {"success": True, "cleared": cleared}
 
