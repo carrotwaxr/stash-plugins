@@ -197,6 +197,22 @@ Common issues:
 - Python 3.9+ (bundled with Stash)
 - `stashapp-tools>=0.2.59` (installed automatically)
 
+## Development
+
+```bash
+cd plugins/mcMetadata
+pip install -r requirements.txt pytest
+python -m pytest
+```
+
+Tests that talk to a real Stash, StashDB or Whisparr skip unless `STASH_PLUGINS_INTEGRATION=1` is set. Point them at a test instance, never production. For example:
+
+```bash
+STASH_PLUGINS_INTEGRATION=1 STASH_URL=http://localhost:9999 STASH_API_KEY=... python -m pytest tests/test_integration.py
+```
+
+`tests/manual_run.py` runs the plugin against one scene by hand; see its docstring.
+
 ## Changelog
 
 ### v1.5.0

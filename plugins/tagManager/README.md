@@ -148,12 +148,17 @@ If you see SSL errors:
 ```bash
 cd plugins/tagManager
 
-# Unit tests (no API key needed)
-python -m unittest discover tests -v
+# Python unit tests (offline)
+python -m pytest
 
-# Integration tests (requires API key)
-STASHDB_API_KEY=your-key python -m unittest tests.test_integration -v
+# JavaScript tests
+for f in tests/test_*.js; do node "$f"; done
+
+# Integration tests against StashDB (requires an API key)
+STASH_PLUGINS_INTEGRATION=1 STASHDB_API_KEY=your-key python -m pytest tests/test_integration.py
 ```
+
+Tests that talk to a real Stash, StashDB or Whisparr skip unless `STASH_PLUGINS_INTEGRATION=1` is set. Point them at a test instance, never production.
 
 ### File Structure
 

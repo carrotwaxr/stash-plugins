@@ -131,6 +131,18 @@ The plugin fetches up to 1000 scenes (10 pages of 100). For performers/studios/t
 - **Pagination**: Fetches 100 scenes per page from stash-box
 - **Caching**: Scene stash IDs are fetched fresh each time (no caching)
 
+## Development
+
+```bash
+cd plugins/missingScenes
+python -m pytest
+```
+
+Tests that talk to a real Stash, StashDB or Whisparr skip unless `STASH_PLUGINS_INTEGRATION=1` is set. Point them at a test instance, never production.
+
+- `test_integration.py` reads `STASH_URL` and `STASH_API_KEY` from the environment or from a `.env` file here (see `.env.example`).
+- `test_whisparr_status.py` reads `WHISPARR_URL` and `WHISPARR_API_KEY` from the environment.
+
 ## License
 
 MIT License
