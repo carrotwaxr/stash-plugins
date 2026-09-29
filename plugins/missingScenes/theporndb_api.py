@@ -88,6 +88,7 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
+        "User-Agent": stashbox_api.USER_AGENT,
     }
 
     req = urllib.request.Request(url, headers=headers, method="GET")

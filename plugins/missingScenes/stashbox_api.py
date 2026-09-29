@@ -15,6 +15,7 @@ import email.utils
 import http.client
 import json
 import math
+import os
 import re
 import ssl
 import time
@@ -22,6 +23,24 @@ import urllib.request
 import urllib.error
 
 import log
+
+
+def _read_plugin_version():
+    """Read the version from missingScenes.yml next to this module."""
+    try:
+        yml = os.path.join(os.path.dirname(os.path.abspath(__file__)), "missingScenes.yml")
+        with open(yml, encoding="utf-8") as f:
+            m = re.search(r"^version:\s*(\S+)", f.read(), re.MULTILINE)
+        if m:
+            return m.group(1).strip("\"'")
+    except OSError:
+        pass
+    return "unknown"
+
+
+PLUGIN_VERSION = _read_plugin_version()
+# ThePornDB's Cloudflare refuses Python's default User-Agent (Error 1010, HTTP 403)
+USER_AGENT = f"stash-plugins-missingScenes/{PLUGIN_VERSION}"
 
 
 def create_ssl_context(verify=True):
@@ -206,6 +225,7 @@ def graphql_request_with_retry(url, query, variables=None, api_key=None,
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "User-Agent": USER_AGENT,
     }
 
     if api_key:
