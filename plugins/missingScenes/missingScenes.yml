@@ -1,6 +1,6 @@
 name: Missing Scenes
-description: Discover scenes from StashDB that you don't have locally. View missing scenes for performers and studios, with optional Whisparr integration for automated downloading and cleanup.
-version: 1.4.1
+description: Discover scenes from StashDB, other stash-boxes and ThePornDB that you don't have locally. View missing scenes for performers, studios and tags, with optional Whisparr v3 integration (StashDB scenes) for automated downloading and cleanup.
+version: 1.5.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer/studio pages
@@ -24,7 +24,7 @@ settings:
   # Whisparr integration (optional)
   whisparrUrl:
     displayName: Whisparr URL
-    description: Optional. URL to your Whisparr instance (e.g., http://localhost:6969). Leave empty to disable Whisparr integration.
+    description: Optional. Address of your Whisparr v3 instance (e.g., 192.168.1.10:6969 or http://host:6969/whisparr; include the URL Base if set). Leave empty to disable Whisparr integration.
     type: STRING
   whisparrApiKey:
     displayName: Whisparr API Key
