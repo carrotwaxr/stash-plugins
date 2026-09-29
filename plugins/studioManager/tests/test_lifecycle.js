@@ -320,6 +320,28 @@ test("restoring drops a change that would now form a cycle and keeps the rest", 
   assert.ok(!/sh-cycle/.test(container.innerHTML));
 });
 
+test("the restored banner goes away on the first edit or save after a restore", async () => {
+  for (const act of ["edit", "remove", "save"]) {
+    const env = setup([["1"], ["2"], ["3"], ["4"]], { fail: (input) => (input.id === "3" ? "nope" : null) });
+    const { sm, x, container } = env;
+    sm.setState({
+      pendingChanges: [
+        { type: "set-parent", studioId: "1", studioName: "S1", parentId: "2", parentName: "S2" },
+        { type: "set-parent", studioId: "3", studioName: "S3", parentId: "2", parentName: "S2" },
+      ],
+      isEditMode: true, originalParentMap: new Map(),
+    });
+    mount(env);
+    await sm.settle();
+    assert.ok(container.innerHTML.includes("2 unsaved changes restored"), act + ": banner after the restore");
+    if (act === "edit") x.setParent("4", "2");
+    if (act === "remove") x.removePendingChange(0);
+    if (act === "save") await x.savePendingChanges(); // 3 fails and stays pending
+    assert.ok(sm.getState().pendingChanges.length > 0, act + ": still pending");
+    assert.ok(!container.innerHTML.includes("restored"), act + ": banner gone");
+  }
+});
+
 test("unmount during the initial fetch: no render, toast or throw afterwards", async () => {
   let release;
   const gate = new Promise((r) => { release = r; });

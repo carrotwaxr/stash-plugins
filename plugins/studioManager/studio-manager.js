@@ -27,7 +27,7 @@
   // older value must not render, toast or touch the page.
   let mountToken = 0;
   let savesFinished = 0;          // bumped when a save ends (it has loaded newer data)
-  let restoredCount = 0;          // changes re-applied on the last mount (banner)
+  let restoredCount = 0;          // changes re-applied on the last mount (banner, until the next edit or save)
   let titleTimers = [];
   let leaveGuardOn = false;
 
@@ -715,6 +715,7 @@
    */
   function addPendingChange(type, studioId, studioName, parentId, parentName) {
     enterEditMode();
+    restoredCount = 0;
 
     // Replace any existing change for this studio
     pendingChanges = pendingChanges.filter(c => c.studioId !== studioId);
@@ -733,6 +734,7 @@
    */
   function cancelPendingChanges() {
     if (isSaving) return;
+    restoredCount = 0;
     pendingChanges = [];
     isEditMode = false;
     originalParentMap.clear();
@@ -759,6 +761,7 @@
       return;
     }
     pendingChanges = rest;
+    restoredCount = 0;
     if (pendingChanges.length === 0) {
       isEditMode = false;
       originalParentMap.clear();
@@ -835,6 +838,7 @@
   async function savePendingChanges() {
     if (isSaving || pendingChanges.length === 0) return;
     isSaving = true;
+    restoredCount = 0;
     const onPage = () => !!pageContainer();
     renderChangesPanel();
 
