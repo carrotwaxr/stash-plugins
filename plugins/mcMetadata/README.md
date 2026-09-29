@@ -372,7 +372,7 @@ STASH_PLUGINS_INTEGRATION=1 STASH_URL=http://localhost:9999 STASH_API_KEY=... py
 - **Jellyfin**: folder-per-movie file names. A Performer.Update.Post hook re-exports a performer's image.
 - **Settings**: bad values fall back to defaults with a warning, booleans accept `true`/`false` and `1`/`0`, and an invalid Organized Condition processes no scenes. A disabled hook logs nothing.
 - **Logging**: the log file appends, has one header per run, and rotates at 5 MB. Path globs and tag names are matched without regard to case.
-- **Downloads**: authenticated with the session cookie or API key, default performer images are skipped, redirects are refused and API keys are masked in logs.
+- **Downloads**: authenticated with the session cookie or API key, default performer images are skipped, redirects are refused and API keys are masked in logs. Saved images are readable by other users, such as a media server (they were saved as owner-only).
 - Dry runs now match live runs. A clear error tells you when `stashapp-tools` is missing.
 
 ### v1.5.0

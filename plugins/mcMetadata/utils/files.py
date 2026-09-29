@@ -120,6 +120,13 @@ def _urlopen(request, timeout):
     return _OPENER.open(request, timeout=timeout)
 
 
+def _current_umask():
+    """The process umask (os.umask can only be read by setting it)."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
 def download_image(url, dest_filepath, settings):
     """Download an image from a URL and save it to a file.
 
@@ -219,6 +226,9 @@ def download_image(url, dest_filepath, settings):
 
             # Move temp file to destination (shutil.move handles cross-filesystem moves)
             shutil.move(temp_path, dest_filepath)
+            # mkstemp made it 0600; give it a normal file's mode so a media server
+            # running as another user can read it
+            os.chmod(dest_filepath, 0o666 & ~_current_umask())
             log.debug(f"Saved image ({actual_size} bytes) to {dest_filepath}")
             return True
 

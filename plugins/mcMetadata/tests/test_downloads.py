@@ -101,6 +101,16 @@ class DownloadTest(unittest.TestCase):
             with patch.object(files_module, "_is_valid_image", return_value=False):
                 self.assertFalse(files_module.download_image(f"{self.base}/i", self.dest, {"dry_run": False}))
 
+    def test_saved_image_is_readable_by_others(self):
+        # A media server running as another user must be able to read the poster
+        # (the temp file is created 0600; the saved image gets the umask's normal mode)
+        old = os.umask(0o022)
+        try:
+            self.assertTrue(files_module.download_image(f"{self.base}/i", self.dest, {"dry_run": False}))
+        finally:
+            os.umask(old)
+        self.assertEqual(os.stat(self.dest).st_mode & 0o777, 0o644)
+
 
 class _Elsewhere(_Handler):
     """Another host (here: another port) a redirect points to."""

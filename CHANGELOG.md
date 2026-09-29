@@ -38,14 +38,14 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 ## mcMetadata
 
 ### 1.6.0
-- Renames are safer. Names are sanitized, capped at 255 bytes each, and can't escape the base path, which must be inside a Stash library. **Max Filepath Length** is clamped to 40-800 and trims tags, then whole performer names, only when a path is too long. Name clashes get a numbered suffix such as ` (2)`, and case-only renames work on case-insensitive file systems.
+- Renames are safer. Names are sanitized, capped at 255 bytes each, and can't escape the base path, which must be inside a Stash library. **Max Filepath Length** is clamped to 40-800 and trims tags, then whole performer names, only when a path is too long. A destination that's already taken is never overwritten: the move is skipped with a warning, and two files of one scene get a numbered suffix such as ` (2)`. Case-only renames work on case-insensitive file systems.
 - Subtitles, funscripts and other sidecar files now move with the video. The new **Move Sidecar Files** setting is on by default.
 - Bulk runs no longer skip scenes, and the hook ignores mcMetadata's own "mark organized" update.
 - NFO files are always valid XML. **NFO Exclude Fields** also accepts `thumb`, `poster`, `actor` and `tag`. New settings: **NFO File Name**, **Poster File Name**, **Backdrop File Name** and **NFO Rating Field**. NFOs now include `<director>` and stash-box `<uniqueid>` entries.
 - New Plex mode for Plex Media Server 1.43.1+. It follows Plex's documented format and hasn't been checked against a live Plex yet.
 - Jellyfin folder-per-movie names work, and updating a performer re-exports that performer's image.
 - Bad settings fall back to defaults with a warning. An invalid **Organized Condition** now processes no scenes until you fix it.
-- The log file appends and rotates at 5 MB. Image downloads use your Stash login, skip default performer images, and refuse redirects.
+- The log file appends and rotates at 5 MB. Image downloads use your Stash login, skip default performer images, and refuse redirects. Saved images are readable by other users, such as a media server (they were saved as owner-only).
 
 ## Studio Manager
 
