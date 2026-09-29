@@ -1084,21 +1084,24 @@ def _whisparr_status_for_response(whisparr_url, api_key):
 # Local Stash_ID Cache Building
 # ============================================================================
 
-def get_or_build_cache(endpoint: str) -> set[str]:
+def get_or_build_cache(endpoint: str, fresh: bool = False) -> set[str]:
     """Get or build the local stash_id cache for a given endpoint.
 
     Checks: 1) in-memory cache, 2) disk cache, 3) builds from scratch.
+    With fresh=True it skips 1 and 2 and always builds from Stash (for decisions such as
+    Whisparr cleanup, where an index up to CACHE_TTL_SECONDS old, or one another run
+    wrote meanwhile, won't do); the result still replaces both caches.
     """
     from datetime import datetime
 
     # 1. Check in-memory cache (same process only)
-    if endpoint in _local_stash_id_cache:
+    if not fresh and endpoint in _local_stash_id_cache:
         if endpoint not in _cache_metadata:
             _cache_metadata[endpoint] = {"source": "memory", "count": len(_local_stash_id_cache[endpoint])}
         return _local_stash_id_cache[endpoint]
 
     # 2. Check disk cache (survives across process invocations)
-    disk_cache = _read_cache_from_disk(endpoint)
+    disk_cache = None if fresh else _read_cache_from_disk(endpoint)
     if disk_cache is not None:
         _local_stash_id_cache[endpoint] = disk_cache
         _cache_metadata[endpoint] = {
@@ -2848,9 +2851,9 @@ def task_cleanup_whisparr(plugin_settings):
         return {"success": False, "message": str(e), "error": str(e), "whisparr_error": str(e)}
 
     try:
-        # Rebuilt, not up to 5 minutes old: this decides what leaves Whisparr
+        # Built from Stash now, never read from a cache: this decides what leaves Whisparr
         invalidate_cache(stashdb_endpoint)
-        local_stash_ids = get_or_build_cache(stashdb_endpoint)
+        local_stash_ids = get_or_build_cache(stashdb_endpoint, fresh=True)
     except Exception as e:
         msg = f"Whisparr cleanup failed: could not read the local StashDB IDs: {e}"
         log.LogError(msg)
@@ -3102,7 +3105,7 @@ def main():
                 output = {"error": "No stash-box endpoint configured"}
             else:
                 invalidate_cache(endpoint)
-                ids = get_or_build_cache(endpoint)
+                ids = get_or_build_cache(endpoint, fresh=True)
                 output = {"success": True, "endpoint": endpoint, "count": len(ids)}
 
         elif operation == "get_all_endpoints":

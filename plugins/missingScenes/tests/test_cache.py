@@ -182,3 +182,16 @@ def test_md5_not_used_for_security(monkeypatch):
 def test_single_get_cache_info_definition():
     src = open(missing_scenes.__file__).read()
     assert src.count("def _get_cache_info(") == 1
+
+
+def test_fresh_build_ignores_the_memory_and_disk_caches(monkeypatch):
+    missing_scenes._local_stash_id_cache[EP] = {"stale-mem"}
+    missing_scenes._write_cache_to_disk(EP, {"stale-disk"})
+    calls = []
+    monkeypatch.setattr(missing_scenes, "stash_graphql", fake_graphql([page(["now"])], calls))
+    assert missing_scenes.get_or_build_cache(EP, fresh=True) == {"now"}
+    assert len(calls) == 1
+    # and the fresh result replaces both caches
+    assert missing_scenes._local_stash_id_cache[EP] == {"now"}
+    assert missing_scenes._read_cache_from_disk(EP) == {"now"}
+    assert missing_scenes._cache_metadata[EP]["source"] == "built"

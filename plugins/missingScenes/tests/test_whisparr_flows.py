@@ -362,11 +362,14 @@ def local_index(monkeypatch, ids, boxes=BOXES):
     """Fake the StashDB index; any other Stash query (a full library scan) fails the test."""
     built = []
 
-    def build(endpoint):
+    def build(endpoint, fresh=False):
         built.append(endpoint)
+        build.fresh.append(fresh)
         if isinstance(ids, Exception):
             raise ids
         return set(ids)
+    build.fresh = []
+    local_index.build = build
 
     def gql(query, variables=None):
         raise AssertionError(f"unexpected Stash query: {query}")
@@ -387,6 +390,7 @@ def test_cleanup_uses_the_stashdb_index(monkeypatch):
     seen = install(monkeypatch, whisparr(movies=MOVIES))
     res = ms.task_cleanup_whisparr({"whisparrUrl": URL, "whisparrApiKey": KEY})
     assert built == [STASHDB]
+    assert local_index.build.fresh == [True]  # built from Stash, never from a cache
     assert writes(seen) == ["DELETE movie/9?deleteFiles=false"]
     assert res["success"] is True
     assert res["cleaned"] == 1 and res["skipped_in_queue"] == 0 and res["errors"] == []
@@ -502,4 +506,21 @@ def test_cleanup_sees_a_download_past_the_first_queue_page(monkeypatch):
     res = ms.task_cleanup_whisparr({"whisparrUrl": URL, "whisparrApiKey": KEY})
     assert res["success"] is True
     assert res["cleaned"] == 0 and res["skipped_in_queue"] == 1
+    assert writes(seen) == []
+
+
+def test_cleanup_never_trusts_a_cache_written_meanwhile(monkeypatch):
+    # Another run (a browse) may write the disk cache between the cleanup's invalidate and
+    # its read. Stash says no local scene has SID now, so nothing may leave Whisparr.
+    monkeypatch.setattr(ms, "get_stashbox_config", lambda: BOXES)
+    monkeypatch.setattr(ms, "stash_graphql", lambda q, v=None: {"findScenes": {"count": 0, "scenes": []}})
+    real_invalidate = ms.invalidate_cache
+
+    def invalidate_then_race(endpoint):
+        real_invalidate(endpoint)
+        ms._write_cache_to_disk(endpoint, {SID})  # the other run's slightly older index
+    monkeypatch.setattr(ms, "invalidate_cache", invalidate_then_race)
+    seen = install(monkeypatch, whisparr(movies=MOVIES))
+    res = ms.task_cleanup_whisparr({"whisparrUrl": URL, "whisparrApiKey": KEY})
+    assert res["success"] is True and res["cleaned"] == 0
     assert writes(seen) == []
