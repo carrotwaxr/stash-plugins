@@ -681,13 +681,18 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
 # ============================================================================
 
 class WhisparrError(Exception):
-    """A failed Whisparr request. `url` never contains the API key (it is sent in a header)."""
+    """A failed Whisparr request. `url` never contains the API key (it is sent in a header).
 
-    def __init__(self, message, status=None, url=None, body=""):
+    tls: "certificate" when the certificate could not be verified (self-signed), "handshake"
+    for another TLS failure (HTTPS to a plain HTTP port), None otherwise.
+    """
+
+    def __init__(self, message, status=None, url=None, body="", tls=None):
         super().__init__(message)
         self.status = status
         self.url = url
         self.body = (body or "")[:300]
+        self.tls = tls
 
 
 def normalize_whisparr_url(raw):
@@ -761,14 +766,20 @@ def whisparr_request(whisparr_url, api_key, endpoint, method="GET", payload=None
         log.LogError(msg)
         raise WhisparrError(msg, status=e.code, url=url, body=err_body) from None
     except urllib.error.URLError as e:
+        tls = None
         if isinstance(e.reason, ssl.SSLCertVerificationError):
+            tls = "certificate"
             msg = (f"Can't reach Whisparr at {url}: TLS certificate verification failed ({e.reason}). "
                    "If Whisparr uses a self-signed certificate, enable "
                    "'Whisparr: Skip TLS Verification' in the plugin settings.")
+        elif isinstance(e.reason, ssl.SSLError):
+            tls = "handshake"
+            msg = (f"Can't reach Whisparr at {url}: the TLS handshake failed ({e.reason}). "
+                   "If Whisparr doesn't serve HTTPS on this port, use http://.")
         else:
             msg = f"Can't reach Whisparr at {url}: {e.reason}"
         log.LogError(msg)
-        raise WhisparrError(msg, url=url) from None
+        raise WhisparrError(msg, url=url, tls=tls) from None
     except (OSError, ValueError) as e:  # timeouts, resets, bad URLs
         msg = f"Can't reach Whisparr at {url}: {e}"
         log.LogError(msg)
@@ -2752,6 +2763,13 @@ def test_whisparr_connection(settings):
         elif e.status == 404:
             problems.append(f"Not found at {url}/api/v3 (HTTP 404); check URL Base and include it in the "
                             "Whisparr URL if Whisparr uses one.")
+        elif e.tls == "certificate":
+            problems.append(f"Whisparr's certificate at {url} can't be verified (self-signed?). Turn on "
+                            "'Whisparr: Skip TLS Verification' (whisparrSkipTlsVerify) in the plugin "
+                            "settings, or give Whisparr a certificate Stash trusts.")
+        elif e.tls == "handshake":
+            problems.append(f"The TLS handshake with {url} failed. If Whisparr doesn't serve HTTPS on this "
+                            "port, change the Whisparr URL to http://.")
         elif e.status is None and e.body:
             problems.append(f"{url} is the wrong service: it did not answer with JSON. Use the address "
                             "of Whisparr itself.")

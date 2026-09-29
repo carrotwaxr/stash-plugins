@@ -132,6 +132,8 @@ If scenes appear but nothing is added to Whisparr (issues #135 and #115), run th
 | `... is the wrong service: it did not answer with JSON` | The address is not Whisparr itself (a proxy login page, or another app on that port). |
 | `... is the wrong service: it is <app>, not Whisparr` | The port belongs to Radarr, Sonarr or another app. |
 | `Can't reach Whisparr at ...` | Wrong address or port, Whisparr is down, or Stash can't reach it (inside Docker use the container name or the host's LAN IP, not `localhost`). |
+| `Whisparr's certificate at ... can't be verified` | HTTPS Whisparr with a self-signed certificate. Turn on **Whisparr: Skip TLS Verification** (`whisparrSkipTlsVerify`), or give Whisparr a certificate Stash trusts. |
+| `The TLS handshake with ... failed` | The URL says `https://` but Whisparr serves plain HTTP on that port. Use `http://`. |
 | `Whisparr v3 is required; this is v2...` | Run the v3 (eros) image. |
 | `Root folder '...' is not in Whisparr` | Use one of the listed root folders exactly. |
 | `Quality profile ... does not exist in Whisparr` | Use one of the listed profile IDs. |

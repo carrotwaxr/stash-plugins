@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -415,6 +416,25 @@ def test_connection_unreachable(monkeypatch, exc):
     assert len(r["problems"]) == 1 and "can't reach" in r["problems"][0].lower()
     assert len(seen) == 1
     assert KEY not in json.dumps(r)
+
+
+def test_connection_self_signed_cert_names_the_skip_tls_setting(monkeypatch):
+    cert = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+                                           "self-signed certificate")
+    install(monkeypatch, lambda req: urllib.error.URLError(cert))
+    r = ms.test_whisparr_connection(settings(whisparrUrl="https://h:6969"))
+    assert len(r["problems"]) == 1
+    p = r["problems"][0]
+    assert "whisparrSkipTlsVerify" in p and "Skip TLS Verification" in p and "certificate" in p
+    assert "check the address, port" not in p.lower()
+
+
+def test_connection_https_to_a_plain_http_port_says_so(monkeypatch):
+    wrong = ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number")
+    install(monkeypatch, lambda req: urllib.error.URLError(wrong))
+    r = ms.test_whisparr_connection(settings(whisparrUrl="https://h:6969"))
+    assert len(r["problems"]) == 1 and "http://" in r["problems"][0]
+    assert "TLS" in r["problems"][0]
 
 
 def test_connection_bad_root_folder(monkeypatch):
