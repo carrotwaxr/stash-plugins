@@ -8,6 +8,8 @@ Features:
 """
 
 import json
+import os
+import re
 import ssl
 import time
 import urllib.request
@@ -30,6 +32,23 @@ DEFAULT_CONFIG = {
 }
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def _read_plugin_version():
+    """Read the version from tagManager.yml next to this module."""
+    try:
+        yml = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tagManager.yml")
+        with open(yml, encoding="utf-8") as f:
+            m = re.search(r"^version:\s*(\S+)", f.read(), re.MULTILINE)
+        if m:
+            return m.group(1).strip("\"'")
+    except OSError:
+        pass
+    return "unknown"
+
+
+PLUGIN_VERSION = _read_plugin_version()
+USER_AGENT = f"stash-plugins-tagManager/{PLUGIN_VERSION}"
 
 
 class RateLimiter:
@@ -74,10 +93,22 @@ class RateLimiter:
 class StashDBAPIError(Exception):
     """Exception for StashDB API errors."""
 
-    def __init__(self, message, status_code=None, retryable=False):
+    def __init__(self, message, status_code=None, retryable=False, body=None, graphql=False):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.body = body
+        self.graphql = graphql
+
+    @property
+    def is_auth_error(self):
+        """True for HTTP 401/403 or a GraphQL 'not authorized'/'unauthorized' error."""
+        if self.status_code in (401, 403):
+            return True
+        if self.graphql:
+            msg = str(self).lower()
+            return "not authorized" in msg or "unauthorized" in msg
+        return False
 
 
 def graphql_request(url, query, variables=None, api_key=None, timeout=30):
@@ -103,6 +134,7 @@ def graphql_request(url, query, variables=None, api_key=None, timeout=30):
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "User-Agent": USER_AGENT,
     }
 
     if api_key:
@@ -131,6 +163,11 @@ def graphql_request(url, query, variables=None, api_key=None, timeout=30):
 
                 if "errors" in result:
                     error_messages = [e.get("message", str(e)) for e in result["errors"]]
+                    if result.get("data") is None:
+                        raise StashDBAPIError(
+                            "GraphQL error: " + "; ".join(str(m) for m in error_messages),
+                            graphql=True,
+                        )
                     log.LogWarning(f"GraphQL errors: {error_messages}")
 
                 return result.get("data")
@@ -145,12 +182,20 @@ def graphql_request(url, query, variables=None, api_key=None, timeout=30):
 
             error_body = ""
             try:
-                error_body = e.read().decode("utf-8")[:500]
+                error_body = e.read().decode("utf-8", errors="replace")[:500]
                 log.LogDebug(f"Error response body: {error_body}")
             except Exception:
                 pass
 
-            raise StashDBAPIError(f"HTTP {e.code}: {e.reason}", status_code=e.code)
+            message = f"HTTP {e.code}: {e.reason}"
+            if error_body:
+                message += f" - {error_body[:200]}"
+            raise StashDBAPIError(
+                message,
+                status_code=e.code,
+                retryable=e.code in RETRYABLE_STATUS_CODES,
+                body=error_body or None,
+            )
 
         except urllib.error.URLError as e:
             log.LogDebug(f"URL error: {e.reason}")
@@ -183,17 +228,21 @@ TAG_FIELDS = """
 """
 
 
-def query_all_tags(url, api_key, per_page=100):
+def query_all_tags(url, api_key, per_page=1000):
     """
     Fetch all tags from StashDB with pagination.
 
     Args:
         url: StashDB GraphQL endpoint
         api_key: StashDB API key
-        per_page: Results per page (default 100)
+        per_page: Results per page (default 1000; falls back to 100 if
+            the first page is rejected)
 
     Returns:
         List of all tags
+
+    Raises:
+        StashDBAPIError: If any page fails (no partial list is returned)
     """
     query = f"""
     query QueryTags($input: TagQueryInput!) {{
@@ -222,8 +271,12 @@ def query_all_tags(url, api_key, per_page=100):
         try:
             data = graphql_request(url, query, variables, api_key)
         except StashDBAPIError as e:
-            log.LogWarning(f"Error fetching tags page {page}: {e}")
-            break
+            rejected = e.status_code in (400, 422) or e.graphql
+            if page == 1 and per_page > 100 and rejected and not e.is_auth_error:
+                log.LogWarning(f"per_page={per_page} rejected ({e}); retrying with 100")
+                per_page = 100
+                continue
+            raise
 
         if not data:
             break
@@ -286,11 +339,7 @@ def search_tags_by_name(url, api_key, search_term, limit=50):
         }
     }
 
-    try:
-        data = graphql_request(url, query, variables, api_key)
-    except StashDBAPIError as e:
-        log.LogWarning(f"Error searching tags for '{search_term}': {e}")
-        return []
+    data = graphql_request(url, query, variables, api_key)
 
     if not data:
         return []
@@ -338,11 +387,7 @@ def find_scene_by_id(url, api_key, scene_id, rate_limiter=None):
     if rate_limiter:
         rate_limiter.wait()
 
-    try:
-        data = graphql_request(url, query, variables, api_key)
-    except StashDBAPIError as e:
-        log.LogError(f"Error fetching scene {scene_id}: {e}")
-        return None
+    data = graphql_request(url, query, variables, api_key)
 
     if not data:
         return None
@@ -392,11 +437,7 @@ def find_scenes_by_fingerprints(url, api_key, fingerprint_batches, rate_limiter=
     if rate_limiter:
         rate_limiter.wait()
 
-    try:
-        data = graphql_request(url, query, variables, api_key)
-    except StashDBAPIError as e:
-        log.LogError(f"Error fetching scenes by fingerprints: {e}")
-        return [[] for _ in fingerprint_batches]
+    data = graphql_request(url, query, variables, api_key)
 
     if not data:
         return [[] for _ in fingerprint_batches]
