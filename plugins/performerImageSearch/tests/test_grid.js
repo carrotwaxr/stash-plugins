@@ -192,6 +192,60 @@ const imgNodes = (p) => p.createdElements.filter((e) => e.tagName === "IMG" && e
     assert.strictEqual(mousetrap, 3, "listener gone");
   });
 
+  // A plugin whose single source "a" answers the n-th search with outputs[n]
+  function searchSetup(outputs, layout = "All") {
+    let call = 0;
+    const p = loadPlugin({
+      fetchResponses: { RunPluginOperation: () => ({ data: { runPluginOperation: outputs[call++] } }) },
+    });
+    const els = p.document.elements;
+    els["pis-search-query"] = { value: "jane" };
+    els["pis-results"] = createElement("div");
+    els["pis-layout"] = { value: layout };
+    els["pis-status"] = { textContent: "", className: "" };
+    els["pis-source-chips"] = { innerHTML: "" };
+    p.setState({ SOURCES: ["a"], currentPerformerName: "Jane", currentPerformerId: "1" });
+    return p;
+  }
+  const loadImg = (node) => { node.naturalWidth = 100; node.naturalHeight = 100; node.onload(); };
+  const refreshTimers = (p) => p.pendingTimers().filter((t) => t.ms === 250);
+
+  await test("loading x/N counts only the current search's thumbnails; a late load from the last search is ignored", async () => {
+    const p = searchSetup([
+      { results: [res(1), res(2)], status: "ok" },
+      { results: [res(3), res(4), res(5)], status: "ok" },
+    ]);
+    await p.window.pisSearch();
+    const old = imgNodes(p).slice();
+    assert.strictEqual(old.length, 2);
+    await p.window.pisSearch();
+    const now = imgNodes(p).filter((n) => !old.includes(n));
+    assert.strictEqual(now.length, 3);
+    loadImg(old[0]); // the first search's thumbnail finishes late
+    now[0].onerror();
+    p.flushTimers();
+    const status = p.document.elements["pis-status"].textContent;
+    assert.ok(/loading 1\/3/.test(status), status);
+    assert.ok(!(res(1).image in p.getState().imageDimensions), "stale load not recorded");
+  });
+
+  await test("the status line follows thumbnail loads with the Any filter, refreshed at most every 250 ms", async () => {
+    const p = searchSetup([{ results: [res(1), res(2), res(3)], status: "ok" }]);
+    await p.window.pisSearch();
+    const status = () => p.document.elements["pis-status"].textContent;
+    assert.ok(/loading 0\/3/.test(status()), status());
+    const nodes = imgNodes(p);
+    loadImg(nodes[0]);
+    loadImg(nodes[1]);
+    assert.strictEqual(refreshTimers(p).length, 1, "one refresh for the burst");
+    p.flushTimers();
+    assert.ok(/loading 2\/3/.test(status()), status());
+    nodes[2].onerror();
+    assert.strictEqual(refreshTimers(p).length, 1);
+    p.flushTimers();
+    assert.ok(!/loading/.test(status()) && /3 of 3 images match filters/.test(status()), status());
+  });
+
   await test("defaults: DuckDuckGo off, others on; failure keeps the defaults; layout any case", async () => {
     let p = loadPlugin({ fetchResponses: { Configuration: cfg({}) } });
     let s = await p.exports.getPluginSettings();

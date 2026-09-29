@@ -70,6 +70,8 @@
   let searchGeneration = 0; // bumped whenever results/modal are superseded
   let activeControllers = []; // AbortControllers of in-flight plugin calls
   const SOURCE_TIMEOUT_MS = 45000; // client-side cap per plugin call
+  const STATUS_REFRESH_MS = 250; // thumbnail loads refresh the status line at most this often
+  let statusRefreshTimer = null;
 
   /**
    * Get the GraphQL endpoint URL
@@ -250,7 +252,8 @@
    * Update status with filter and source progress
    */
   function updateFilterStatus() {
-    const loaded = Object.keys(imageDimensions).length;
+    // Only the current results count: imageDimensions can hold other URLs
+    const loaded = allResults.filter((r) => imageDimensions[r.image]).length;
     const total = allResults.length;
 
     // Build source status
@@ -279,6 +282,18 @@
       showStatus(`${filteredResults.length} of ${total} images match filters${failed}${loadNote} | All sources finished`, "success");
     }
     renderSourceChips();
+  }
+
+  /**
+   * Refresh the status line soon. Thumbnails load in bursts, so each burst gives
+   * one refresh, at most every STATUS_REFRESH_MS.
+   */
+  function scheduleStatusRefresh() {
+    if (statusRefreshTimer !== null) return;
+    statusRefreshTimer = setTimeout(() => {
+      statusRefreshTimer = null;
+      updateFilterStatus();
+    }, STATUS_REFRESH_MS);
   }
 
   /**
@@ -647,12 +662,15 @@
   };
 
   /**
-   * A thumbnail loaded: record its size (keyed by image URL) and re-filter
+   * A thumbnail loaded: record its size (keyed by image URL), re-filter, and
+   * refresh the loading count
    */
   window.pisImageLoaded = function (img, url) {
     if (recordDimensions(url, img.naturalWidth, img.naturalHeight, 1) && getFilterName() !== "All") {
-      refreshGrid();
+      applyFilters();
+      renderResults();
     }
+    scheduleStatusRefresh();
   };
 
   /**
@@ -660,7 +678,7 @@
    */
   window.pisImageErrored = function (url) {
     recordDimensions(url, 0, 0, 0);
-    updateFilterStatus();
+    scheduleStatusRefresh();
   };
 
   function getFilterName() {
@@ -676,13 +694,17 @@
     img.src = result.thumbnail;
     img.alt = result.title || "";
     img.setAttribute("loading", "lazy");
+    // A node of an earlier search, or one no longer in the grid, may still finish
+    // loading: that load is not this search's
+    const generation = searchGeneration;
+    const current = () => generation === searchGeneration && gridNodes.get(result.image) === item;
     img.onload = () => {
       img.classList.add("pis-loaded");
-      window.pisImageLoaded(img, result.image);
+      if (current()) window.pisImageLoaded(img, result.image);
     };
     img.onerror = () => {
       item.classList.add("pis-error");
-      window.pisImageErrored(result.image);
+      if (current()) window.pisImageErrored(result.image);
     };
     item.appendChild(img);
 
