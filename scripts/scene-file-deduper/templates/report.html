@@ -199,6 +199,16 @@
             });
         }
 
+        // Ask before deleting files from disk, listing their paths
+        function confirmDelete(sceneCard, fileIds) {
+            const paths = fileIds.map(id => {
+                const card = sceneCard.querySelector(`.file-card[data-file-id="${CSS.escape(id)}"]`);
+                return card?.querySelector('.file-path')?.textContent || `file ${id}`;
+            });
+            const noun = paths.length === 1 ? 'file' : `${paths.length} files`;
+            return confirm(`Permanently delete this ${noun} from disk?\n\n${paths.join('\n')}`);
+        }
+
         // File action functions
         async function keepFile(sceneId, fileId, buttonElement) {
             const sceneCard = buttonElement.closest('.scene-card');
@@ -211,6 +221,8 @@
                 return;
             }
 
+            if (!confirmDelete(sceneCard, fileIdsToDelete)) return;
+
             // Disable all buttons
             sceneCard.querySelectorAll('button').forEach(btn => btn.disabled = true);
 
@@ -221,8 +233,7 @@
                     body: JSON.stringify({
                         scene_id: sceneId,
                         file_ids_to_delete: fileIdsToDelete,
-                        keep_file_id: fileId,
-                        all_file_ids: allFileIds
+                        keep_file_id: fileId
                     })
             });
 
@@ -252,6 +263,8 @@
                 return;
             }
 
+            if (!confirmDelete(sceneCard, [fileId])) return;
+
             // Find a file to keep (any file that's not being deleted)
             const keepFileId = allFileIds.find(id => id !== fileId);
 
@@ -265,8 +278,7 @@
                     body: JSON.stringify({
                         scene_id: sceneId,
                         file_ids_to_delete: [fileId],
-                        keep_file_id: keepFileId,
-                        all_file_ids: allFileIds
+                        keep_file_id: keepFileId
                     })
                 });
 
