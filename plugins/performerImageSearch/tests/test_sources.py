@@ -619,7 +619,7 @@ def test_pornpics_fixture(web):
     found = image_search.search_pornpics(NAME)
     expected = [("https://cdni.pornpics.com/models/j/jane_example.jpg",
                  "https://cdni.pornpics.com/models/j/jane_example.jpg")]
-    for gid in ("30000001", "30000002", "30000003"):  # sorted, not page order
+    for gid in ("30000003", "30000001", "30000002"):  # page order, each gallery once
         for photo in ("001_aa11", "002_bb22"):
             expected.append((f"https://cdni.pornpics.com/1280/1/2/{gid}/{gid}_{photo}.jpg",
                              f"https://cdni.pornpics.com/460/1/2/{gid}/{gid}_{photo}.jpg"))
@@ -628,11 +628,11 @@ def test_pornpics_fixture(web):
     assert not found.partial
 
 
-# The fixture model page's galleries, sorted, and the content id each one's photos live under
+# The fixture model page's galleries, in page order, and the content id each one's photos live under
 ELITEBABES_GALLERIES = [
     ("https://www.elitebabes.com/jane-example-by-the-pool-40003/", "540003"),
-    ("https://www.elitebabes.com/jane-example-in-the-garden-40001/", "540001"),
     ("https://www.elitebabes.com/jane-example-on-the-beach/", "540002"),
+    ("https://www.elitebabes.com/jane-example-in-the-garden-40001/", "540001"),
 ]
 
 
@@ -653,7 +653,7 @@ def serve_elitebabes(web):
 def test_elitebabes_fixture(web):
     serve_elitebabes(web)
     found = image_search.search_elitebabes(NAME)
-    assert sorted(web.urls()[1:]) == [url for url, _ in ELITEBABES_GALLERIES]
+    assert sorted(web.urls()[1:]) == sorted(url for url, _ in ELITEBABES_GALLERIES)
     expected = [photo for _, content in ELITEBABES_GALLERIES for photo in elitebabes_photos(content)]
     assert photos(found) == expected
     assert {r["source"] for r in found} == {"EliteBabes"}
@@ -669,7 +669,7 @@ def test_elitebabes_finds_the_galleries_by_their_tiles(web):
 
 
 def test_elitebabes_returns_only_the_gallerys_own_photos(web):
-    url, content = ELITEBABES_GALLERIES[1]
+    url, content = ELITEBABES_GALLERIES[2]
     web.routes[ELITEBABES_INDEX_URL] = f'<figure><a href="{url}" title="Jane Example in the garden">x</a></figure>'
     web.routes[url] = elitebabes_gallery(url)
     found = image_search.search_elitebabes(NAME)
@@ -1089,23 +1089,31 @@ def test_when_every_gallery_fails_the_source_fails(web):
 # Parallel galleries, deterministic caps, deadlines
 # ---------------------------------------------------------------------------
 
-def test_gallery_ids_are_sorted_before_the_cap(web):
-    ids = [str(30000100 - 3 * i) for i in range(21)]  # descending: page order is not sorted order
-    serve_pornpics(web, ids)
+def test_pornpics_cap_keeps_the_sites_gallery_order(web):
+    # Newest (highest) ids first, as the site lists them; one listed twice. The cap takes
+    # the first 20 the page lists, not the 20 lowest ids.
+    ids = [str(30000100 - 3 * i) for i in range(21)]
+    web.routes[PORNPICS_INDEX_URL] = pornpics_index(ids[:1] + ids)
+    for gid in ids:
+        web.routes[pornpics_gallery_url(gid)] = pornpics_gallery(gid)
     found = image_search.search_pornpics(NAME, max_galleries=20)
     fetched = [u for u in web.urls() if "/galleries/" in u]
-    assert sorted(fetched) == [pornpics_gallery_url(gid) for gid in sorted(ids)[:20]]
-    # Results follow the sorted gallery order, whatever order the fetches finished in
+    assert sorted(fetched) == sorted(pornpics_gallery_url(gid) for gid in ids[:20])
+    # Results follow the page's gallery order, whatever order the fetches finished in
     order = list(dict.fromkeys(r["image"].split("/")[-2] for r in found))
-    assert order == sorted(ids)[:20]
+    assert order == ids[:20]
 
 
-def test_elitebabes_gallery_links_are_sorted_before_the_cap(web):
-    slugs = [f"https://www.elitebabes.com/jane-example-set-{n}-{40000 + n}/" for n in (12, 3, 7, 1, 9, 11, 2, 5, 10, 4, 8, 6)]
-    web.routes[ELITEBABES_INDEX_URL] = "".join(f'<figure><a href="{u}" title="x">x</a></figure>\n' for u in slugs)
+def test_elitebabes_cap_keeps_the_sites_gallery_order(web):
+    numbers = (12, 3, 7, 1, 9, 11, 2, 5, 10, 4, 8, 6)
+    slugs = [f"https://www.elitebabes.com/jane-example-set-{n}-{40000 + n}/" for n in numbers]
+    tiles = [f'<figure><a href="{u}" title="x">x</a></figure>\n' for u in slugs]
+    web.routes[ELITEBABES_INDEX_URL] = tiles[0] + "".join(tiles)  # the first gallery twice
     web.fallback = lambda url: elitebabes_gallery(url) if url != ELITEBABES_INDEX_URL else None
-    image_search.search_elitebabes(NAME, max_galleries=10)
-    assert sorted(web.urls()[1:]) == sorted(slugs)[:10]
+    found = image_search.search_elitebabes(NAME, max_galleries=10)
+    assert sorted(web.urls()[1:]) == sorted(slugs[:10])
+    order = list(dict.fromkeys(r["image"].split("/")[-2] for r in found))
+    assert order == ["5" + str(40000 + n).zfill(5) for n in numbers[:10]]
 
 
 def test_gallery_pages_are_fetched_four_at_a_time(web):

@@ -589,9 +589,9 @@ def search_pornpics(name, max_results=200, max_galleries=20, deadline=None):
 
     # Extract gallery set IDs from image URLs on the performer page
     # Format: /460/7/91/67655164/67655164_004_98f9.jpg
-    # The 8-digit number (67655164) is the gallery/set ID. Sorted, so the cap
-    # always picks the same galleries.
-    gallery_ids = sorted(set(re.findall(r'/(\d{8})/\d{8}_', html)))
+    # The 8-digit number (67655164) is the gallery/set ID. Deduplicated in page
+    # order, so the cap takes the galleries the site lists first.
+    gallery_ids = list(dict.fromkeys(re.findall(r'/(\d{8})/\d{8}_', html)))
     log.LogDebug(f"[PornPics] Found {len(gallery_ids)} unique gallery IDs for: {name}")
     gallery_urls = [f"https://www.pornpics.com/galleries/{gid}/" for gid in gallery_ids[:max_galleries]]
 
@@ -672,9 +672,9 @@ def search_elitebabes(name, max_results=100, max_galleries=10, deadline=None):
     if html is None:
         return SourceResult()
 
-    gallery_links = set(ELITEBABES_GALLERY_TILE.findall(html))
-    # Sorted, so the cap always picks the same galleries
-    gallery_urls = sorted(gallery_links)[:max_galleries]
+    # Deduplicated in page order, so the cap takes the galleries the site lists first
+    gallery_links = list(dict.fromkeys(ELITEBABES_GALLERY_TILE.findall(html)))
+    gallery_urls = gallery_links[:max_galleries]
     log.LogDebug(f"[EliteBabes] Found {len(gallery_links)} gallery links")
 
     pages, warnings, error = _gallery_pages("EliteBabes", gallery_urls, deadline)
