@@ -172,6 +172,19 @@
   }
 
   /**
+   * Direction options for a sort, shared by the modal and the browse page. Dates read
+   * Newest/Oldest, Title reads Descending/Ascending. stash-box orders TRENDING by recent
+   * fingerprint count, always descending, and ignores the direction, so that control is hidden.
+   */
+  function directionFor(sort) {
+    if (sort === "TITLE") {
+      return { hidden: false, options: [{ value: "DESC", label: "Descending" }, { value: "ASC", label: "Ascending" }] };
+    }
+    const options = [{ value: "DESC", label: "Newest First" }, { value: "ASC", label: "Oldest First" }];
+    return { hidden: sort === "TRENDING", options };
+  }
+
+  /**
    * Escape HTML to prevent XSS
    */
   function escapeHtml(text) {
@@ -535,6 +548,7 @@
     describeFingerprintIndex,
     describeFingerprintBuild,
     fingerprintFields,
+    directionFor,
     escapeHtml,
     formatDate,
     formatDuration,
@@ -561,6 +575,7 @@
       describeFingerprintIndex,
       describeFingerprintBuild,
       fingerprintFields,
+      directionFor,
       escapeHtml,
       formatDate,
       formatDuration,

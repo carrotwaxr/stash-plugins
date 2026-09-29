@@ -15,6 +15,7 @@
     describeFingerprintIndex,
     describeFingerprintBuild,
     fingerprintFields,
+    directionFor,
     createSceneCard: coreCreateSceneCard,
   } = Core;
 
@@ -218,19 +219,6 @@
     { value: "UPDATED_AT", label: "Last Updated" },
     { value: "TRENDING", label: "Trending" },
   ];
-
-  /**
-   * Direction options for a sort. Dates read Newest/Oldest, Title reads
-   * Descending/Ascending. stash-box orders TRENDING by recent fingerprint
-   * count, always descending, and ignores the direction, so that control is hidden.
-   */
-  function directionFor(sort) {
-    if (sort === "TITLE") {
-      return { hidden: false, options: [{ value: "DESC", label: "Descending" }, { value: "ASC", label: "Ascending" }] };
-    }
-    const options = [{ value: "DESC", label: "Newest First" }, { value: "ASC", label: "Oldest First" }];
-    return { hidden: sort === "TRENDING", options };
-  }
 
   function applyDirectionOptions(selectEl, sort, current) {
     const { hidden, options } = directionFor(sort);

@@ -15,6 +15,7 @@
     describeFingerprintIndex,
     describeFingerprintBuild,
     fingerprintFields,
+    directionFor,
     createSceneCard,
   } = Core;
 
@@ -109,10 +110,13 @@
       .map(n => `<option value="${n}" ${pageSize === n ? 'selected' : ''}>${n}</option>`)
       .join('');
 
-    const directionOptions = [
-      { value: "DESC", label: "Newest First" },
-      { value: "ASC", label: "Oldest First" },
-    ].map(opt => `<option value="${opt.value}" ${sortDirection === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('');
+    // Labels follow the sort (Title: Descending/Ascending); Trending has no direction
+    const direction = directionFor(sortField);
+    const directionOptions = direction.options
+      .map(opt => `<option value="${opt.value}" ${sortDirection === opt.value ? 'selected' : ''}>${opt.label}</option>`).join('');
+    const directionAttrs = direction.hidden
+      ? ' style="display: none;" title="Trending is always most active first"'
+      : '';
 
     // Build stats text
     let statsText = '';
@@ -252,7 +256,7 @@
             <select id="ms-sort-field" class="ms-sort-select">
               ${sortOptions}
             </select>
-            <select id="ms-sort-direction" class="ms-sort-select">
+            <select id="ms-sort-direction" class="ms-sort-select"${directionAttrs}>
               ${directionOptions}
             </select>
             <label>Per page:</label>

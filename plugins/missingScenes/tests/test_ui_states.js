@@ -451,6 +451,40 @@ test("browse: says when ThePornDB searched only the first favorites", async () =
   assert.ok(!text(c2).includes("searched on ThePornDB"), text(c2));
 });
 
+// ---------------- browse sort controls ----------------
+
+/** The <option> labels of a <select id=...> in rendered HTML, and whether it is hidden. */
+function selectState(html, id) {
+  const m = html.match(new RegExp(`<select id="${id}"([^>]*)>([\\s\\S]*?)</select>`));
+  assert.ok(m, `select #${id}`);
+  const labels = [...m[2].matchAll(/<option[^>]*>([^<]*)<\/option>/g)].map((x) => x[1]);
+  return { labels, hidden: /display:\s*none/.test(m[1]) };
+}
+
+async function browseSortedBy(sort) {
+  const calls = [];
+  const ms = loadMissingScenes({
+    fetchResponses: { RunPluginOperation: (body) => { calls.push(body.variables.args); return wrap(okPage()); } },
+  });
+  const c = browseContainer();
+  await ms.exports.browse.performSearch(c, true);
+  c.querySelector("#ms-sort-field").listeners.change[0]({ target: { value: sort } });
+  await flush(ms);
+  return { c, calls };
+}
+
+test("browse: direction labels follow the sort, and Trending hides the direction", async () => {
+  const date = await browseSortedBy("DATE");
+  assert.deepStrictEqual(selectState(date.c.innerHTML, "ms-sort-direction"),
+    { labels: ["Newest First", "Oldest First"], hidden: false });
+  const title = await browseSortedBy("TITLE");
+  assert.deepStrictEqual(selectState(title.c.innerHTML, "ms-sort-direction"),
+    { labels: ["Descending", "Ascending"], hidden: false });
+  const trending = await browseSortedBy("TRENDING");
+  assert.strictEqual(selectState(trending.c.innerHTML, "ms-sort-direction").hidden, true);
+  assert.strictEqual(trending.calls[1].sort, "TRENDING");
+});
+
 // ---------------- fingerprint index (#160) ----------------
 
 /** RunPluginOperation that answers per operation; records every call's args. */
