@@ -84,12 +84,12 @@ class TestErrors(unittest.TestCase):
             stashdb_api.query_all_tags(URL, "k", per_page=2)
 
     def test_query_all_tags_falls_back_to_100(self, urlopen, _sleep):
-        urlopen.side_effect = [http_error(422), ok(tags_page(3, 3))]
+        urlopen.side_effect = [http_error(422), ok(tags_page(3, 3)), ok(tags_page(0, 0))]
         tags = stashdb_api.query_all_tags(URL, "k")
         self.assertEqual(len(tags), 3)
         sizes = [json.loads(c[0][0].data)["variables"]["input"]["per_page"]
                  for c in urlopen.call_args_list]
-        self.assertEqual(sizes, [1000, 100])
+        self.assertEqual(sizes, [1000, 100, 100])
 
     def test_search_raises_on_error(self, urlopen, _sleep):
         urlopen.side_effect = http_error(500)

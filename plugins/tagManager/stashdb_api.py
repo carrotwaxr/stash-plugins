@@ -228,6 +228,9 @@ TAG_FIELDS = """
 """
 
 
+MAX_TAG_PAGES = 500
+
+
 def query_all_tags(url, api_key, per_page=1000):
     """
     Fetch all tags from StashDB with pagination.
@@ -256,6 +259,9 @@ def query_all_tags(url, api_key, per_page=1000):
     """
 
     all_tags = []
+    seen_ids = set()
+    first_page_len = None
+    pages_fetched = 0
     page = 1
 
     while True:
@@ -288,17 +294,33 @@ def query_all_tags(url, api_key, per_page=1000):
         if not tags:
             break
 
-        all_tags.extend(tags)
+        # Dedupe by id: some endpoints ignore sort or repeat pages
+        new_tags = [t for t in tags if t.get("id") not in seen_ids]
+        seen_ids.update(t.get("id") for t in new_tags)
+        all_tags.extend(new_tags)
+        pages_fetched += 1
 
-        log.LogDebug(f"Tags: page {page}, got {len(tags)} (total: {total}, collected: {len(all_tags)})")
+        log.LogDebug(f"Tags: page {page}, got {len(tags)} (count: {total}, collected: {len(all_tags)})")
 
-        if len(all_tags) >= total:
+        if not new_tags:
+            break
+        if first_page_len is None:
+            first_page_len = len(tags)
+        elif len(tags) < first_page_len:
+            break  # short page = last page
+        # Some endpoints (ThePornDB) report count per page, not a total; only
+        # trust it when it exceeds the first page's length.
+        if total > first_page_len and len(all_tags) >= total:
+            break
+
+        if page >= MAX_TAG_PAGES:
+            log.LogWarning(f"Tags: stopped at the {MAX_TAG_PAGES}-page safety cap")
             break
 
         page += 1
         time.sleep(DEFAULT_CONFIG["request_delay"])
 
-    log.LogInfo(f"StashDB: Fetched {len(all_tags)} tags total")
+    log.LogInfo(f"StashDB: Fetched {len(all_tags)} tags total in {pages_fetched} pages")
     return all_tags
 
 
