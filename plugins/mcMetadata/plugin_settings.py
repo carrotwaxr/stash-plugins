@@ -128,13 +128,17 @@ def map_settings(plugin_config):
         "renamerPathTemplate",
         "$Studio/$Title - $Performers $ReleaseDate [$Resolution]",
     )
-    if enable_renamer and not template_is_unique(template):
-        log.error(
-            "renamerPathTemplate does not meet the uniqueness rule: it must contain $StashID, "
-            "or $Studio (or $Studios) together with $Title and $ReleaseDate. "
-            "Renaming is disabled for this run; NFO and poster generation still run."
-        )
+    if enable_renamer and not template.strip():
+        log.error("renamerPathTemplate is empty. Renaming is disabled for this run; NFO and poster generation still run.")
         enable_renamer = False
+    elif enable_renamer and not template_is_unique(template):
+        # Warn only: this was never enforced before, and a clash can't lose data
+        # (the renamer adds " (2)", and Stash's moveFiles refuses to overwrite).
+        log.warning(
+            "renamerPathTemplate may give two scenes the same path: include $StashID, "
+            "or $Studio (or $Studios) together with $Title and $ReleaseDate. "
+            "Clashing scenes get a numbered suffix."
+        )
 
     return {
         "dry_run": _bool(plugin_config, "dryRun", True),  # Default to safe mode

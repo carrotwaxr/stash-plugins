@@ -171,17 +171,22 @@ class TestSettingsRobustness(unittest.TestCase):
 
     def test_template_uniqueness_rule(self):
         ok = ["$StashID", "$Studio/$Title $ReleaseDate", "$Studios/$Title-$ReleaseDate"]
-        bad = ["$Title $Performers", "$Studio $Title", "$Title $ReleaseDate", ""]
+        not_unique = ["$Title $Performers", "$Studio $Title", "$Title $ReleaseDate"]
         for t in ok:
             self.log.reset_mock()
             s = map_settings({"enableRenamer": True, "renamerPathTemplate": t})
             self.assertIs(s["enable_renamer"], True, t)
-            self.log.error.assert_not_called()
-        for t in bad:
+            self.log.warning.assert_not_called()
+        for t in not_unique:
+            # A non-unique template warns but keeps renaming on (clashes get a suffix)
             self.log.reset_mock()
             s = map_settings({"enableRenamer": True, "renamerPathTemplate": t})
-            self.assertIs(s["enable_renamer"], False, t)
-            self.assertEqual(self.log.error.call_count, 1)
+            self.assertIs(s["enable_renamer"], True, t)
+            self.assertEqual(self.log.warning.call_count, 1, t)
+        self.log.reset_mock()
+        s = map_settings({"enableRenamer": True, "renamerPathTemplate": "   "})
+        self.assertIs(s["enable_renamer"], False)
+        self.assertEqual(self.log.error.call_count, 1)
 
     def test_bad_template_ignored_when_renamer_off_and_keeps_other_settings(self):
         s = map_settings({"enableRenamer": False, "renamerPathTemplate": "$Title"})
