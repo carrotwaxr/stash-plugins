@@ -23,6 +23,8 @@
   let isCacheLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
+  let categoryMappingsLoaded = false; // true once the stored mappings were read (or found empty)
+  let pendingMappingDeletes = new Set(); // JSON [endpoint, category] deleted while not loaded
   let categoryMappings = {}; // { endpoint: { category_name: local_tag_id } } (see getCategoryMapping)
   let tagBlacklistRaw = ''; // Raw blacklist text as saved (for the editor)
   let blacklistPanelOpen = false;
@@ -425,11 +427,15 @@
       categoryMappings[endpoint] = {};
     }
     categoryMappings[endpoint][category] = String(id);
+    pendingMappingDeletes.delete(JSON.stringify([endpoint, category]));
   }
 
   /** F20: forget one endpoint's mapping for `category`; drops the endpoint map once empty. */
   function deleteCategoryMapping(endpoint, category) {
-    if (!endpoint || !category || !hasOwn(categoryMappings, endpoint)) return;
+    if (!endpoint || !category) return;
+    // Not loaded: the stored value may still hold it, so remember to remove it on merge.
+    if (!categoryMappingsLoaded) pendingMappingDeletes.add(JSON.stringify([endpoint, category]));
+    if (!hasOwn(categoryMappings, endpoint)) return;
     const map = categoryMappings[endpoint];
     if (isPlainObject(map)) delete map[category];
     if (!isPlainObject(map) || Object.keys(map).length === 0) delete categoryMappings[endpoint];
@@ -462,11 +468,14 @@
             ? JSON.parse(pluginConfig.categoryMappings)
             : pluginConfig.categoryMappings;
         } catch (e) {
-          console.warn("[tagManager] Failed to parse category mappings:", e);
+          console.warn("[tagManager] Stored category mappings are unreadable and will be " +
+            "replaced on the next save:", e);
           categoryMappings = {};
+          categoryMappingsLoaded = true;
           return;
         }
         categoryMappings = migrateCategoryMappings(parsed, LEGACY_MAPPINGS_ENDPOINT);
+        categoryMappingsLoaded = true;
         console.debug("[tagManager] Loaded category mappings for endpoints:", Object.keys(categoryMappings).length);
         if (JSON.stringify(categoryMappings) !== JSON.stringify(parsed)) {
           console.info("[tagManager] Migrating category mappings to the per-endpoint shape");
@@ -476,6 +485,8 @@
               "using them in memory and retrying on the next save.");
           }
         }
+      } else {
+        categoryMappingsLoaded = true; // nothing stored yet
       }
     } catch (e) {
       console.error("[tagManager] Failed to load category mappings:", e);
@@ -487,6 +498,42 @@
    * (the load-time migration save, where nothing is lost on failure).
    */
   async function saveCategoryMappings({ quiet = false } = {}) {
+    if (!categoryMappingsLoaded) {
+      // The earlier load failed: merge onto what is stored instead of replacing it.
+      try {
+        const stored = (await getPluginConfig()).categoryMappings;
+        let base = {};
+        if (stored) {
+          try {
+            base = migrateCategoryMappings(
+              typeof stored === "string" ? JSON.parse(stored) : stored, LEGACY_MAPPINGS_ENDPOINT);
+          } catch (e) {
+            console.warn("[tagManager] Stored category mappings are unreadable and will be " +
+              "replaced on the next save:", e);
+          }
+        }
+        for (const key of pendingMappingDeletes) {
+          const [endpoint, category] = JSON.parse(key);
+          if (isPlainObject(base[endpoint])) {
+            delete base[endpoint][category];
+            if (Object.keys(base[endpoint]).length === 0) delete base[endpoint];
+          }
+        }
+        for (const [endpoint, map] of Object.entries(categoryMappings)) {
+          if (!isPlainObject(map)) continue;
+          base[endpoint] = { ...(isPlainObject(base[endpoint]) ? base[endpoint] : {}), ...map };
+        }
+        categoryMappings = base;
+        categoryMappingsLoaded = true;
+        pendingMappingDeletes = new Set();
+      } catch (e) {
+        console.error("[tagManager] Could not re-read stored category mappings; not saving:", e);
+        if (!quiet && typeof showToast === "function") {
+          showToast("Failed to save category mappings — they may not persist.", "error");
+        }
+        return false;
+      }
+    }
     const written = { categoryMappings: JSON.stringify(categoryMappings) };
     try {
       await savePluginConfigPatch(written);
