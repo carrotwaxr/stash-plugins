@@ -8,6 +8,7 @@ from utils.paths import is_inside
 from utils.replacer import get_new_path
 from utils.run_flow import is_dry_run
 from utils.self_updates import consume, mark
+from utils.videos import is_video
 from conditions import should_process, build_scene_filter, format_bulk_summary
 
 SKIP_SAMPLE_LIMIT = 10
@@ -212,6 +213,21 @@ class _PendingMoves:
         for source, dest in self.videos:
             count += (os.path.dirname(dest) == folder) - (os.path.dirname(source) == folder)
         return count
+
+    def other_videos(self, video_path):
+        """Videos besides video_path its folder holds once the moves so far are done."""
+        folder = os.path.dirname(video_path)
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            names = []
+        paths = {os.path.join(folder, n) for n in names if is_video(n) and os.path.isfile(os.path.join(folder, n))}
+        for source, dest in self.videos:
+            paths.discard(source)
+            if os.path.dirname(dest) == folder:
+                paths.add(dest)
+        paths.discard(video_path)
+        return len(paths)
 
 
 def __hydrate_scene(scene, stash):
@@ -475,18 +491,30 @@ def __relocate_sidecars(video_path, new_video_path, sidecars, settings, pending)
 
 
 def __relocate_folder_level(video_path, new_video_path, folder_video_counts, settings, pending):
-    """Move folder-level files (movie.nfo, poster.jpg ...) with a video that was alone in its folder."""
+    """Move folder-level files (movie.nfo, poster.jpg ...) with a video that was alone in its folder.
+
+    Only into a folder that then holds just that video: elsewhere they would become
+    the folder art of other videos. A dry run counts with the moves it recorded in pending.
+    """
     old_folder = os.path.dirname(video_path)
     new_folder = os.path.dirname(new_video_path)
     if old_folder == new_folder or folder_video_counts.get(old_folder) != 1:
         return
-    for template in artwork_templates(settings):
-        if not template or not is_folder_level(template):
-            continue
-        source = os.path.join(old_folder, template)
-        if not os.path.isfile(source):
-            continue
-        dest = os.path.join(new_folder, template)
+    sources = [
+        os.path.join(old_folder, template)
+        for template in artwork_templates(settings)
+        if template and is_folder_level(template) and os.path.isfile(os.path.join(old_folder, template))
+    ]
+    if not sources:
+        return
+    if pending.other_videos(new_video_path):
+        log.warning(
+            f"Not moving folder-level files ({', '.join(os.path.basename(s) for s in sources)}) "
+            f"from {old_folder}: {new_folder} holds other videos"
+        )
+        return
+    for source in sources:
+        dest = os.path.join(new_folder, os.path.basename(source))
         __move_with_video(source, dest, "folder-level file", settings, pending)
 
 

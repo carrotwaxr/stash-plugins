@@ -235,11 +235,13 @@ class TestFolderLevelRelocation(unittest.TestCase):
         self.old = os.path.join(self.tmp, "old")
         self.lib = os.path.join(self.tmp, "lib")
 
-    def run_move(self, extra_videos=(), **settings):
+    def run_move(self, extra_videos=(), dest_videos=(), **settings):
         video = os.path.join(self.old, "a.mp4")
         touch(video)
         for name in extra_videos:
             touch(os.path.join(self.old, name))
+        for name in dest_videos:
+            touch(os.path.join(self.lib, name))
         for name in ("movie.nfo", "poster.jpg", "backdrop.jpg", "a.nfo"):
             with open(os.path.join(self.old, name), "w") as f:
                 f.write("old " + name)
@@ -276,6 +278,31 @@ class TestFolderLevelRelocation(unittest.TestCase):
         self.run_move(extra_videos=("b.mkv",))
         self.assertEqual(sorted(os.listdir(self.lib)), ["New.mp4", "New.nfo"])
         self.assertIn("movie.nfo", os.listdir(self.old))
+
+    def test_folder_level_files_stay_when_destination_has_other_videos(self):
+        with patch.object(scene_module.log, "warning") as warn:
+            self.run_move(dest_videos=("Other.mpg",))
+        self.assertEqual(sorted(os.listdir(self.lib)), ["New.mp4", "New.nfo", "Other.mpg"])
+        self.assertEqual(sorted(os.listdir(self.old)), ["backdrop.jpg", "movie.nfo", "poster.jpg"])
+        self.assertTrue(any("folder-level" in c.args[0] and self.lib in c.args[0]
+                            for c in warn.call_args_list), warn.call_args_list)
+
+    def test_dry_run_folder_level_check_matches_live_run(self):
+        for dest_videos, expect_moves in (((), True), (("Other.mpg",), False)):
+            with self.subTest(dest_videos=dest_videos):
+                with tempfile.TemporaryDirectory() as tmp:
+                    self.old, self.lib = os.path.join(tmp, "old"), os.path.join(tmp, "lib")
+                    with patch.object(scene_module.log, "info") as info, \
+                         patch.object(scene_module.log, "warning") as warn:
+                        self.run_move(dest_videos=dest_videos, dry_run=True)
+                    lines = [c.args[0] for c in info.call_args_list]
+                    moved = sorted(line.rsplit(os.sep, 1)[-1] for line in lines
+                                   if line.startswith("[DRY RUN] Would move folder-level file:"))
+                    self.assertEqual(moved, ["backdrop.jpg", "movie.nfo", "poster.jpg"] if expect_moves else [])
+                    skipped = any("folder-level" in c.args[0] for c in warn.call_args_list)
+                    self.assertEqual(skipped, not expect_moves)
+                    self.assertEqual(sorted(os.listdir(self.old)),
+                                     ["a.mp4", "a.nfo", "backdrop.jpg", "movie.nfo", "poster.jpg"])
 
     def test_folder_level_move_never_overwrites(self):
         touch(os.path.join(self.lib, "movie.nfo"))

@@ -308,6 +308,20 @@ class TestDryRunParity(_Base):
         self.assertEqual(created, {os.path.join(self.new_folder, "New Name.mp4")})
         self.assertEqual({p for paths in dry.values() for p in paths}, created)
 
+    def test_dry_run_leaves_folder_level_files_like_live_run(self):
+        video = os.path.join(self.incoming, "old.mp4")
+        for name in ("old.mp4", "movie.nfo", "poster.jpg"):
+            _write(os.path.join(self.incoming, name), name)
+        _write(os.path.join(self.new_folder, "Other.mpg"))
+        dry, dry_lines, created, live_lines = self._compare(
+            [video], {"nfoFilename": "movie.nfo", "posterFilename": "poster.jpg"})
+        self.assertEqual(dry["folder"], [])
+        self.assertEqual(created, {os.path.join(self.new_folder, "New Name.mp4")})
+        self.assertEqual({p for paths in dry.values() for p in paths}, created)
+        self.assertEqual(sorted(os.listdir(self.incoming)), ["movie.nfo", "poster.jpg"])
+        for lines in (dry_lines, live_lines):
+            self.assertTrue(any("folder-level" in w for w in lines["warning"]), lines["warning"])
+
     def test_dry_run_reports_outside_library(self):
         elsewhere = os.path.join(self.tmp, "elsewhere")
         video = os.path.join(self.incoming, "old.mp4")
