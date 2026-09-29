@@ -50,23 +50,36 @@ def process_all_scenes(stash, settings, api_key):
         log.info("No scenes to process")
         return summary
 
-    # Calculate total pages (ceiling division)
-    total_pages = (count + BATCH_SIZE - 1) // BATCH_SIZE
     processed = 0
     errors = 0
     scanned = 0
+    last_id = 0
+    page_num = 0
 
-    # Pages are 1-indexed in Stash API
-    for page in range(1, total_pages + 1):
-        start = (page - 1) * BATCH_SIZE + 1
-        end = min(page * BATCH_SIZE, count)
+    # Cursor paging on id: the run itself can change which scenes match (e.g. marking
+    # scenes organized under organized_condition=skip), so offset paging would skip
+    # unprocessed scenes. count is for progress display only.
+    while True:
+        page_num += 1
+        page_filter = dict(scene_filter)
+        if last_id:
+            page_filter["id"] = {"value": last_id, "modifier": "GREATER_THAN"}
 
-        log.info(f"Evaluating scenes {start}-{end} of {count} (page {page}/{total_pages})")
+        progress = min(scanned / count, 1.0)
+        log.info(f"Evaluating scenes after id {last_id} (batch {page_num}, {progress:.0%} of ~{count})")
 
         scenes = stash.find_scenes(
-            f=scene_filter,
-            filter={"page": page, "per_page": BATCH_SIZE},
+            f=page_filter,
+            filter={"per_page": BATCH_SIZE, "sort": "id", "direction": "ASC"},
         )
+        if not scenes:
+            break
+
+        max_id = max(int(sc["id"]) for sc in scenes)
+        if max_id <= last_id:
+            log.error(f"Paging did not advance past scene id {last_id}; stopping to avoid an infinite loop")
+            break
+        last_id = max_id
 
         for scene in scenes:
             scanned += 1
@@ -83,6 +96,9 @@ def process_all_scenes(stash, settings, api_key):
             except Exception as err:
                 errors += 1
                 log.error(f"Error processing scene {scene.get('id', 'unknown')}: {err}")
+
+        if len(scenes) < BATCH_SIZE:
+            break
 
     summary["scanned"] = scanned
     summary["processed"] = processed

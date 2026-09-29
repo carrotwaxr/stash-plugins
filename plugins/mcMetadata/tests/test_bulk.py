@@ -104,21 +104,30 @@ class TestSupersetInvariant(unittest.TestCase):
 
 
 class FakeStash:
-    """Minimal stash double: applies the server filter, paginates, counts."""
+    """Minimal stash double: applies the server filter (organized, stash_id, and the
+    id GREATER_THAN criterion), sorts by id ASC, returns per_page rows. Honors offset
+    paging only if a page is sent (as Stash does), so offset-paging bugs reproduce."""
 
     def __init__(self, scenes):
         self.scenes = scenes
 
     def _filtered(self, f):
-        return [s for s in self.scenes if _passes_server_filter(s, f or {})]
+        f = f or {}
+        out = [s for s in self.scenes if _passes_server_filter(s, f)]
+        crit = f.get("id")
+        if crit:
+            assert crit["modifier"] == "GREATER_THAN"
+            out = [s for s in out if int(s["id"]) > int(crit["value"])]
+        return out
 
     def find_scenes(self, f=None, filter=None, get_count=False):
         matched = self._filtered(f)
         if get_count:
             return [len(matched)]
-        page = filter["page"]
+        if (filter or {}).get("sort") == "id":
+            matched = sorted(matched, key=lambda s: int(s["id"]))
         per = filter["per_page"]
-        start = (page - 1) * per
+        start = (filter.get("page", 1) - 1) * per
         return matched[start:start + per]
 
 
@@ -156,6 +165,28 @@ class TestBulkProcessing(unittest.TestCase):
         self.assertEqual(spy.call_count, 1)               # only scene 1 processed
         self.assertEqual(summary["processed"], 1)
         self.assertEqual(summary["skipped"]["missing_required_tag"], 2)
+
+    def test_skip_condition_does_not_skip_scenes_that_leave_the_filter(self):
+        import scene as scene_module
+        scenes = [
+            {"id": str(i), "organized": False, "stash_ids": [], "tags": [], "files": [{"path": "/m/x.mp4"}]}
+            for i in range(1, 251)
+        ]
+        seen = []
+
+        def mark_organized(scene, stash, settings, api_key):
+            seen.append(scene["id"])
+            for s in scenes:
+                if s["id"] == scene["id"]:
+                    s["organized"] = True
+
+        with patch.object(scene_module, "process_scene", side_effect=mark_organized):
+            summary = scene_module.process_all_scenes(
+                FakeStash(scenes), _settings(organized_condition="skip"), api_key="k")
+        self.assertEqual(len(seen), 250)
+        self.assertEqual(len(set(seen)), 250)
+        self.assertEqual(summary["processed"], 250)
+        self.assertEqual(summary["scanned"], 250)
 
     def test_summary_totals_reconcile(self):
         scenes = [
