@@ -7,14 +7,14 @@
   const DEFAULTS = {
     searchSuffix: "pornstar",
     layout: "All",
-    // Source toggles - all enabled by default
+    // Source toggles: on by default, except DuckDuckGo (rate-limited)
     enableBabepedia: true,
     enablePornPics: true,
     enableFreeOnes: true,
     enableEliteBabes: true,
     enableBoobpedia: true,
     enableJavDatabase: true,
-    enableDuckDuckGo: true,
+    enableDuckDuckGo: false,
   };
 
   // All available sources (will be filtered by settings)
@@ -28,12 +28,21 @@
     { id: "duckduckgo", settingKey: "enableDuckDuckGo" },
   ];
 
-  // Aspect ratio thresholds
-  const ASPECT_THRESHOLDS = {
-    Portrait: [0, 0.9],     // width/height < 0.9
-    Square: [0.9, 1.1],     // 0.9 <= ratio <= 1.1
-    Landscape: [1.1, Infinity],  // ratio > 1.1
+  // Aspect ratio classes: Portrait < 0.9, Square 0.9..1.1 inclusive, Landscape > 1.1
+  const ASPECT_TESTS = {
+    Portrait: (r) => r < 0.9,
+    Square: (r) => r >= 0.9 && r <= 1.1,
+    Landscape: (r) => r > 1.1,
   };
+
+  // "all"/"any" in any case mean no filter; unknown values fall back to it too
+  function normalizeLayout(value) {
+    const v = String(value == null ? "" : value).trim().toLowerCase();
+    for (const name of Object.keys(ASPECT_TESTS)) {
+      if (name.toLowerCase() === v) return name;
+    }
+    return "All";
+  }
 
   // Active sources (filtered by settings, populated at runtime)
   let SOURCES = [];
@@ -44,7 +53,11 @@
   let currentPerformerName = null;
   let allResults = []; // All fetched results
   let filteredResults = []; // Results after applying filters
-  let imageDimensions = {}; // Map of index -> {width, height}
+  let imageDimensions = {}; // Map of image URL -> {width, height, rank}; 0x0 means unknown
+  let previewResult = null; // The result shown in the preview
+  let gridContainer = null; // The #pis-results element the grid nodes live in
+  let gridNodes = new Map(); // image URL -> result item element (kept across filter changes)
+  let emptyNote = null; // "No images match" note inside the grid
   let loadedCount = 0; // Number of images that have loaded
   let isLoading = false;
   let previewImage = null;
@@ -111,17 +124,16 @@
       // Build settings object with defaults
       const settings = {
         searchSuffix: pluginConfig?.defaultSearchSuffix || DEFAULTS.searchSuffix,
-        layout: pluginConfig?.defaultLayout || DEFAULTS.layout,
+        layout: normalizeLayout(pluginConfig?.defaultLayout),
       };
 
       // Process source toggles
-      // Stash BOOLEAN settings: if not set, returns undefined (use default true)
-      // If explicitly set to false, returns false
+      // Stash BOOLEAN settings are undefined when never set: use that source's default
       for (const source of ALL_SOURCES) {
         const configValue = pluginConfig?.[source.settingKey];
-        // Treat undefined/null as true (enabled by default)
-        // Only disable if explicitly set to false
-        settings[source.settingKey] = configValue !== false;
+        settings[source.settingKey] = typeof configValue === "boolean"
+          ? configValue
+          : DEFAULTS[source.settingKey];
       }
 
       // Build active SOURCES array based on settings
@@ -134,9 +146,9 @@
       return settings;
     } catch (e) {
       console.error("[PerformerImageSearch] Failed to get settings:", e);
-      // On error, enable all sources
-      SOURCES = ALL_SOURCES.map(source => source.id);
-      return DEFAULTS;
+      // On error, use each source's default
+      SOURCES = ALL_SOURCES.filter(source => DEFAULTS[source.settingKey]).map(source => source.id);
+      return { ...DEFAULTS };
     }
   }
 
@@ -185,36 +197,53 @@
     }
   }
 
+  const positive = (n) => typeof n === "number" && Number.isFinite(n) && n > 0;
+
   /**
-   * Apply aspect ratio filter to results based on loaded dimensions
+   * Known size of a result: the backend's, else what loaded in the browser; null if unknown
+   */
+  function getDimensions(result) {
+    if (positive(result.width) && positive(result.height)) {
+      return { width: result.width, height: result.height };
+    }
+    const d = imageDimensions[result.image];
+    return d && positive(d.width) && positive(d.height) ? d : null;
+  }
+
+  /**
+   * Apply the aspect ratio filter. Results of unknown size pass every filter.
    */
   function applyFilters() {
-    const layoutFilter = document.getElementById("pis-layout")?.value || "All";
-
-    if (layoutFilter === "All") {
+    const layoutFilter = normalizeLayout(document.getElementById("pis-layout")?.value);
+    const test = ASPECT_TESTS[layoutFilter];
+    if (!test) {
       filteredResults = [...allResults];
       return;
     }
-
-    filteredResults = allResults.filter((result, index) => {
-      const dims = imageDimensions[index];
-
-      // If dimensions not loaded yet, include by default
-      if (!dims || dims.width === 0 || dims.height === 0) {
-        return true;
-      }
-
-      const { width, height } = dims;
-      const ratio = width / height;
-
-      // Layout filter
-      const [minRatio, maxRatio] = ASPECT_THRESHOLDS[layoutFilter] || [0, Infinity];
-      if (!(ratio >= minRatio && ratio < maxRatio)) {
-        return false;
-      }
-
-      return true;
+    filteredResults = allResults.filter((result) => {
+      const dims = getDimensions(result);
+      return !dims || test(dims.width / dims.height);
     });
+  }
+
+  /**
+   * Record a size for an image URL. A higher rank (2 full image, 1 thumbnail,
+   * 0 unknown) replaces a lower one. Returns true when the stored entry changed.
+   */
+  function recordDimensions(url, width, height, rank) {
+    if (!url) return false;
+    const known = positive(width) && positive(height);
+    const cur = imageDimensions[url];
+    if (!cur) loadedCount++;
+    if (cur && (!known || cur.rank >= rank)) return false;
+    imageDimensions[url] = known ? { width, height, rank } : { width: 0, height: 0, rank: 0 };
+    return !cur || known;
+  }
+
+  function refreshGrid() {
+    applyFilters();
+    renderResults();
+    updateFilterStatus();
   }
 
   /**
@@ -316,7 +345,11 @@
     currentPerformerName = performerName;
     allResults = [];
     filteredResults = [];
+    imageDimensions = {};
+    loadedCount = 0;
     previewImage = null;
+    previewResult = null;
+    currentPreviewIndex = -1;
 
     // Create modal if it doesn't exist
     if (!modalRoot) {
@@ -325,8 +358,9 @@
       document.body.appendChild(modalRoot);
     }
 
-    document.removeEventListener("keydown", handleModalKeydown);
-    document.addEventListener("keydown", handleModalKeydown);
+    // Capture phase on window: runs before Stash's Mousetrap (bubble, on document)
+    window.removeEventListener("keydown", handleModalKeydown, true);
+    window.addEventListener("keydown", handleModalKeydown, true);
 
     renderModal();
   }
@@ -336,7 +370,7 @@
    */
   function hideModal() {
     supersedeSearches();
-    document.removeEventListener("keydown", handleModalKeydown);
+    window.removeEventListener("keydown", handleModalKeydown, true);
     if (modalRoot) {
       modalRoot.innerHTML = "";
     }
@@ -347,6 +381,7 @@
     imageDimensions = {};
     loadedCount = 0;
     previewImage = null;
+    previewResult = null;
     currentPreviewIndex = -1;
     seenImageUrls = new Set();
     completedSources = [];
@@ -441,38 +476,50 @@
     // Add filter change handler - apply filters client-side (instant!)
     const layoutSelect = document.getElementById("pis-layout");
     if (layoutSelect) layoutSelect.addEventListener("change", () => {
-      if (allResults.length > 0) {
-        applyFilters();
-        renderResults();
-        updateFilterStatus();
-      }
+      if (allResults.length > 0) refreshGrid();
     });
   }
 
-  /**
-   * Handle keyboard navigation in preview
-   */
-  function handlePreviewKeydown(e) {
+  function previewIsOpen() {
     const overlay = document.getElementById("pis-preview-overlay");
-    if (!overlay || overlay.style.display === "none") return;
+    return !!overlay && overlay.style.display !== "none";
+  }
 
-    if (e.key === "ArrowLeft") {
-      window.pisPrevPreview();
-    } else if (e.key === "ArrowRight") {
-      window.pisNextPreview();
-    } else if (e.key === "Escape") {
-      window.pisClosePreview();
-    }
+  function swallow(e) {
+    if (e.preventDefault) e.preventDefault();
+    if (e.stopPropagation) e.stopPropagation();
   }
 
   /**
-   * Escape closes the modal when no preview is open; otherwise the preview handler runs
+   * Arrow keys and Escape while a preview is open. Returns true when handled.
+   * Arrow keys are left alone while focus is in a form field.
+   */
+  function handlePreviewKeydown(e) {
+    if (!previewIsOpen()) return false;
+    const tag = String((e.target && e.target.tagName) || "").toUpperCase();
+    const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+
+    if (e.key === "Escape") {
+      window.pisClosePreview();
+    } else if (!typing && e.key === "ArrowLeft") {
+      window.pisPrevPreview();
+    } else if (!typing && e.key === "ArrowRight") {
+      window.pisNextPreview();
+    } else {
+      return false;
+    }
+    swallow(e);
+    return true;
+  }
+
+  /**
+   * Window capture-phase key handler while the modal is open: Escape closes the
+   * preview if open, else the modal. Handled keys never reach Stash's hotkeys.
    */
   function handleModalKeydown(e) {
-    const overlay = document.getElementById("pis-preview-overlay");
-    if (overlay && overlay.style.display !== "none") {
-      handlePreviewKeydown(e);
-    } else if (e.key === "Escape") {
+    if (handlePreviewKeydown(e)) return;
+    if (e.key === "Escape" && !previewIsOpen()) {
+      swallow(e);
       hideModal();
     }
   }
@@ -600,122 +647,153 @@
   };
 
   /**
-   * Handle image load - capture dimensions and re-filter
+   * A thumbnail loaded: record its size (keyed by image URL) and re-filter
    */
-  window.pisImageLoaded = function (img, originalIndex) {
-    if (!imageDimensions[originalIndex]) {
-      imageDimensions[originalIndex] = {
-        width: img.naturalWidth,
-        height: img.naturalHeight,
-      };
-      loadedCount++;
-
-      // Re-apply filters periodically as images load
-      // (every 10 images or when all loaded)
-      if (loadedCount % 10 === 0 || loadedCount === allResults.length) {
-        applyFilters();
-        renderResults();
-        updateFilterStatus();
-      }
+  window.pisImageLoaded = function (img, url) {
+    if (recordDimensions(url, img.naturalWidth, img.naturalHeight, 1) && getFilterName() !== "All") {
+      refreshGrid();
     }
   };
 
   /**
-   * Render search results grid
+   * A thumbnail failed: its size is unknown, which counts as loaded
+   */
+  window.pisImageErrored = function (url) {
+    recordDimensions(url, 0, 0, 0);
+    updateFilterStatus();
+  };
+
+  function getFilterName() {
+    return normalizeLayout(document.getElementById("pis-layout")?.value);
+  }
+
+  function createResultNode(result) {
+    const item = document.createElement("div");
+    item.className = "pis-result-item";
+    item.addEventListener("click", () => showPreviewFor(result));
+
+    const img = document.createElement("img");
+    img.src = result.thumbnail;
+    img.alt = result.title || "";
+    img.setAttribute("loading", "lazy");
+    img.onload = () => {
+      img.classList.add("pis-loaded");
+      window.pisImageLoaded(img, result.image);
+    };
+    img.onerror = () => {
+      item.classList.add("pis-error");
+      window.pisImageErrored(result.image);
+    };
+    item.appendChild(img);
+
+    const info = document.createElement("div");
+    info.className = "pis-result-info";
+    info.textContent = result.source || "";
+    item.appendChild(info);
+    return item;
+  }
+
+  /**
+   * Render the results grid. Nodes are created once per result and kept: new
+   * results are appended, and filters only toggle visibility, so images are
+   * not reloaded and scroll position holds.
    */
   function renderResults() {
-    const resultsContainer = document.getElementById("pis-results");
+    const container = document.getElementById("pis-results");
+    if (!container) return;
+    if (container !== gridContainer) {
+      gridContainer = container;
+      gridNodes = new Map();
+      emptyNote = null;
+    }
 
-    if (!resultsContainer) return;
-
-    if (filteredResults.length === 0) {
-      if (allResults.length === 0) {
-        let msg;
-        if (isLoading) {
-          msg = "Searching...";
-        } else if (sourceErrors.length >= SOURCES.length && sourceErrors.length > 0) {
-          msg = "Couldn't reach any image source. Check that the Stash server has internet access, then try again.";
-        } else {
-          msg = "No images found for this performer.";
-        }
-        resultsContainer.innerHTML = `<div class="pis-placeholder">${msg}</div>`;
+    if (allResults.length === 0) {
+      let msg;
+      if (isLoading) {
+        msg = "Searching...";
+      } else if (sourceErrors.length >= SOURCES.length && sourceErrors.length > 0) {
+        msg = "Couldn't reach any image source. Check that the Stash server has internet access, then try again.";
       } else {
-        resultsContainer.innerHTML = '<div class="pis-placeholder">No images match current filters</div>';
+        msg = "No images found for this performer.";
       }
+      container.innerHTML = `<div class="pis-placeholder">${msg}</div>`;
+      gridNodes = new Map();
+      emptyNote = null;
       return;
     }
 
-    // Build a map of filtered result to original index for click handling
-    const filteredWithIndex = filteredResults.map((result) => {
-      const originalIndex = allResults.indexOf(result);
-      return { result, originalIndex };
-    });
-
-    resultsContainer.innerHTML = filteredWithIndex
-      .map(
-        ({ result, originalIndex }) => {
-          return `
-        <div class="pis-result-item" onclick="window.pisShowPreview(${originalIndex})">
-          <img
-            src="${escapeHtml(result.thumbnail)}"
-            alt="${escapeHtml(result.title)}"
-            loading="lazy"
-            onload="this.classList.add('pis-loaded'); window.pisImageLoaded(this, ${originalIndex})"
-            onerror="this.parentElement.classList.add('pis-error')"
-          />
-          <div class="pis-result-info">
-            ${escapeHtml(result.source)}
-          </div>
-        </div>
-      `;
-        }
-      )
-      .join("");
+    if (gridNodes.size === 0) container.innerHTML = ""; // drop the placeholder
+    for (const result of allResults) {
+      if (!gridNodes.has(result.image)) {
+        const node = createResultNode(result);
+        gridNodes.set(result.image, node);
+        container.appendChild(node);
+      }
+    }
+    const visible = new Set(filteredResults.map((r) => r.image));
+    for (const [url, node] of gridNodes) {
+      node.style.display = visible.has(url) ? "" : "none";
+    }
+    if (!emptyNote) {
+      emptyNote = document.createElement("div");
+      emptyNote.className = "pis-placeholder";
+      emptyNote.textContent = "No images match current filters";
+      container.appendChild(emptyNote);
+    }
+    emptyNote.style.display = filteredResults.length === 0 ? "" : "none";
   }
+
+  const THUMB_NOTICE = "Full-size image unavailable; showing the thumbnail";
 
   /**
    * Show full-size image preview
    */
   window.pisShowPreview = function (originalIndex) {
     const result = allResults[originalIndex];
-    if (!result) return;
+    if (result) showPreviewFor(result);
+  };
 
+  function showPreviewFor(result) {
+    previewResult = result;
     previewImage = result.image;
-    // Track position within the filtered grid so arrow/click nav matches what's visible
+    // Position within the filtered grid; -1 when the result is filtered out
     currentPreviewIndex = filteredResults.indexOf(result);
 
     const overlay = document.getElementById("pis-preview-overlay");
     const img = document.getElementById("pis-preview-image");
     const dimInfo = document.getElementById("pis-preview-dims");
+    const confirmBtn = document.getElementById("pis-confirm-btn");
+    if (!overlay || !img) return;
 
-    if (overlay && img) {
-      // Clear previous dimensions
-      if (dimInfo) dimInfo.textContent = "Loading...";
+    if (dimInfo) dimInfo.textContent = "Loading...";
+    if (confirmBtn) confirmBtn.disabled = false;
+    let fellBack = false; // one fall back to the thumbnail; stops error loops
 
-      // Clear previous handlers by replacing img src
-      img.onload = null;
-      img.onerror = null;
+    img.onload = function () {
+      if (previewResult !== result || overlay.style.display === "none") return;
+      if (fellBack) return; // keep the notice
+      if (dimInfo) dimInfo.textContent = `${img.naturalWidth} x ${img.naturalHeight} - ${result.source}`;
+      if (recordDimensions(result.image, img.naturalWidth, img.naturalHeight, 2) && getFilterName() !== "All") {
+        refreshGrid();
+      }
+    };
 
-      // Show dimensions once image loads
-      img.onload = function () {
-        if (dimInfo && overlay.style.display !== "none") {
-          dimInfo.textContent = `${img.naturalWidth} x ${img.naturalHeight} - ${result.source}`;
-        }
-      };
-
-      // Try full-size first, fall back to thumbnail if it fails
-      img.onerror = function () {
-        if (img.src !== result.thumbnail && overlay.style.display !== "none") {
-          img.src = result.thumbnail;
-          previewImage = result.thumbnail;
-        }
-      };
-      img.src = result.image;
-      overlay.style.display = "flex";
-
-      // Add keyboard listener when opening preview
-    }
-  };
+    img.onerror = function () {
+      if (previewResult !== result || overlay.style.display === "none") return;
+      if (!fellBack && result.thumbnail && result.thumbnail !== result.image) {
+        fellBack = true;
+        previewImage = result.thumbnail;
+        if (dimInfo) dimInfo.textContent = THUMB_NOTICE;
+        img.src = result.thumbnail;
+        return;
+      }
+      previewImage = null;
+      if (dimInfo) dimInfo.textContent = "Image unavailable";
+      if (confirmBtn) confirmBtn.disabled = true;
+    };
+    img.src = result.image;
+    overlay.style.display = "flex";
+  }
 
   /**
    * Handle click on preview image - navigate based on click position
@@ -731,24 +809,28 @@
   };
 
   /**
-   * Navigate to previous image in preview
+   * Step through the visible results from the previewed one. When the
+   * previewed result has been filtered out, go to its nearest visible
+   * neighbour in that direction.
    */
-  window.pisPrevPreview = function () {
-    if (currentPreviewIndex > 0) {
-      const target = filteredResults[currentPreviewIndex - 1];
-      window.pisShowPreview(allResults.indexOf(target));
+  function stepPreview(delta) {
+    if (!previewResult) return;
+    let target;
+    const idx = filteredResults.indexOf(previewResult);
+    if (idx >= 0) {
+      target = filteredResults[idx + delta];
+    } else {
+      const visible = new Set(filteredResults);
+      for (let i = allResults.indexOf(previewResult) + delta; i >= 0 && i < allResults.length; i += delta) {
+        if (visible.has(allResults[i])) { target = allResults[i]; break; }
+      }
     }
-  };
+    if (target) showPreviewFor(target);
+  }
 
-  /**
-   * Navigate to next image in preview
-   */
-  window.pisNextPreview = function () {
-    if (currentPreviewIndex >= 0 && currentPreviewIndex < filteredResults.length - 1) {
-      const target = filteredResults[currentPreviewIndex + 1];
-      window.pisShowPreview(allResults.indexOf(target));
-    }
-  };
+  window.pisPrevPreview = function () { stepPreview(-1); };
+
+  window.pisNextPreview = function () { stepPreview(1); };
 
   /**
    * Close preview overlay
@@ -759,6 +841,8 @@
       overlay.style.display = "none";
     }
     previewImage = null;
+    previewResult = null;
+    currentPreviewIndex = -1;
   };
 
   /**
@@ -966,6 +1050,7 @@
       loadedCount,
       isLoading,
       previewImage,
+      previewResult,
       currentPreviewIndex,
       seenImageUrls,
       completedSources,
@@ -987,6 +1072,7 @@
           case "loadedCount": loadedCount = v; break;
           case "isLoading": isLoading = v; break;
           case "previewImage": previewImage = v; break;
+          case "previewResult": previewResult = v; break;
           case "currentPreviewIndex": currentPreviewIndex = v; break;
           case "seenImageUrls": seenImageUrls = v; break;
           case "completedSources": completedSources = v; break;

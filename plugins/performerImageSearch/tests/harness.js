@@ -23,6 +23,9 @@
  * windowListeners / documentListeners: { type, fn, capture } for every
  * addEventListener call (capture is true when the third arg is true or
  * { capture: true }). Removals are recorded in windowRemoved / documentRemoved.
+ * dispatchEvent(type, init): runs the registered listeners in DOM order (window
+ * capture, document capture, document bubble, window bubble); stopPropagation
+ * stops the later phases. Returns the event (defaultPrevented etc.).
  * pluginEvents: PluginApi.Event.addEventListener registrations { type, fn }.
  * createdElements: every element made by document.createElement.
  * Timers are never real: setTimeout queues, flushTimers() runs them (and any
@@ -132,6 +135,30 @@ function loadPlugin({ fetchResponses = {}, pathname = "/", base = "/" } = {}) {
   const documentRemoved = [];
   const windowListeners = [];
   const windowRemoved = [];
+  // Currently registered listeners (adds minus removals), used by dispatchEvent
+  const activeDoc = [];
+  const activeWin = [];
+  function removeActive(list, type, fn, capture) {
+    const i = list.findIndex((l) => l.type === type && l.fn === fn && l.capture === capture);
+    if (i >= 0) list.splice(i, 1);
+  }
+  // Tiny event model: window capture, document capture, document bubble, window
+  // bubble; stopPropagation stops later phases (and later listeners are skipped
+  // only across phases, not within one). Returns the event.
+  function dispatchEvent(type, init = {}) {
+    let stopped = false;
+    const e = Object.assign({
+      defaultPrevented: false,
+      preventDefault() { e.defaultPrevented = true; },
+      stopPropagation() { stopped = true; },
+    }, init, { type });
+    const phases = [[activeWin, true], [activeDoc, true], [activeDoc, false], [activeWin, false]];
+    for (const [list, capture] of phases) {
+      if (stopped) break;
+      for (const l of list.filter((x) => x.type === type && x.capture === capture)) l.fn(e);
+    }
+    return e;
+  }
   const baseEl = { getAttribute: (k) => (k === "href" ? base : null) };
   const elements = {};
   const document = {
@@ -142,16 +169,28 @@ function loadPlugin({ fetchResponses = {}, pathname = "/", base = "/" } = {}) {
     querySelectorAll: () => [],
     getElementById: (id) => elements[id] || null,
     createElement: (tag) => createElement(tag, createdElements),
-    addEventListener(type, fn, opts) { documentListeners.push({ type, fn, capture: isCapture(opts) }); },
-    removeEventListener(type, fn, opts) { documentRemoved.push({ type, fn, capture: isCapture(opts) }); },
+    addEventListener(type, fn, opts) {
+      documentListeners.push({ type, fn, capture: isCapture(opts) });
+      activeDoc.push({ type, fn, capture: isCapture(opts) });
+    },
+    removeEventListener(type, fn, opts) {
+      documentRemoved.push({ type, fn, capture: isCapture(opts) });
+      removeActive(activeDoc, type, fn, isCapture(opts));
+    },
   };
   const window = {
     __PERFORMER_IMAGE_SEARCH_TEST__: {},
     location: { origin: "http://localhost", pathname, search: "", hash: "", href: "http://localhost" + pathname },
     innerWidth: 1280,
     innerHeight: 800,
-    addEventListener(type, fn, opts) { windowListeners.push({ type, fn, capture: isCapture(opts) }); },
-    removeEventListener(type, fn, opts) { windowRemoved.push({ type, fn, capture: isCapture(opts) }); },
+    addEventListener(type, fn, opts) {
+      windowListeners.push({ type, fn, capture: isCapture(opts) });
+      activeWin.push({ type, fn, capture: isCapture(opts) });
+    },
+    removeEventListener(type, fn, opts) {
+      windowRemoved.push({ type, fn, capture: isCapture(opts) });
+      removeActive(activeWin, type, fn, isCapture(opts));
+    },
   };
   window.window = window;
 
@@ -199,6 +238,7 @@ function loadPlugin({ fetchResponses = {}, pathname = "/", base = "/" } = {}) {
     windowRemoved,
     documentListeners,
     documentRemoved,
+    dispatchEvent,
     pluginEvents,
     createdElements,
     pendingTimers,

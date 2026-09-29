@@ -3,7 +3,7 @@
  * Run with: node plugins/performerImageSearch/tests/test_status.js
  */
 const assert = require("assert");
-const { loadPlugin } = require("./harness");
+const { loadPlugin, createElement } = require("./harness");
 
 let failures = 0;
 async function test(name, fn) {
@@ -39,7 +39,7 @@ function setup(bySource, sources) {
   const els = p.document.elements;
   els["pis-search-query"] = { value: "jane", addEventListener() {}, focus() {} };
   els["pis-status"] = { textContent: "", className: "" };
-  els["pis-results"] = { innerHTML: "" };
+  els["pis-results"] = createElement("div");
   els["pis-source-chips"] = { innerHTML: "" };
   p.setState({ SOURCES: sources, currentPerformerName: "Jane", currentPerformerId: "1" });
   return p;
