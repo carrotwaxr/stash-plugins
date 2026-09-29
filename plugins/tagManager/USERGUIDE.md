@@ -349,7 +349,7 @@ There are two ways to edit it:
 
 ### Syntax
 
-Write one pattern per line, or separate patterns with `,` or `;`.
+Write one pattern per line, or separate patterns with `,` or `;`. A plain entry containing a comma or semicolon is split into separate entries. To match a tag name that itself contains one, use a regex such as `/^Rough, Painful$/`.
 
 #### Literal Strings (Case-Insensitive)
 ```
