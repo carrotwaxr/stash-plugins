@@ -590,6 +590,8 @@ def __mark_organized(scene_id, stash, settings):
 
     Stash runs the Scene.Update.Post hook inside update_scene, so the marker must exist
     before the call. With the hook off nothing would consume it, so none is written.
+    When update_scene returns (or fails) that hook run is over: a marker it didn't
+    consume is removed, so it can't skip the user's next Organized click.
     """
     data_dir = settings.get("data_dir")
     marked = settings.get("enable_hook", False) and mark(scene_id, data_dir)
@@ -597,9 +599,10 @@ def __mark_organized(scene_id, stash, settings):
         stash.update_scene({"id": scene_id, "organized": True})
         log.debug(f"Marked Scene {scene_id} as organized")
     except Exception as err:
+        log.warning(f"Failed to mark scene as organized: {err}")
+    finally:
         if marked:
             consume(scene_id, data_dir)
-        log.warning(f"Failed to mark scene as organized: {err}")
 
 
 def __move_file_graphql(stash, file_id, dest_folder, dest_basename):

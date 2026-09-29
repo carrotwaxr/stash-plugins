@@ -25,7 +25,7 @@ sys.modules["stashapi"] = MagicMock()
 sys.modules["stashapi.log"] = MagicMock()
 
 import scene as scene_module  # noqa: E402
-from utils.self_updates import consume, mark, plugin_data_dir, should_skip_hook  # noqa: E402
+from utils.self_updates import MARKER_TTL, consume, mark, plugin_data_dir, should_skip_hook  # noqa: E402
 
 
 class _TempDirs(unittest.TestCase):
@@ -56,6 +56,40 @@ class TestMarkerRoundtrip(_TempDirs):
             self.assertFalse(consume("5", self.data_dir))
         self.assertFalse(os.path.exists(path))
         self.assertFalse(consume("5", self.data_dir))
+
+    def test_ttl_is_30_seconds(self):
+        self.assertEqual(MARKER_TTL, 30)
+        mark(5, self.data_dir)
+        with patch("utils.self_updates.time.time", return_value=time.time() + 25):
+            self.assertTrue(consume(5, self.data_dir))
+        mark(5, self.data_dir)
+        with patch("utils.self_updates.time.time", return_value=time.time() + 31):
+            self.assertFalse(consume(5, self.data_dir))
+
+    def test_mark_purges_expired_markers(self):
+        folder = os.path.join(self.data_dir, "self_updates")
+        old = mark(5, self.data_dir)
+        leftovers = [os.path.join(folder, ".7.999.tmp"), os.path.join(folder, "8.999.claimed")]
+        for path in leftovers:
+            with open(path, "w") as f:
+                f.write("x")
+        fallback_folder = os.path.join(self.fallback_root, "mcMetadata", "self_updates")
+        os.makedirs(fallback_folder)
+        fallback_old = os.path.join(fallback_folder, "9")
+        with open(fallback_old, "w") as f:
+            f.write(repr(time.time()))
+        with patch("utils.self_updates.time.time", return_value=time.time() + 31):
+            new = mark(6, self.data_dir)
+        self.assertEqual(os.listdir(folder), ["6"])
+        self.assertTrue(os.path.exists(new))
+        self.assertFalse(os.path.exists(old))
+        self.assertFalse(os.path.exists(fallback_old))
+
+    def test_mark_keeps_fresh_markers(self):
+        mark(5, self.data_dir)
+        with patch("utils.self_updates.time.time", return_value=time.time() + 10):
+            mark(6, self.data_dir)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.data_dir, "self_updates"))), ["5", "6"])
 
     def test_string_and_int_ids_share_a_marker(self):
         mark("5", self.data_dir)
@@ -288,9 +322,34 @@ class TestRenameOrder(_TempDirs):
         with open(os.path.join(self.lib, "A Title.nfo")) as f:
             self.assertEqual(f.read(), "old nfo")
 
-    def test_marker_left_for_the_nested_hook(self):
-        self._run()
-        self.assertTrue(consume("5", self.data_dir))
+    def test_leftover_marker_deleted_after_update_returns(self):
+        # No nested run consumed the marker (here: none ran at all). Stash's sceneUpdate
+        # waits for its post hooks, so once update_scene returns the marker is dead weight.
+        _, stash = self._run()
+        self.assertEqual(self.calls[-1][0], "update_scene")
+        self.assertFalse(os.path.exists(os.path.join(self.data_dir, "self_updates", "5")))
+
+    def test_marker_there_for_the_nested_hook_then_gone(self):
+        stash = _FakeStash(self.calls)
+        stash.paths = {"f1": self.video}
+        nested = []
+        stash.update_scene = lambda update_input: nested.append(should_skip_hook(_hook(), self.data_dir))
+        self.rename(self._scene(), stash, self._settings())
+        self.assertEqual(nested, [True])
+        # the user's own Organized click afterwards is processed
+        self.assertFalse(should_skip_hook(_hook(), self.data_dir))
+
+    def test_user_click_after_the_plugins_update_is_processed(self):
+        # The nested run saw a wider update and left the marker; the user's click right
+        # after the plugin's update must not be taken for the plugin's own
+        stash = _FakeStash(self.calls)
+        stash.paths = {"f1": self.video}
+        nested = []
+        stash.update_scene = lambda update_input: nested.append(
+            should_skip_hook(_hook(fields=["id", "organized", "title"]), self.data_dir))
+        self.rename(self._scene(), stash, self._settings())
+        self.assertEqual(nested, [False])
+        self.assertFalse(should_skip_hook(_hook(), self.data_dir))
 
     def test_failed_update_consumes_the_marker(self):
         self._run(fail_update=True)
