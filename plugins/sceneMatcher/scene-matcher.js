@@ -13,10 +13,12 @@
   let stashdbUrl = "";
   let canSearchDeep = false;
   let phase1SearchAttrs = null;
-
-  // Cache for local stash_ids (persists across modal opens in the same session)
-  let cachedLocalStashIds = null;
-  let cacheEndpoint = null;
+  let currentEndpoint = null; // endpoint the open modal was searched against
+  let requestToken = 0; // bumped by every Match click; late responses from older searches are dropped
+  let currentBoxName = null; // display name of the stash-box the open modal searched
+  const boxLabel = () => currentBoxName || "StashDB"; // fallback only until a response names the box
+  let searchInfo = null; // notices from the search responses: warnings, partial, truncated, error
+  const REQUEST_TIMEOUT_MS = 120000;
 
   /**
    * Get the GraphQL endpoint URL
@@ -31,19 +33,32 @@
    * Make a GraphQL request using fetch
    */
   async function graphqlRequest(query, variables = {}) {
-    const response = await fetch(getGraphQLUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query, variables }),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let result;
+    try {
+      const response = await fetch(getGraphQLUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query, variables }),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      throw new Error(`GraphQL request failed: ${response.status}`);
+      if (!response.ok) {
+        throw new Error(`GraphQL request failed: ${response.status}`);
+      }
+
+      result = await response.json();
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        throw new Error(`The request timed out after ${REQUEST_TIMEOUT_MS / 1000} seconds`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-
-    const result = await response.json();
 
     if (result.errors && result.errors.length > 0) {
       throw new Error(result.errors[0].message);
@@ -82,8 +97,9 @@
       throw new Error("Invalid response from plugin");
     }
 
-    // Check for error
-    if (output.error) {
+    // Structured stash-box results (they carry `phase`) are returned as-is so the UI can show
+    // the error, its auth hint, warnings and partial results. Anything else with an error throws.
+    if (output.error && !("phase" in output)) {
       throw new Error(output.error);
     }
 
@@ -93,56 +109,27 @@
   /**
    * Find matching scenes - Phase 1 (fast text searches)
    */
-  async function findMatchesFast(sceneId) {
+  async function findMatchesFast(sceneId, endpoint) {
     const args = {
       operation: "find_matches_fast",
       scene_id: sceneId,
     };
-
-    // Pass cached stash_ids if we have them for this endpoint
-    if (cachedLocalStashIds && cacheEndpoint) {
-      args.cached_local_stash_ids = cachedLocalStashIds;
-      args.cache_endpoint = cacheEndpoint;
-    }
-
-    const result = await runPluginOperation(args);
-
-    // Cache the stash_ids from the response for future calls
-    // Note: Stash auto-unwraps the "output" field from PluginOutput structure
-    if (result.local_stash_ids && result.stashdb_url) {
-      cachedLocalStashIds = result.local_stash_ids;
-      cacheEndpoint = result.stashdb_url;
-      console.log(`[SceneMatcher] Cached ${cachedLocalStashIds.length} local stash_ids for ${cacheEndpoint}`);
-    }
-
-    return result;
+    if (endpoint) args.endpoint = endpoint;
+    // Stash unwraps the plugin's "output" field. The server caches the local IDs itself.
+    return runPluginOperation(args);
   }
 
   /**
    * Find matching scenes - Phase 2 (thorough performer/studio searches)
    */
-  async function findMatchesThorough(sceneId, excludeIds) {
+  async function findMatchesThorough(sceneId, excludeIds, endpoint) {
     const args = {
       operation: "find_matches_thorough",
       scene_id: sceneId,
       exclude_ids: excludeIds || [],
     };
-
-    // Pass cached stash_ids if we have them for this endpoint
-    if (cachedLocalStashIds && cacheEndpoint) {
-      args.cached_local_stash_ids = cachedLocalStashIds;
-      args.cache_endpoint = cacheEndpoint;
-    }
-
-    const result = await runPluginOperation(args);
-
-    // Cache the stash_ids from the response for future calls
-    if (result.local_stash_ids && result.stashdb_url) {
-      cachedLocalStashIds = result.local_stash_ids;
-      cacheEndpoint = result.stashdb_url;
-    }
-
-    return result;
+    if (endpoint) args.endpoint = endpoint;
+    return runPluginOperation(args);
   }
 
   /**
@@ -163,22 +150,54 @@
   /**
    * Format date for display
    */
+  const PARTIAL_DATE = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/;
+
+  /**
+   * Parse a stash-box date ("YYYY", "YYYY-MM" or "YYYY-MM-DD") into
+   * { year, month, day } (month/day null when absent), or null when missing,
+   * malformed or impossible. Built from the parts, never via Date(string).
+   * Year 0 ("0000", a placeholder) is no date, as in Python.
+   */
+  function parsePartialDate(value) {
+    if (typeof value !== "string") return null;
+    const m = PARTIAL_DATE.exec(value.trim().slice(0, 10));
+    if (!m) return null;
+    const year = Number(m[1]);
+    if (year < 1) return null;
+    const month = m[2] ? Number(m[2]) : null;
+    const day = m[3] ? Number(m[3]) : null;
+    if (month !== null && (month < 1 || month > 12)) return null;
+    if (day !== null && (day < 1 || day > new Date(year, month, 0).getDate())) return null;
+    return { year, month, day };
+  }
+
+  /**
+   * Format a stash-box date for display: "2024", "May 2024" or "May 3, 2024".
+   * A year-0 placeholder shows nothing; any other malformed date is shown as-is.
+   */
   function formatDate(dateStr) {
     if (!dateStr) return "";
-    try {
-      // Parse as local date components to avoid timezone shift
-      // new Date("2025-12-07") is interpreted as UTC midnight, which displays
-      // as the previous day for users west of UTC
-      const [year, month, day] = dateStr.split("-").map(Number);
-      const date = new Date(year, month - 1, day);
-      return date.toLocaleDateString(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      });
-    } catch {
-      return dateStr;
+    const p = parsePartialDate(dateStr);
+    if (!p) return /^\s*0000(?:-|\s*$)/.test(String(dateStr)) ? "" : String(dateStr);
+    if (p.month === null) return String(p.year);
+    const date = new Date(p.year, p.month - 1, p.day || 1);
+    if (p.day === null) {
+      return date.toLocaleDateString(undefined, { year: "numeric", month: "long" });
     }
+    return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+
+  /**
+   * Sort date for a result, as Python's _sort_date: [end-of-period day number, precision].
+   * A partial date counts as the last day of its period; missing or malformed is [0, 0].
+   */
+  function sortDate(value) {
+    const p = parsePartialDate(value);
+    if (!p) return [0, 0];
+    const month = p.month === null ? 12 : p.month;
+    const day = p.day === null ? new Date(p.year, month, 0).getDate() : p.day;
+    const precision = 1 + (p.month !== null) + (p.day !== null);
+    return [Date.UTC(p.year, month - 1, day) / 86400000, precision];
   }
 
   /**
@@ -351,6 +370,10 @@
       parts.push("Studio");
     }
 
+    if (scene.matches_date) {
+      parts.push("Date");
+    }
+
     if (scene.matching_performers > 0) {
       const count = scene.matching_performers;
       parts.push(count === 1 ? "1 Performer" : `${count} Performers`);
@@ -374,7 +397,7 @@
     const performers = attrs.performers || [];
     const studio = attrs.studio;
 
-    let searchDesc = "Search StashDB for all scenes";
+    let searchDesc = `Search ${escapeHtml(boxLabel())} for all scenes`;
     if (performers.length > 0 && studio) {
       searchDesc += ` from <strong>${escapeHtml(studio)}</strong> featuring <strong>${escapeHtml(performers.slice(0, 2).join(", "))}${performers.length > 2 ? "..." : ""}</strong>`;
     } else if (studio) {
@@ -403,6 +426,58 @@
   }
 
   /**
+   * Notices above the results: warnings, partial failure, truncation, and a phase error.
+   * Every server-provided string is escaped.
+   */
+  function renderNotices(container) {
+    if (!searchInfo) return;
+    const lines = [];
+    for (const w of searchInfo.warnings) lines.push(escapeHtml(String(w)));
+    if (searchInfo.partial) lines.push("Some pages failed to load, so these results may be incomplete.");
+    if (searchInfo.truncated) {
+      const shown = escapeHtml(String(searchInfo.shown));
+      if (searchInfo.pageCapped && searchInfo.searched != null) {
+        // Only the newest scenes were fetched (queries sort by date), so say what was ranked
+        const has = Number(searchInfo.total) > Number(searchInfo.searched)
+          ? `the stash-box has ${escapeHtml(String(searchInfo.total))}` : "the stash-box has more";
+        lines.push(`Showing the top ${shown} of the newest ${escapeHtml(String(searchInfo.searched))} scenes searched (${has}).`);
+      } else {
+        lines.push(`Showing the top ${shown} of ${escapeHtml(String(searchInfo.total))} candidates.`);
+      }
+    }
+    // An auth error's message already names the box and points to its API key setting
+    if (searchInfo.error) lines.push(escapeHtml(String(searchInfo.error)));
+    if (!lines.length) return;
+    const notice = document.createElement("div");
+    notice.className = "sm-notice" + (searchInfo.error ? " sm-error" : "");
+    notice.style.cssText = "margin: 0 0 12px; padding: 8px 12px; border-radius: 4px; background: rgba(255,193,7,0.12); border: 1px solid rgba(255,193,7,0.4); font-size: 13px;";
+    notice.innerHTML = lines.map((l) => `<div>${l}</div>`).join("");
+    container.appendChild(notice);
+  }
+
+  /**
+   * Fold a search response's notices into searchInfo.
+   */
+  function absorbNotices(result) {
+    if (!searchInfo) {
+      searchInfo = {
+        warnings: [], partial: false, truncated: false, shown: 0, total: 0, searched: null, pageCapped: false,
+        error: null,
+      };
+    }
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    for (const w of warnings) if (!searchInfo.warnings.includes(w)) searchInfo.warnings.push(w);
+    if (result.partial) searchInfo.partial = true;
+    if (result.truncated) {
+      searchInfo.truncated = true;
+      searchInfo.shown = (result.results || []).length;
+      searchInfo.total = result.total_candidates != null ? result.total_candidates : searchInfo.shown;
+      searchInfo.searched = result.searched_candidates != null ? result.searched_candidates : null;
+      searchInfo.pageCapped = !!result.page_capped;
+    }
+  }
+
+  /**
    * Render the results grid
    */
   function renderResults() {
@@ -410,6 +485,8 @@
     if (!container) return;
 
     container.innerHTML = "";
+
+    renderNotices(container);
 
     // Show deep search button if available and not already loading
     if (canSearchDeep && !isLoadingDeep) {
@@ -432,9 +509,9 @@
       const placeholder = document.createElement("div");
       placeholder.className = "sm-placeholder";
       placeholder.innerHTML = `
-        <div>No matching scenes found on StashDB.</div>
+        <div>No matching scenes found on ${escapeHtml(boxLabel())}.</div>
         <div style="font-size: 14px; color: #666; margin-top: 8px;">
-          Try linking more performers or the studio to StashDB first.
+          Try linking more performers or the studio to ${escapeHtml(boxLabel())} first.
         </div>
       `;
       container.appendChild(placeholder);
@@ -533,8 +610,9 @@
     if (scene.studio?.name) {
       metaParts.push(scene.studio.name);
     }
-    if (scene.release_date) {
-      metaParts.push(formatDate(scene.release_date));
+    const shownDate = formatDate(scene.release_date);
+    if (shownDate) {
+      metaParts.push(shownDate);
     }
     if (scene.duration) {
       metaParts.push(formatDuration(scene.duration));
@@ -566,7 +644,7 @@
     selectBtn.textContent = "Select This Match";
     selectBtn.onclick = (e) => {
       e.stopPropagation();
-      handleSelectMatch(scene);
+      handleSelectMatch(currentSceneId, scene.stash_id);
     };
     actions.appendChild(selectBtn);
 
@@ -574,80 +652,67 @@
     card.appendChild(info);
     card.appendChild(actions);
 
-    // Click card to view on StashDB (not select)
+    // Click card to view on the stash-box (not select)
     card.onclick = () => {
-      window.open(`${stashdbUrl}/scenes/${scene.stash_id}`, "_blank");
+      window.open(`${stashdbUrl}/scenes/${scene.stash_id}`, "_blank", "noopener,noreferrer");
     };
 
     return card;
   }
 
   /**
-   * Handle selecting a match - inject into Tagger search and trigger
+   * Show a short-lived message over the page (the modal is already closed by then).
    */
-  function handleSelectMatch(scene) {
+  function showToast(message) {
+    const el = document.createElement("div");
+    el.className = "sm-toast";
+    el.setAttribute("role", "alert");
+    el.style.cssText = "position:fixed;bottom:24px;right:24px;z-index:10001;background:#7a1f1f;color:#fff;padding:12px 16px;border-radius:6px;max-width:360px;";
+    el.textContent = message;
+    document.body.appendChild(el);
+    setTimeout(() => { if (el.remove) el.remove(); }, 6000);
+    return el;
+  }
+
+  /**
+   * Hand the chosen match to the Tagger: put its UUID in the row's search box and run the search.
+   * The row is looked up again by scene link, since React may have replaced it since the click.
+   */
+  function handleSelectMatch(sceneId, stashId) {
     removeModal();
 
-    if (!currentSceneElement) {
-      console.error("[SceneMatcher] No scene element reference");
+    // Matched on the row's own scene id, exactly: a substring selector for "/scenes/12"
+    // would also hit "/scenes/123" or a stash-box link ".../scenes/12ab..." in an earlier row.
+    const row = Array.from(document.querySelectorAll(".search-item"))
+      .find((r) => getSceneIdFromElement(r) === String(sceneId));
+    if (!row) {
+      console.error("[SceneMatcher] Could not find the Tagger row for scene", sceneId);
+      showToast("Could not find this scene in the Tagger. Copy the ID and paste it into the search box: " + stashId);
       return;
     }
-
-    // Find the search input in the scene's row
-    const searchInput = currentSceneElement.querySelector('input.text-input, input[type="text"]');
-
+    const searchInput = row.querySelector("input.text-input");
     if (!searchInput) {
       console.error("[SceneMatcher] Could not find search input");
-      alert("Could not find the search input field. Please try again.");
+      showToast("Could not find the Tagger's search box for this scene. Search for this ID instead: " + stashId);
       return;
     }
 
-    // Set the value using React-compatible method
-    // React tracks input values via the native value setter, so we need to
-    // use Object.getOwnPropertyDescriptor to get the native setter
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype,
-      "value"
-    ).set;
+    // React tracks controlled inputs through the native value setter.
+    const proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+    const desc = proto && Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && desc.set) desc.set.call(searchInput, stashId);
+    else searchInput.value = stashId;
+    searchInput.dispatchEvent(new Event("input", { bubbles: true }));
 
-    // Call the native setter with the input element as context
-    nativeInputValueSetter.call(searchInput, scene.stash_id);
-
-    // Dispatch input event - this is what React listens to for controlled inputs
-    const inputEvent = new Event("input", { bubbles: true });
-    searchInput.dispatchEvent(inputEvent);
-
-    console.log("[SceneMatcher] Set search value to:", scene.stash_id);
-
-    // Find and click the Search button
-    // Look for button with "Search" text or the OperationButton
-    const buttons = currentSceneElement.querySelectorAll("button");
-    let foundSearchBtn = false;
-
-    for (const btn of buttons) {
-      const text = btn.textContent.trim().toLowerCase();
-      if (text === "search" || text.includes("search")) {
-        // Don't click our own button or the fragment button
-        if (!btn.classList.contains("sm-match-button") && !text.includes("fragment")) {
-          btn.click();
-          foundSearchBtn = true;
-          console.log("[SceneMatcher] Triggered search with UUID:", scene.stash_id);
-          break;
-        }
-      }
-    }
-
-    if (!foundSearchBtn) {
-      // Try pressing Enter on the input
-      const enterEvent = new KeyboardEvent("keydown", {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-      });
-      searchInput.dispatchEvent(enterEvent);
-      console.log("[SceneMatcher] Triggered search via Enter key");
+    // Click the row's own Search button; if it is unavailable, press Enter (Stash listens for keypress).
+    const searchBtn = Array.from(row.querySelectorAll(".input-group-append button"))
+      .find((b) => !b.classList.contains("sm-match-button"));
+    if (searchBtn && !searchBtn.disabled) {
+      searchBtn.click();
+    } else {
+      searchInput.dispatchEvent(new KeyboardEvent("keypress", {
+        key: "Enter", code: "Enter", keyCode: 13, charCode: 13, which: 13, bubbles: true,
+      }));
     }
   }
 
@@ -674,24 +739,30 @@
       container.innerHTML = `
         <div class="sm-placeholder">
           <div class="sm-spinner"></div>
-          <div>Searching StashDB for matching scenes...</div>
+          <div>Searching ${escapeHtml(boxLabel())} for matching scenes...</div>
         </div>
       `;
     }
   }
 
   /**
-   * Show error state
+   * Show error state. An auth error's message comes from the server with the API-key hint.
    */
-  function showError(message) {
+  function showError(message, { onRetry = null } = {}) {
     const container = document.getElementById("sm-results");
-    if (container) {
-      container.innerHTML = `
-        <div class="sm-placeholder sm-error">
-          <div class="sm-error-icon">!</div>
-          <div>${escapeHtml(message)}</div>
-        </div>
-      `;
+    if (!container) return;
+    container.innerHTML = `
+      <div class="sm-placeholder sm-error">
+        <div class="sm-error-icon">!</div>
+        <div>${escapeHtml(message)}</div>
+      </div>
+    `;
+    if (onRetry) {
+      const btn = document.createElement("button");
+      btn.className = "sm-btn sm-btn-retry";
+      btn.textContent = "Retry";
+      btn.onclick = onRetry;
+      container.appendChild(btn);
     }
   }
 
@@ -715,27 +786,20 @@
     // Convert back to array and sort
     const merged = Array.from(resultMap.values());
 
-    // Sort: not in local stash first, then by score desc, then by duration_score desc, then by date
-    merged.sort((a, b) => {
-      // In stash last
-      if (a.in_local_stash !== b.in_local_stash) {
-        return a.in_local_stash ? 1 : -1;
+    // Same key as Python's result_sort_key: not in local stash first, then score,
+    // duration score and end-of-period date (more precise first), all descending.
+    const key = (r) => {
+      const [ordinal, precision] = sortDate(r.release_date);
+      return [r.in_local_stash ? 1 : 0, -r.score, -(r.duration_score ?? 0.5), -ordinal, -precision];
+    };
+    const keyed = merged.map((r) => [key(r), r]);
+    keyed.sort((a, b) => {
+      for (let i = 0; i < a[0].length; i++) {
+        if (a[0][i] !== b[0][i]) return a[0][i] < b[0][i] ? -1 : 1;
       }
-      // Higher score first
-      if (a.score !== b.score) {
-        return b.score - a.score;
-      }
-      // Higher duration score first
-      const aDur = a.duration_score || 0.5;
-      const bDur = b.duration_score || 0.5;
-      if (aDur !== bDur) {
-        return bDur - aDur;
-      }
-      // Newer date first
-      const aDate = a.release_date || "";
-      const bDate = b.release_date || "";
-      return bDate.localeCompare(aDate);
+      return 0;
     });
+    merged.splice(0, merged.length, ...keyed.map((k) => k[1]));
 
     return merged;
   }
@@ -746,6 +810,7 @@
   async function handleDeepSearchClick() {
     if (isLoadingDeep || !currentSceneId) return;
 
+    const token = requestToken;
     isLoadingDeep = true;
     canSearchDeep = false; // Hide the button
     renderResults();
@@ -753,14 +818,24 @@
 
     try {
       const excludeIds = matchResults.map((r) => r.stash_id);
-      const phase2Result = await findMatchesThorough(currentSceneId, excludeIds);
+      const phase2Result = await findMatchesThorough(currentSceneId, excludeIds, currentEndpoint);
+      if (token !== requestToken) return; // a newer search owns the modal
 
+      absorbNotices(phase2Result);
       const phase2Results = phase2Result.results || [];
 
       if (phase2Results.length > 0) {
         // Merge and re-render
         matchResults = mergeResults(matchResults, phase2Results);
         console.log(`[SceneMatcher] Deep search added ${phase2Results.length} results, total: ${matchResults.length}`);
+      }
+
+      if (phase2Result.error) {
+        searchInfo.error = phase2Result.error;
+        canSearchDeep = true; // the button doubles as retry
+        setStatus("Deep search failed: " + phase2Result.error, "error");
+        updateResultCount(matchResults.length, false);
+        return;
       }
 
       // Update final status
@@ -771,39 +846,65 @@
         setStatus("No matches found", "");
       }
     } catch (error) {
+      if (token !== requestToken) return;
       console.warn("[SceneMatcher] Deep search failed:", error);
       setStatus("Deep search failed: " + (error.message || "Unknown error"), "error");
       // Re-enable the button so user can retry
       canSearchDeep = true;
     } finally {
-      isLoadingDeep = false;
-      renderResults();
+      if (token === requestToken) {
+        isLoadingDeep = false;
+        renderResults();
+      }
     }
   }
 
   /**
-   * Handle the match button click - Phase 1 only, Phase 2 is user-initiated
+   * Handle the match button click - Phase 1 only, Phase 2 is user-initiated.
+   * Each click takes a new request token; responses from older clicks are ignored.
    */
-  async function handleMatchClick(sceneId, sceneElement) {
-    if (isLoading) return;
+  async function handleMatchClick(sceneId, sceneElement, endpoint, boxName = null) {
+    const token = ++requestToken;
+    if (endpoint === undefined) endpoint = await effectiveEndpoint();
+    if (token !== requestToken) return;
+    currentEndpoint = endpoint || null;
+    currentBoxName = boxName || null;
 
     currentSceneId = sceneId;
     currentSceneElement = sceneElement;
     matchResults = [];
     canSearchDeep = false;
     phase1SearchAttrs = null;
+    isLoadingDeep = false;
+    searchInfo = null;
 
     isLoading = true;
     createModal();
     showLoading();
     setStatus("Searching...", "loading");
+    const retry = () => handleMatchClick(sceneId, sceneElement, endpoint, boxName);
 
     try {
       // Phase 1: Fast text searches
       console.log("[SceneMatcher] Starting Phase 1 (fast text search)...");
-      const phase1Result = await findMatchesFast(sceneId);
+      const phase1Result = await findMatchesFast(sceneId, currentEndpoint);
+      if (token !== requestToken) return;
+
+      if (phase1Result.error) {
+        const partialResults = phase1Result.results || [];
+        if (partialResults.length === 0) {
+          showError(phase1Result.error, { onRetry: retry });
+          setStatus(phase1Result.error, "error");
+          return;
+        }
+        absorbNotices(phase1Result);
+        searchInfo.error = phase1Result.error;
+      } else {
+        absorbNotices(phase1Result);
+      }
 
       matchResults = phase1Result.results || [];
+      if (phase1Result.endpoint_name) currentBoxName = phase1Result.endpoint_name;
       stashdbUrl = phase1Result.stashdb_url || "https://stashdb.org";
       phase1SearchAttrs = phase1Result.search_attributes;
 
@@ -830,117 +931,260 @@
         setStatus("No matches found", "");
       }
     } catch (error) {
+      if (token !== requestToken) return;
       console.error("[SceneMatcher] Search failed:", error);
-      showError(error.message || "Failed to search for matching scenes");
+      showError(error.message || "Failed to search for matching scenes", { onRetry: retry });
       setStatus(error.message || "Search failed", "error");
     } finally {
-      isLoading = false;
+      if (token === requestToken) isLoading = false;
     }
   }
 
+  // A local scene page: ".../scenes/<numeric id>", optionally followed by "/", "?" or "#".
+  const LOCAL_SCENE_PATH = /\/scenes\/(\d+)(?:[/?#]|$)/;
+
   /**
-   * Extract scene ID from a tagger scene element
+   * The scene id of a Tagger row, from the row's own link to the local scene page.
+   * Stash-box links in the same row (stash-id pills, search results) point to another
+   * origin, like "https://stashdb.org/scenes/<uuid>", and are skipped.
    */
   function getSceneIdFromElement(element) {
-    // Look for scene link in the element
-    const sceneLink = element.querySelector('a[href*="/scenes/"]');
-    if (sceneLink) {
-      const match = sceneLink.href.match(/\/scenes\/(\d+)/);
-      if (match) {
-        return match[1];
+    const links = element.querySelectorAll ? Array.from(element.querySelectorAll('a[href*="/scenes/"]')) : [];
+    for (const link of links) {
+      const raw = link.getAttribute("href") || link.href || "";
+      let url;
+      try {
+        url = new URL(raw, window.location.href);
+      } catch (e) {
+        continue;
       }
+      if (url.origin !== window.location.origin) continue;
+      const match = LOCAL_SCENE_PATH.exec(url.pathname + url.search + url.hash);
+      if (match) return match[1];
     }
-
-    // Also check for data attributes
-    if (element.dataset.sceneId) {
-      return element.dataset.sceneId;
-    }
-
     return null;
   }
 
+  const normalizeEndpoint = (url) => (url || "").trim().replace(/\/+$/, "").toLowerCase();
+
+  // Stash configuration (stash-boxes, saved Tagger choice, plugin setting): fetched once.
+  let configPromise = null;
+  function getConfig() {
+    if (!configPromise) {
+      const query = `query SceneMatcherConfig {
+        configuration { general { stashBoxes { endpoint name } } ui plugins }
+      }`;
+      configPromise = graphqlRequest(query)
+        .then((data) => {
+          const cfg = (data && data.configuration) || {};
+          const ui = cfg.ui || {};
+          const plugins = cfg.plugins || {};
+          return {
+            boxes: (cfg.general && cfg.general.stashBoxes) || [],
+            uiEndpoint: (ui.taggerConfig && ui.taggerConfig.selectedEndpoint) || null,
+            settingEndpoint: (plugins[PLUGIN_ID] && plugins[PLUGIN_ID].stashBoxEndpoint) || null,
+          };
+        })
+        .catch((e) => {
+          console.warn("[SceneMatcher] Could not load Stash configuration:", e);
+          configPromise = null; // retry next time
+          return { boxes: [], uiEndpoint: null, settingEndpoint: null };
+        });
+    }
+    return configPromise;
+  }
+
+  function getScraperSelect() {
+    return document.querySelector("select#scraper");
+  }
+
   /**
-   * Check if a scene already has a StashDB ID
+   * The stash-box endpoint the Tagger targets right now, or null if none is known
+   * (the backend then uses the first box). React sets the select's value without firing
+   * `change`, so it is read fresh on every call. Returns { scraper: true } semantics via
+   * isScraperSource() for non-stash-box sources.
    */
-  function sceneHasStashId(element) {
-    // Look for StashID pill/badge in the element
-    const stashIdPill = element.querySelector('[class*="StashIDPill"], [class*="stash-id"]');
-    if (stashIdPill) {
-      return true;
-    }
+  function isScraperSource() {
+    const select = getScraperSelect();
+    return !!(select && String(select.value || "").startsWith("scraper:"));
+  }
 
-    // Also check for sub-content with stash_id links
-    const subContent = element.querySelector(".sub-content");
-    if (subContent && subContent.querySelector("a[href*='stashdb.org/scenes']")) {
-      return true;
+  async function effectiveEndpoint() {
+    const select = getScraperSelect();
+    if (select) {
+      const value = String(select.value || "");
+      if (value.startsWith("stashbox:")) return value.slice("stashbox:".length) || null;
+      if (value.startsWith("scraper:")) return null;
     }
+    const cfg = await getConfig();
+    return cfg.uiEndpoint || cfg.settingEndpoint || null;
+  }
 
-    return false;
+  async function resolveEndpoint(endpoint) {
+    if (endpoint) return endpoint;
+    const cfg = await getConfig();
+    return cfg.boxes.length ? cfg.boxes[0].endpoint : null;
+  }
+
+  /** The box's name in Stash, else its endpoint's host (a box can be saved unnamed). */
+  async function boxNameFor(endpoint) {
+    const cfg = await getConfig();
+    const norm = normalizeEndpoint(endpoint);
+    const box = cfg.boxes.find((b) => normalizeEndpoint(b.endpoint) === norm);
+    if (!box) return null;
+    const name = String(box.name || "").trim();
+    if (name) return name;
+    try {
+      return new URL(box.endpoint).hostname || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Gate cache: `${normalized endpoint}|${scene id}` -> { sig, unlinked }
+  const gateCache = new Map();
+
+  /**
+   * Of the given scene ids, return those with no stash_id for `endpoint` (null = first
+   * configured box). One batched findScenes query for ids not already cached; a cached
+   * result is reused while the row's pill signature (sigs[id]) is unchanged.
+   */
+  async function gateScenes(ids, endpoint, sigs = {}) {
+    const resolved = await resolveEndpoint(endpoint);
+    const norm = normalizeEndpoint(resolved);
+    const key = (id) => `${norm}|${id}`;
+    const sigOf = (id) => sigs[id] || "";
+
+    const missing = ids.filter((id) => {
+      const hit = gateCache.get(key(id));
+      return !hit || hit.sig !== sigOf(id);
+    });
+
+    if (missing.length) {
+      const query = `query SceneMatcherGate($ids: [ID!]) {
+        findScenes(ids: $ids, filter: {per_page: -1}) { scenes { id stash_ids { endpoint } } }
+      }`;
+      const data = await graphqlRequest(query, { ids: missing });
+      const scenes = (data && data.findScenes && data.findScenes.scenes) || [];
+      const byId = new Map(scenes.map((sc) => [String(sc.id), sc]));
+      for (const id of missing) {
+        const sc = byId.get(String(id));
+        const linked = !!sc && (sc.stash_ids || []).some((x) => normalizeEndpoint(x.endpoint) === norm);
+        gateCache.set(key(id), { sig: sigOf(id), unlinked: !linked });
+      }
+    }
+    return ids.filter((id) => gateCache.get(key(id)).unlinked);
   }
 
   /**
    * Create the match button
    */
-  function createMatchButton(sceneId, sceneElement) {
+  function createMatchButton(sceneId, sceneElement, endpoint, boxName) {
+    const label = boxName ? `Match on ${boxName}` : "Match";
     const btn = document.createElement("button");
     btn.className = "sm-match-button btn btn-secondary";
     btn.type = "button";
-    btn.title = "Find matches by performer/studio on StashDB";
+    btn.dataset.endpoint = normalizeEndpoint(endpoint);
+    btn.title = `Find matches by performer/studio${boxName ? ` on ${boxName}` : ""}`;
     btn.innerHTML = `
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 1em; height: 1em; margin-right: 0.5em;">
         <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
       </svg>
-      Match
+      ${label.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)}
     `;
     btn.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      handleMatchClick(sceneId, sceneElement);
+      // Re-read the selection at click time; fall back to what the button was built for.
+      effectiveEndpoint().then((ep) => handleMatchClick(sceneId, sceneElement, ep || endpoint || null, boxName));
     };
     return btn;
   }
 
+  /** Signature of the row's own stash-id pills (which endpoints it is linked to). */
+  function rowSignature(row) {
+    return Array.from(row.querySelectorAll(".stash-id-pill"))
+      .map((p) => p.getAttribute("data-endpoint") || "")
+      .join("|");
+  }
+
+  let syncRunning = false;
+  let syncAgain = false;
+
   /**
-   * Add match buttons to scene tagger items
+   * Make the Match buttons reflect the Tagger's selected endpoint: a button on each row whose
+   * scene is not linked to it, none on linked rows, none at all for a scraper source.
+   * Idempotent and safe to call often; overlapping calls coalesce into one re-run.
    */
-  function addMatchButtons() {
-    // Find all scene items in the tagger
-    const sceneItems = document.querySelectorAll(".search-item, .tagger-scene");
-
-    for (const item of sceneItems) {
-      // Skip if button already added
-      if (item.querySelector(".sm-match-button")) {
-        continue;
-      }
-
-      // Skip if scene already has a StashDB ID
-      if (sceneHasStashId(item)) {
-        continue;
-      }
-
-      // Get scene ID
-      const sceneId = getSceneIdFromElement(item);
-      if (!sceneId) {
-        continue;
-      }
-
-      // Find the query form / input group area
-      const inputGroup = item.querySelector(".input-group, .input-group-append");
-      if (!inputGroup) {
-        continue;
-      }
-
-      // Add our button after the existing buttons
-      const appendContainer = inputGroup.querySelector(".input-group-append");
-      if (appendContainer) {
-        const btn = createMatchButton(sceneId, item);
-        appendContainer.appendChild(btn);
-      } else {
-        // Create append container if it doesn't exist
-        const btn = createMatchButton(sceneId, item);
-        inputGroup.appendChild(btn);
-      }
+  async function syncMatchButtons() {
+    if (syncRunning) { syncAgain = true; return; }
+    syncRunning = true;
+    try {
+      do {
+        syncAgain = false;
+        await syncOnce();
+      } while (syncAgain);
+    } catch (e) {
+      console.warn("[SceneMatcher] Could not update Match buttons:", e);
+    } finally {
+      syncRunning = false;
     }
+  }
+
+  async function syncOnce() {
+    const select = getScraperSelect();
+    if (select && !select.__smBound) {
+      select.__smBound = true;
+      select.addEventListener("change", () => { syncMatchButtons(); });
+    }
+
+    const rows = Array.from(document.querySelectorAll(".search-item"));
+    if (isScraperSource()) {
+      for (const row of rows) {
+        const btn = row.querySelector(".sm-match-button");
+        if (btn) btn.remove();
+      }
+      return;
+    }
+
+    const endpoint = await effectiveEndpoint();
+    const resolved = await resolveEndpoint(endpoint);
+    const boxName = resolved ? await boxNameFor(resolved) : null;
+
+    const entries = [];
+    for (const row of rows) {
+      const id = getSceneIdFromElement(row);
+      if (id) entries.push({ row, id, sig: rowSignature(row) });
+    }
+    const sigs = {};
+    entries.forEach((e) => { sigs[e.id] = e.sig; });
+    const ids = [...new Set(entries.map((e) => e.id))];
+    const unlinked = new Set(ids.length ? await gateScenes(ids, resolved, sigs) : []);
+
+    // The selection may have changed while we waited; a re-run is already queued if so.
+    if (isScraperSource()) { syncAgain = true; return; }
+
+    for (const { row, id } of entries) {
+      const existing = row.querySelector(".sm-match-button");
+      if (!unlinked.has(id)) {
+        if (existing) existing.remove();
+        continue;
+      }
+      if (existing) {
+        if (existing.dataset.endpoint === normalizeEndpoint(resolved)) continue;
+        existing.remove();
+      }
+      const inputGroup = row.querySelector(".input-group, .input-group-append");
+      if (!inputGroup) continue;
+      const btn = createMatchButton(id, row, endpoint || resolved, boxName);
+      const appendContainer = inputGroup.querySelector(".input-group-append");
+      (appendContainer || inputGroup).appendChild(btn);
+    }
+  }
+
+  // Kept for callers that predate syncMatchButtons.
+  function addMatchButtons() {
+    return syncMatchButtons();
   }
 
   /**
@@ -950,53 +1194,38 @@
     const path = window.location.pathname;
     const search = window.location.search;
 
-    // Must be on scenes page
-    if (!path.includes("/scenes")) {
+    // Must be on the scenes route
+    if (!/\/scenes(\/|$)/.test(path)) {
       return false;
     }
 
-    // Check URL for tagger display mode (disp=3)
-    if (search.includes("disp=3")) {
+    // Tagger display mode, or the Tagger's own elements once rendered
+    if (search.includes("disp=3") || search.includes("c=tagger")) {
       return true;
     }
-
-    // Legacy check: c=tagger (older Stash versions)
-    if (search.includes("c=tagger")) {
-      return true;
-    }
-
-    // Single scene tagger: /scenes/123 with tagger container
-    if (path.match(/\/scenes\/\d+/) && document.querySelector(".tagger-container")) {
-      return true;
-    }
-
-    // Fallback: check for tagger container in DOM
-    if (document.querySelector(".tagger-container")) {
-      return true;
-    }
-
-    return false;
+    return !!(document.querySelector("select#scraper") || document.querySelector(".search-item"));
   }
 
   /**
-   * Wait for Tagger elements to appear, then add buttons.
-   * Uses polling to handle React rendering timing.
+   * Wait for Tagger elements to appear, then sync buttons.
+   * Uses polling to handle React rendering timing; a newer call cancels an older poll.
    */
+  let pollToken = 0;
   function waitForTaggerElements(maxAttempts = 20, interval = 250) {
+    const mine = ++pollToken;
     let attempts = 0;
 
     function check() {
+      if (mine !== pollToken || !isTaggerPage()) return;
       attempts++;
-      const sceneItems = document.querySelectorAll(".search-item, .tagger-scene");
+      const sceneItems = document.querySelectorAll(".search-item");
 
       if (sceneItems.length > 0) {
-        // Found scene items, add buttons
-        addMatchButtons();
+        syncMatchButtons();
         return;
       }
 
       if (attempts < maxAttempts) {
-        // Keep polling
         setTimeout(check, interval);
       }
     }
@@ -1005,44 +1234,33 @@
   }
 
   /**
-   * Wait for page to be ready and add buttons
+   * Called on navigation and at startup: on a Tagger page, wait for its rows and sync.
    */
   function waitForPage() {
-    // Only run on tagger pages
     if (!isTaggerPage()) {
       return;
     }
-
-    // Poll for Tagger elements (handles React rendering delay)
     waitForTaggerElements();
-
-    // Also observe for dynamic content loading (new scenes added, etc.)
-    const observer = new MutationObserver(() => {
-      if (isTaggerPage()) {
-        // Small delay to let React finish rendering
-        setTimeout(addMatchButtons, 100);
-      }
-    });
-
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
-
-    // Also listen to popstate for SPA navigation
-    window.addEventListener("popstate", () => {
-      setTimeout(() => {
-        if (isTaggerPage()) {
-          waitForTaggerElements();
-        }
-      }, 100);
-    });
   }
 
+  // Debounced sync for DOM mutations (React re-renders in bursts).
+  let syncTimer = null;
+  function scheduleSync() {
+    if (syncTimer !== null) clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      syncTimer = null;
+      if (isTaggerPage()) syncMatchButtons();
+    }, 150);
+  }
+
+  let initialized = false;
+
   /**
-   * Initialize the plugin
+   * Initialize the plugin: one MutationObserver for the page lifetime, no popstate listener.
    */
   function init() {
+    if (initialized) return;
+    initialized = true;
     console.log("[SceneMatcher] Initializing...");
 
     // Wait for DOM to be ready
@@ -1052,18 +1270,56 @@
       waitForPage();
     }
 
-    // Also listen for URL changes (SPA navigation)
+    // SPA navigation: Stash's own location event when available, else the observer below.
+    const hasLocationEvent =
+      typeof PluginApi !== "undefined" && PluginApi && PluginApi.Event &&
+      typeof PluginApi.Event.addEventListener === "function";
+    if (hasLocationEvent) {
+      PluginApi.Event.addEventListener("stash:location", () => {
+        setTimeout(waitForPage, 100);
+      });
+    }
+
     let lastUrl = window.location.href;
-    const urlObserver = new MutationObserver(() => {
-      if (window.location.href !== lastUrl) {
+    const observer = new MutationObserver(() => {
+      if (!hasLocationEvent && window.location.href !== lastUrl) {
         lastUrl = window.location.href;
         setTimeout(waitForPage, 200);
       }
+      // Off the Tagger, mutations are ignored: no timers, no queries.
+      if (isTaggerPage()) scheduleSync();
     });
-
-    urlObserver.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
   // Start the plugin
   init();
+
+  // Test hook: only active when a test harness sets window.__SCENE_MATCHER_TEST__ first.
+  if (window.__SCENE_MATCHER_TEST__) {
+    window.__SCENE_MATCHER_TEST__.exports = {
+      graphqlRequest, runPluginOperation, findMatchesFast, findMatchesThorough,
+      formatDuration, formatDate, escapeHtml, renderResults, createSceneCard,
+      handleSelectMatch, mergeResults, handleDeepSearchClick, handleMatchClick,
+      getSceneIdFromElement, createMatchButton, addMatchButtons, syncMatchButtons,
+      effectiveEndpoint, gateScenes,
+      isTaggerPage, waitForPage, waitForTaggerElements, init,
+      createModal, removeModal, updateStats, setStatus, showLoading, showError,
+    };
+    window.__SCENE_MATCHER_TEST__.getState = () => ({
+      modalRoot, currentSceneId, currentSceneElement, matchResults, isLoading, isLoadingDeep,
+      stashdbUrl, canSearchDeep, phase1SearchAttrs,
+    });
+    window.__SCENE_MATCHER_TEST__.setState = (patch) => {
+      if ("modalRoot" in patch) modalRoot = patch.modalRoot;
+      if ("currentSceneId" in patch) currentSceneId = patch.currentSceneId;
+      if ("currentSceneElement" in patch) currentSceneElement = patch.currentSceneElement;
+      if ("matchResults" in patch) matchResults = patch.matchResults;
+      if ("isLoading" in patch) isLoading = patch.isLoading;
+      if ("isLoadingDeep" in patch) isLoadingDeep = patch.isLoadingDeep;
+      if ("stashdbUrl" in patch) stashdbUrl = patch.stashdbUrl;
+      if ("canSearchDeep" in patch) canSearchDeep = patch.canSearchDeep;
+      if ("phase1SearchAttrs" in patch) phase1SearchAttrs = patch.phase1SearchAttrs;
+    };
+  }
 })();

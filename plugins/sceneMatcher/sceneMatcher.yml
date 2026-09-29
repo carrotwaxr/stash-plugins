@@ -1,6 +1,6 @@
 name: Scene Matcher
-description: Find StashDB matches for untagged scenes using known performer and studio associations. Adds a "Match" button to the Tagger UI that searches by linked attributes.
-version: 1.1.1
+description: Find matches for untagged scenes on the stash-box selected in the Tagger. Adds a "Match" button that searches by title, then by linked performers and studio.
+version: 1.2.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on Tagger pages
@@ -14,17 +14,53 @@ ui:
 settings:
   stashBoxEndpoint:
     displayName: Stash-Box Endpoint
-    description: Which stash-box to query for scene matches. Leave empty to use the first configured endpoint (usually StashDB). Enter the full GraphQL URL (e.g., https://stashdb.org/graphql).
+    description: Fallback stash-box, used only when the Tagger has no stash-box source selected. Enter the full GraphQL URL (e.g., https://stashdb.org/graphql). Leave empty to use the first configured stash-box (usually StashDB).
     type: STRING
+  maxResults:
+    displayName: Max Results
+    description: Most results the deep search returns and scores. Default is 50. Values are limited to 10-500.
+    type: NUMBER
 
-  # StashDB API settings (advanced - for rate limiting and error handling)
+  # Stash-box API settings (advanced - for rate limiting and error handling)
   stashbox_request_delay:
     displayName: Request Delay (seconds)
-    description: Delay between paginated StashDB requests to avoid rate limiting. Default is 0.5 seconds. Increase if you see 429 errors.
+    description: Delay between paginated stash-box requests to avoid rate limiting. Default is 0.5. Increase if you see 429 errors.
     type: NUMBER
   stashbox_max_retries:
     displayName: Max Retries
-    description: Number of times to retry failed StashDB requests (for 504, 503, connection errors). Default is 3.
+    description: Times to retry a failed stash-box request (429, 5xx, connection errors). Default is 3.
+    type: NUMBER
+  stashbox_initial_retry_delay:
+    displayName: Initial Retry Delay (seconds)
+    description: Wait before the first retry. Default is 1.0.
+    type: NUMBER
+  stashbox_max_retry_delay:
+    displayName: Max Retry Delay (seconds)
+    description: Longest wait between retries. Default is 30.0.
+    type: NUMBER
+  stashbox_retry_backoff_multiplier:
+    displayName: Retry Backoff Multiplier
+    description: Each retry waits this many times longer than the last. Default is 2.0.
+    type: NUMBER
+  stashbox_request_timeout:
+    displayName: Request Timeout (seconds)
+    description: How long to wait for one stash-box response. Default is 30. It is cut to what is left of the search's 100 second budget.
+    type: NUMBER
+  stashbox_rate_limit_pause:
+    displayName: Rate Limit Pause (seconds)
+    description: Wait after a 429 response that has no Retry-After header. Default is 60.0. A longer pause is cut so one request waits at most 90 seconds in all. A pause that would run past the search's 100 second budget stops the search, which then shows what it found. A Retry-After above 60 seconds is not waited for.
+    type: NUMBER
+  stashbox_per_page:
+    displayName: Results Per Page
+    description: Scenes requested per stash-box page. Default is 100.
+    type: NUMBER
+  stashbox_max_pages_performer:
+    displayName: Max Pages (performers)
+    description: Most pages fetched for a performer or combined performer and studio search. Default is 10.
+    type: NUMBER
+  stashbox_max_pages_studio:
+    displayName: Max Pages (studio)
+    description: Most pages fetched for a studio search. Default is 25.
     type: NUMBER
 
 # Python backend for StashDB queries (called via runPluginOperation from JS)
