@@ -185,17 +185,20 @@ class TestBudget(unittest.TestCase):
         # exact fit: nothing is cut
         self.assertEqual(get_new_path(scene, BASE, self.TEMPLATE, len(full)), full)
 
-        # over by 5: the (last and only) truncable loses exactly 5 characters
-        over5 = get_new_path(scene, BASE, self.TEMPLATE, len(full) - 5)
-        self.assertEqual(over5, _expected("Studio", "A Title - Jane Doe Mary Majo.mp4"))
+        # over by 1 or 5: the trailing name is dropped whole, not cut inside
+        for over in (1, 5):
+            result = get_new_path(scene, BASE, self.TEMPLATE, len(full) - over)
+            self.assertEqual(result, _expected("Studio", "A Title - Jane Doe.mp4"))
+
+        # a single remaining name is cut by characters, only by the overflow
+        single = _scene(performers=[{"name": "Mary Majorette", "gender": "FEMALE"}])
+        full = get_new_path(single, BASE, self.TEMPLATE, 1000)
+        over5 = get_new_path(single, BASE, self.TEMPLATE, len(full) - 5)
+        self.assertEqual(over5, _expected("Studio", "A Title - Mary Majo.mp4"))
         self.assertEqual(len(over5), len(full) - 5)
 
-        # over by 1: performers lose one character, never emptied
-        over1 = get_new_path(scene, BASE, self.TEMPLATE, len(full) - 1)
-        self.assertEqual(over1, _expected("Studio", "A Title - Jane Doe Mary Majorett.mp4"))
-
     def test_truncation_order_and_stop(self):
-        """Truncables are cut in the order FemalePerformers, MalePerformers, Performers, Tags,
+        """Truncables are cut in the order Tags, MalePerformers, FemalePerformers, Performers,
         each kept to at least one character, stopping as soon as the path fits."""
         template = "$Title - $FemalePerformers $Tags"
         scene = _scene(
@@ -205,14 +208,40 @@ class TestBudget(unittest.TestCase):
         full = get_new_path(scene, BASE, template, 1000)
         self.assertEqual(full, _expected("A Title - Jane Doe Threesome Rough.mp4"))
 
-        # over by 3: only the first truncable is cut; tags untouched
+        # over by 3: the last tag is dropped whole; the performer is untouched
         self.assertEqual(
-            get_new_path(scene, BASE, template, len(full) - 3), _expected("A Title - Jane Threesome Rough.mp4")
+            get_new_path(scene, BASE, template, len(full) - 3), _expected("A Title - Jane Doe Threesome.mp4")
         )
-        # over by 10: female performers keep 1 character (7 cut), tags lose the other 3
+        # over by 10: Rough is dropped (6), the lone tag then loses 4 characters (Threesome -> Three)
         self.assertEqual(
-            get_new_path(scene, BASE, template, len(full) - 10), _expected("A Title - J Threesome Ro.mp4")
+            get_new_path(scene, BASE, template, len(full) - 10), _expected("A Title - Jane Doe Three.mp4")
         )
+        # over by 20: the lone tag is cut to 1 character (8), then the performer
+        # name (a single name) is cut by the remaining 6
+        self.assertEqual(
+            get_new_path(scene, BASE, template, len(full) - 20), _expected("A Title - Ja T.mp4")
+        )
+
+    def test_tags_trimmed_before_any_performer_and_names_dropped_whole(self):
+        template = "$Title - $Performers $Tags"
+        scene = _scene(
+            performers=[{"name": "Jane Doe", "gender": "FEMALE"}, {"name": "John Roe", "gender": "MALE"}],
+            tags=[{"name": "Alpha"}, {"name": "Beta"}],
+        )
+        full = get_new_path(scene, BASE, template, 1000)
+        self.assertEqual(full, _expected("A Title - Jane Doe John Roe Alpha Beta.mp4"))
+
+        # tags shrink to one character before any performer name is touched
+        tags_gone = get_new_path(scene, BASE, template, len(full) - 9)
+        self.assertEqual(tags_gone, _expected("A Title - Jane Doe John Roe A.mp4"))
+
+        # once tags are at their minimum, performers lose whole trailing names, not letters
+        one_name = get_new_path(scene, BASE, template, len(full) - 14)
+        self.assertEqual(one_name, _expected("A Title - Jane Doe A.mp4"))
+
+        # only a lone name is cut by characters
+        cut = get_new_path(scene, BASE, template, len(full) - 20)
+        self.assertEqual(cut, _expected("A Title - Jane D A.mp4"))
 
     def test_repeated_truncable_is_cut_once_per_overflow_share(self):
         template = "$Performers/$Title - $Performers"

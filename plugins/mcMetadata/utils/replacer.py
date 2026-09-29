@@ -10,30 +10,44 @@ MAX_COMPONENT_BYTES = 255
 MIN_TRUNCATED_CHARS = 1
 
 
+def __female_performer_names(scene):
+    return [
+        __replace_invalid_file_chars(performer["name"])
+        for performer in scene["performers"]
+        if performer["gender"] == "FEMALE"
+    ]
+
+
+def __male_performer_names(scene):
+    return [
+        __replace_invalid_file_chars(performer["name"])
+        for performer in scene["performers"]
+        if performer["gender"] == "MALE"
+    ]
+
+
+def __performer_names(scene):
+    return [__replace_invalid_file_chars(performer["name"]) for performer in scene["performers"]]
+
+
+def __tag_names(scene):
+    return [__replace_invalid_file_chars(tag["name"]) for tag in scene["tags"]]
+
+
+# Names in a list value are joined by this, and trimmed a whole name at a time
+LIST_SEPARATOR = " "
+
+
 def __replacer_female_performers(scene):
-    female_performers = []
-    for performer in scene["performers"]:
-        if performer["gender"] == "FEMALE":
-            performer_name = __replace_invalid_file_chars(performer["name"])
-            female_performers.append(performer_name)
-    return " ".join(female_performers)
+    return LIST_SEPARATOR.join(__female_performer_names(scene))
 
 
 def __replacer_male_performers(scene):
-    male_performers = []
-    for performer in scene["performers"]:
-        if performer["gender"] == "MALE":
-            performer_name = __replace_invalid_file_chars(performer["name"])
-            male_performers.append(performer_name)
-    return " ".join(male_performers)
+    return LIST_SEPARATOR.join(__male_performer_names(scene))
 
 
 def __replacer_performers(scene):
-    performers = []
-    for performer in scene["performers"]:
-        performer_name = __replace_invalid_file_chars(performer["name"])
-        performers.append(performer_name)
-    return " ".join(performers)
+    return LIST_SEPARATOR.join(__performer_names(scene))
 
 
 def __replacer_quality(scene):
@@ -149,11 +163,7 @@ def __replacer_studios(scene):
 
 
 def __replacer_tags(scene):
-    tags = []
-    for tag in scene["tags"]:
-        tag_name = __replace_invalid_file_chars(tag["name"])
-        tags.append(tag_name)
-    return " ".join(tags)
+    return LIST_SEPARATOR.join(__tag_names(scene))
 
 
 def __replacer_title(scene):
@@ -165,11 +175,18 @@ def __replacer_title(scene):
 
 truncable_replacers = {
     # order here matters: when the path is over budget, these are shortened in this
-    # order (see get_new_path)
-    "$FemalePerformers": __replacer_female_performers,
-    "$MalePerformers": __replacer_male_performers,
-    "$Performers": __replacer_performers,
+    # order (see get_new_path). Tags matter least in a filename, so they go first.
     "$Tags": __replacer_tags,
+    "$MalePerformers": __replacer_male_performers,
+    "$FemalePerformers": __replacer_female_performers,
+    "$Performers": __replacer_performers,
+}
+# the same values as lists of names, for trimming a whole name at a time
+truncable_name_lists = {
+    "$Tags": __tag_names,
+    "$MalePerformers": __male_performer_names,
+    "$FemalePerformers": __female_performer_names,
+    "$Performers": __performer_names,
 }
 replacers = {
     # these replacers are not truncable. they will throw an error if the filepath budget cannot be managed
@@ -297,21 +314,28 @@ def get_new_path(scene, basepath, template, budget):
         new_path = __build_path(basepath, template, values, ext)
         overflow = len(new_path) - budget
 
-        # Trim only the overflow. Truncable values are cut from their end in
-        # truncable_replacers order (FemalePerformers, MalePerformers, Performers,
-        # Tags), the order the earlier code cut them in. Each keeps at least
-        # MIN_TRUNCATED_CHARS characters, and we stop as soon as the path fits.
+        # Trim only the overflow, from the truncable values in truncable_replacers order
+        # (Tags, MalePerformers, FemalePerformers, Performers). A list loses whole
+        # trailing names while more than one remains; a single remaining name is cut
+        # by characters, keeping at least MIN_TRUNCATED_CHARS. Stop as soon as it fits.
         for key in truncable_replacers:
             if overflow <= 0:
                 break
-            if key not in values:
+            if key not in values or not values[key]:
                 continue
-            original = values[key]
+            names = list(truncable_name_lists[key](scene))
             occurrences = keys.count(key)
-            keep = len(original)
-            while overflow > 0 and keep > MIN_TRUNCATED_CHARS:
-                keep -= min(math.ceil(overflow / occurrences), keep - MIN_TRUNCATED_CHARS)
-                values[key] = sanitize_component(original[:keep])
+            while overflow > 0:
+                if len(names) > 1:
+                    names.pop()
+                elif names and len(names[0]) > MIN_TRUNCATED_CHARS:
+                    keep = len(names[0]) - min(
+                        math.ceil(overflow / occurrences), len(names[0]) - MIN_TRUNCATED_CHARS
+                    )
+                    names[0] = names[0][:keep]
+                else:
+                    break
+                values[key] = sanitize_component(LIST_SEPARATOR.join(names))
                 new_path = __build_path(basepath, template, values, ext)
                 overflow = len(new_path) - budget
 

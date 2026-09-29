@@ -193,11 +193,12 @@ class TestReplacers(unittest.TestCase):
     def test_all_truncated(self):
         template = f"$Studios{SEP}$Studio - $StashID - $Title ($ReleaseYear) - $FemalePerformers $MalePerformers $Performers $ReleaseDate [$Quality-$Resolution] $Tags"
         result = get_new_path(MOCK_SCENE, MOCK_BASE_PATH, template, 160)
-        # 25 characters over: only the overflow is cut, from the truncables in order.
-        # FemalePerformers and MalePerformers keep 1 character each, Performers loses 3.
+        # 25 characters over: only the overflow is cut, from the truncables in order
+        # Tags, MalePerformers, FemalePerformers. Tags lose "Rough" whole and then shrink
+        # to "T", the lone male name shrinks to "A", the lone female name loses 1 character.
         self.assertEqual(
             result,
-            f"{SEP}data{SEP}tagged{SEP}MindGeek{SEP}Brazzers{SEP}Brazzers - 4562 - Episode Title (2022) - J A Jayden Jaymes Alec Knight Untagged Perfor 2022-03-14 [FHD-1080p] Threesome Rough.mp4",
+            f"{SEP}data{SEP}tagged{SEP}MindGeek{SEP}Brazzers{SEP}Brazzers - 4562 - Episode Title (2022) - Jayden Jayme A Jayden Jaymes Alec Knight Untagged Performer 2022-03-14 [FHD-1080p] T.mp4",
             "The path is wrong",
         )
         self.assertEqual(len(result), 160)
