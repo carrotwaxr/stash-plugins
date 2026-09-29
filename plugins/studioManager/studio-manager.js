@@ -1291,24 +1291,32 @@
 
   /**
    * After a remount: re-apply the pending changes still held in module state to
-   * freshly fetched data. Changes whose studio is gone, that became no-ops, or
-   * that would now form a cycle are dropped. Sets the "restored" banner count.
+   * freshly fetched data. Changes whose studio or parent is gone, or that became
+   * no-ops, are dropped. The rest are checked for cycles the way a save applies
+   * them (orderForSave), so a set that works together is kept whatever order it
+   * was made in, and only a change that would now form a cycle is dropped. The
+   * order shown is kept. Sets the "restored" banner count.
    */
   function restorePendingChanges() {
-    const original = new Map();
-    for (const s of hierarchyStudios) original.set(s.id, s.parent_studio?.id || null);
+    const original = parentMapOf(hierarchyStudios);
     const byId = new Map(hierarchyStudios.map(s => [s.id, s]));
-    const effective = new Map(original);
-    const kept = [];
+    const candidates = [];
     for (const change of pendingChanges) {
       const studio = byId.get(change.studioId);
       const target = change.type === 'set-parent' ? change.parentId : null;
       if (!studio || (target && !byId.has(target))) continue;
       if (target === original.get(change.studioId)) continue;
-      if (target && wouldCreateCycle(change.studioId, target, effective)) continue;
-      effective.set(change.studioId, target);
-      kept.push({ ...change, studioName: studio.name, parentName: target ? byId.get(target).name : null });
+      candidates.push({ ...change, studioName: studio.name, parentName: target ? byId.get(target).name : null });
     }
+    const running = new Map(original);
+    const fits = new Set();
+    for (const change of orderForSave(candidates, original)) {
+      const target = change.type === 'set-parent' ? change.parentId : null;
+      if (target && wouldCreateCycle(change.studioId, target, running)) continue;
+      running.set(change.studioId, target);
+      fits.add(change);
+    }
+    const kept = candidates.filter(c => fits.has(c));
     pendingChanges = kept;
     isEditMode = kept.length > 0;
     originalParentMap = kept.length > 0 ? original : new Map();

@@ -284,6 +284,42 @@ test("remount re-applies pending changes to fresh data, banner, drops no-ops", a
   assert.strictEqual(env2.sm.getState().isEditMode, false);
 });
 
+test("restoring keeps changes that are valid together, whatever order they were made in", async () => {
+  // 1 is under 2; 3 and 4 are free
+  const env = setup([["1", "2"], ["2"], ["3"], ["4"]]);
+  const { sm, x, container } = env;
+  const leave = mount(env);
+  await sm.settle();
+  x.setParent("1", "3");
+  x.setParent("2", "1"); // fine once 1 has left 2
+  x.setParent("1", "4"); // re-editing 1 moves its change to the end
+  assert.deepStrictEqual(pendingIds(sm), ["2", "1"]);
+  leave(); // Stash's navbar
+  mount(env);
+  await sm.settle();
+  assert.deepStrictEqual(pendingIds(sm), ["2", "1"], "both kept, in the order shown before");
+  assert.ok(container.innerHTML.includes("2 unsaved changes restored"), container.innerHTML.slice(0, 300));
+  assert.ok(!/sh-cycle/.test(container.innerHTML));
+});
+
+test("restoring drops a change that would now form a cycle and keeps the rest", async () => {
+  // meanwhile 1 went under 2 on the server, so a pending 2 -> 1 no longer fits
+  const env = setup([["1", "2"], ["2"], ["3"], ["4"]]);
+  const { sm, container } = env;
+  sm.setState({
+    pendingChanges: [
+      { type: "set-parent", studioId: "2", studioName: "S2", parentId: "1", parentName: "S1" },
+      { type: "set-parent", studioId: "3", studioName: "S3", parentId: "4", parentName: "S4" },
+    ],
+    isEditMode: true, originalParentMap: new Map(),
+  });
+  mount(env);
+  await sm.settle();
+  assert.deepStrictEqual(pendingIds(sm), ["3"]);
+  assert.ok(container.innerHTML.includes("1 unsaved change restored"));
+  assert.ok(!/sh-cycle/.test(container.innerHTML));
+});
+
 test("unmount during the initial fetch: no render, toast or throw afterwards", async () => {
   let release;
   const gate = new Promise((r) => { release = r; });
