@@ -1259,7 +1259,8 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
     def auth_failed():
         return any(getattr(e, "is_auth_error", False) for e in errors)
 
-    # Strategy 1: Combined filter if we have both performer AND studio
+    # Strategy 1: Combined filter if we have both performer AND studio. With 2+ performers
+    # it runs as all-of and as any-of, merged (see stashbox_api._performer_modifier_queries).
     if performer_stash_ids and studio_stash_id:
         log.LogDebug("Trying combined performer+studio query")
         run_query(query_stashdb_scenes_combined, list(performer_stash_ids), studio_stash_id)

@@ -44,13 +44,13 @@ def run(fn, responses, *args, settings=None):
 
 
 class TestModifierOrder(unittest.TestCase):
-    def test_two_performers_and_first_enough_no_second_query(self):
+    def test_two_performers_any_query_runs_even_when_all_finds_plenty(self):
         many = [sc(str(i)) for i in range(10)]
         (scenes, err), fake = run(stashbox_api.query_scenes_by_performers,
-                                  [(many, 10)], ["p1", "p2"])
-        self.assertEqual(len(fake.calls), 1)
-        self.assertEqual(fake.calls[0]["input"]["performers"]["modifier"], "INCLUDES_ALL")
-        self.assertEqual(len(scenes), 10)
+                                  [(many, 10), (many + [sc("solo")], 11)], ["p1", "p2"])
+        self.assertEqual([c["input"]["performers"]["modifier"] for c in fake.calls],
+                         ["INCLUDES_ALL", "INCLUDES"])
+        self.assertEqual(len(scenes), 11)
         self.assertIsNone(err)
 
     def test_two_performers_few_adds_includes_and_dedupes(self):
@@ -124,6 +124,41 @@ class TestPageCaps(unittest.TestCase):
         self.assertEqual(scenes.total, 500)
         (scenes, _), _ = run(stashbox_api.query_scenes_by_studio, [([sc("a")], 1)], "s")
         self.assertFalse(scenes.truncated)
+
+
+class TestFrequentCostar(MatchBase):
+    """A wrongly linked, frequent co-star must not hide the right scene: the all-performers
+    query finds plenty without it, so the any-performer query has to run too."""
+
+    def test_right_scene_found_and_ranked_first(self):
+        self.scene["title"] = "Jane - Hot Day At The Beach"
+        self.scene["performers"] = [
+            {"name": "Jane", "stash_ids": [{"endpoint": EP, "stash_id": "p1"}]},
+            {"name": "Frequent Costar", "stash_ids": [{"endpoint": EP, "stash_id": "p2"}]},
+        ]
+        both = [{"performer": {"id": "p1", "name": "Jane"}}, {"performer": {"id": "p2", "name": "Frequent Costar"}}]
+        studio = {"id": "s1", "name": "Studio"}
+        together = [sc(f"t{i}", title=f"Other Scene {i}", studio=studio, performers=both) for i in range(12)]
+        right = sc("right", title="Hot Day At The Beach", studio=studio,
+                   performers=[{"performer": {"id": "p1", "name": "Jane"}}])
+        calls = []
+
+        def fake(url, api_key, query, build_fn, extract_fn, plugin_settings=None,
+                 operation_name=None, max_pages=None, deadline=None):
+            inp = build_fn(1, 100)["input"]
+            modifier = (inp.get("performers") or {}).get("modifier")
+            calls.append((modifier, "studios" in inp))
+            if modifier == "INCLUDES_ALL":
+                return together, len(together), None
+            if modifier == "INCLUDES":
+                return together + [right], len(together) + 1, None
+            return [], 0, None
+        with mock.patch.object(stashbox_api, "paginated_query", side_effect=fake):
+            out = scene_matcher.find_matches_thorough("1", {})
+        ids = [r["stash_id"] for r in out["results"]]
+        self.assertIn(("INCLUDES", True), calls)
+        self.assertEqual(ids[0], "right", ids)
+        self.assertEqual(len(ids), 13)
 
 
 class TestThoroughTruncation(MatchBase):

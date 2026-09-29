@@ -63,7 +63,8 @@ def create_ssl_context(verify=True):
 # Stash-box endpoints (StashDB, FansDB, ThePornDB...) are public hosts; always verify.
 SSL_CONTEXT = create_ssl_context()
 
-# Fewer scenes than this from the AND query means the OR query is worth adding
+# Fewer scenes than this from the combined performer+studio query means the separate
+# performer and studio queries are worth adding (see find_matches_thorough)
 MIN_COMBINED_RESULTS_THRESHOLD = 10
 
 # Default configuration - can be overridden via plugin settings
@@ -524,8 +525,12 @@ def _extract_scenes(data):
 
 def _performer_modifier_queries(url, api_key, query, performer_ids, studio_id,
                                 plugin_settings, operation_name, max_pages, deadline=None):
-    """Run a performer (optionally + studio) query: INCLUDES_ALL first with 2+ performers,
-    then add INCLUDES when that finds fewer than MIN_COMBINED_RESULTS_THRESHOLD scenes.
+    """Run a performer (optionally + studio) query. With 2+ performers: INCLUDES_ALL, then
+    always INCLUDES too, merged and deduped by id (scoring decides the order). The
+    all-performers query can find plenty without the right scene when one performer is
+    wrongly linked; the any-performer query still finds it. INCLUDES_ALL runs first so
+    scenes with every performer are kept even when the broader query hits its page cap.
+    With 1 performer: INCLUDES only. Each query has its own page cap.
 
     Returns (scenes, error) with scenes a ScenesList; raises if the first page of the
     first query fails.
@@ -544,8 +549,6 @@ def _performer_modifier_queries(url, api_key, query, performer_ids, studio_id,
     error = None
     last = ([], 0)
     for n, modifier in enumerate(modifiers):
-        if n > 0 and len(merged) >= MIN_COMBINED_RESULTS_THRESHOLD:
-            break
         try:
             items, total, error = _paged_scene_query(
                 url, api_key, query, make_builder(modifier), _extract_scenes,
@@ -683,7 +686,7 @@ def _scene_query_text():
 
 def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_settings=None, max_pages=None,
                           deadline=None):
-    """Query StashDB for scenes by performers (AND first, then OR when sparse) and studio.
+    """Query StashDB for scenes by performers (all of them, then any of them) and studio.
 
     Returns (scenes, error); raises if page 1 fails. max_pages defaults to the
     stashbox_max_pages_performer setting.
@@ -702,7 +705,7 @@ def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_setting
 
 def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None, max_pages=None,
                                deadline=None):
-    """Query StashDB for scenes featuring the given performers (AND first, then OR when sparse).
+    """Query StashDB for scenes featuring the given performers (all of them, then any of them).
 
     Returns (scenes, error); raises if page 1 fails. max_pages defaults to the
     stashbox_max_pages_performer setting.
