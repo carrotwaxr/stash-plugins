@@ -188,6 +188,34 @@ def read_index(data_dir, endpoint):
     return index
 
 
+def has_index(data_dir, endpoint):
+    """True when an index file exists for the endpoint (built, or a build started)."""
+    return os.path.exists(index_path(data_dir, endpoint))
+
+
+def forget_scene(data_dir, endpoint, scene_id):
+    """Drop a local scene, its row and its matches, from an endpoint's index.
+
+    For a scene that was deleted or now has a stash_id for the endpoint: its matches
+    must stop counting as owned now, not at the next build. With no index file there
+    is nothing to do (none is created).
+
+    Returns:
+        How many of its matches were removed.
+
+    Raises:
+        sqlite3.Error or OSError when the index can't be written.
+    """
+    scene_id = str(scene_id)
+    with _open(index_path(data_dir, endpoint), create=False) as conn:
+        if conn is None:
+            return 0
+        with _transaction(conn):
+            removed = conn.execute("DELETE FROM matches WHERE scene_id = ?", (scene_id,)).rowcount
+            conn.execute("DELETE FROM scenes WHERE scene_id = ?", (scene_id,))
+    return removed
+
+
 # ---- building -----------------------------------------------------------------
 
 def scene_fingerprints(scene):

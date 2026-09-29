@@ -106,12 +106,16 @@ tasks:
     defaultArgs:
       mode: build_fingerprint_index
 
-# Hook to automatically cleanup Whisparr when a scene is tagged
+# Hooks: keep the local indexes current, and clean up Whisparr when a scene is tagged
 hooks:
   - name: Whisparr Auto-Cleanup
-    description: Remove scene from Whisparr when it receives a StashDB ID (gets tagged)
+    description: When a scene's stash IDs change, refresh the local indexes. With Auto-cleanup Whisparr on, remove the scene from Whisparr once it has a StashDB ID.
     triggeredBy:
       - Scene.Update.Post
+  - name: Forget Deleted Scenes
+    description: When a scene is deleted, drop it from the local indexes so its stash IDs and fingerprint matches stop counting as owned.
+    triggeredBy:
+      - Scene.Destroy.Post
 
 # Python backend for StashDB queries (called via runPluginOperation from JS)
 exec:

@@ -1261,6 +1261,19 @@ def fingerprint_ownership(endpoint, plugin_settings, local_ids):
     }
 
 
+def forget_fingerprint_matches(scene_id, endpoints):
+    """Drop a local scene from each endpoint's fingerprint index, so its matches stop
+    counting as owned. Best effort: a failure is logged, never raised."""
+    for endpoint in endpoints:
+        try:
+            removed = fingerprint_index.forget_scene(CACHE_DIR, endpoint, scene_id)
+        except (sqlite3.Error, OSError) as e:
+            log.LogWarning(f"Could not drop scene {scene_id} from the fingerprint index for {endpoint}: {e}")
+            continue
+        if removed:
+            log.LogInfo(f"Scene {scene_id}: dropped {removed} fingerprint match(es) from the {endpoint} index")
+
+
 def list_scenes_without_stash_id(endpoint):
     """Every local scene with no stash_id for the endpoint: id, updated_at, and its files'
     duration and fingerprints.
@@ -2441,13 +2454,37 @@ def whisparr_unmonitor_scene(whisparr_url, api_key, movie_id):
 # Automation: Hook and Task Handlers
 # ============================================================================
 
+def _find_scene_with_stash_ids(scene_id):
+    """The local scene {id, title, stash_ids}, or None when Stash has no such scene."""
+    data = stash_graphql("""
+        query FindScene($id: ID!) {
+            findScene(id: $id) {
+                id
+                title
+                stash_ids {
+                    endpoint
+                    stash_id
+                }
+            }
+        }
+    """, {"id": str(scene_id)})
+    return (data or {}).get("findScene")
+
+
+def _configured_endpoints(boxes):
+    return [box["endpoint"] for box in boxes or [] if isinstance(box, dict) and box.get("endpoint")]
+
+
 def handle_scene_update_hook(hook_context, plugin_settings):
-    """Handle Scene.Update.Post: clean up Whisparr once a scene has its StashDB ID in Stash.
+    """Handle Scene.Update.Post: refresh the local indexes, and clean up Whisparr once a
+    scene has its StashDB ID in Stash.
 
     hook_context is Stash's args.hookContext: {id, type, input, inputFields}. Nothing happens
     unless the update set stash_ids (inputFields). Then the local stash_id indexes are dropped
-    (they may be stale), and with auto-cleanup on and Whisparr configured, the scene's StashDB
-    ID is looked up in Whisparr. Whisparr keys on StashDB IDs, so other stash-boxes are ignored.
+    (they may be stale), and the scene leaves the fingerprint index of every stash-box it now
+    has a stash_id for (of every box when Stash no longer has it), so its matches stop counting
+    as owned. With auto-cleanup on and Whisparr configured, the scene's StashDB ID is looked up
+    in Whisparr. Whisparr keys on StashDB IDs, so other stash-boxes are ignored.
     Only an entry whose stashId equals that ID is touched, and not while it is in Whisparr's
     download queue. It is deleted, or unmonitored with unmonitorOnly.
     """
@@ -2465,9 +2502,26 @@ def handle_scene_update_hook(hook_context, plugin_settings):
 
     # The scene's stash_ids changed, so any box's local index may be missing it
     stashbox_configs = get_stashbox_config() or []
-    for box in stashbox_configs:
-        if isinstance(box, dict) and box.get("endpoint"):
-            invalidate_cache(box["endpoint"])
+    endpoints = _configured_endpoints(stashbox_configs)
+    for endpoint in endpoints:
+        invalidate_cache(endpoint)
+
+    fetched = {}
+
+    def load_scene():  # one Stash query, shared by the fingerprint index and Whisparr
+        if "scene" not in fetched:
+            fetched["scene"] = _find_scene_with_stash_ids(scene_id)
+        return fetched["scene"]
+
+    indexed = [e for e in endpoints if fingerprint_index.has_index(CACHE_DIR, e)]
+    if indexed:
+        scene = load_scene()
+        if scene is None:
+            forget_fingerprint_matches(scene_id, indexed)  # gone from Stash
+        else:
+            tagged = {sid.get("endpoint") for sid in scene.get("stash_ids") or []
+                      if isinstance(sid, dict) and sid.get("stash_id")}
+            forget_fingerprint_matches(scene_id, [e for e in indexed if e in tagged])
 
     if not plugin_settings.get("enableAutoCleanup", False):
         log.LogDebug("Auto-cleanup is disabled, skipping")
@@ -2483,25 +2537,12 @@ def handle_scene_update_hook(hook_context, plugin_settings):
         log.LogDebug("No StashDB stash-box is configured; Whisparr auto-cleanup works with StashDB IDs only")
         return {"success": True, "message": "No StashDB stash-box configured"}
 
-    # Fetch the scene with its stash_ids
-    scene_data = stash_graphql("""
-        query FindScene($id: ID!) {
-            findScene(id: $id) {
-                id
-                title
-                stash_ids {
-                    endpoint
-                    stash_id
-                }
-            }
-        }
-    """, {"id": str(scene_id)})
-
-    if not scene_data or not scene_data.get("findScene"):
+    # The scene with its stash_ids
+    scene = load_scene()
+    if not scene:
         log.LogWarning(f"Could not find scene {scene_id}")
         return {"success": False, "message": "Scene not found"}
 
-    scene = scene_data["findScene"]
     stash_id = next((sid.get("stash_id") for sid in scene.get("stash_ids") or []
                      if is_stashdb_endpoint(sid.get("endpoint")) and sid.get("stash_id")), None)
     if not stash_id:
@@ -2540,6 +2581,31 @@ def handle_scene_update_hook(hook_context, plugin_settings):
     except Exception as e:
         log.LogError(f"Failed to cleanup Whisparr for scene {scene_id}: {e}")
         return {"success": False, "message": str(e), "error": str(e)}
+
+
+def handle_scene_destroy_hook(hook_context, plugin_settings):
+    """Handle Scene.Destroy.Post: forget a deleted scene in the local indexes.
+
+    hook_context is Stash's args.hookContext: {id, type, input}; input holds the destroy
+    options plus the scene's checksum, oshash and path. The stash_id indexes are dropped (the
+    scene's stash_ids no longer count as owned) and the scene leaves every stash-box's
+    fingerprint index. Whisparr is never touched: deleting a scene is not tagging it.
+    """
+    hook_context = hook_context or {}
+    hook_input = hook_context.get("input")
+    scene_id = hook_context.get("id")
+    if scene_id in (None, "") and isinstance(hook_input, dict):
+        scene_id = hook_input.get("id")
+    if scene_id in (None, ""):
+        log.LogWarning("No scene ID in the Scene.Destroy.Post hook")
+        return {"success": False, "message": "No scene ID"}
+
+    endpoints = _configured_endpoints(get_stashbox_config())
+    for endpoint in endpoints:
+        invalidate_cache(endpoint)
+    forget_fingerprint_matches(scene_id, endpoints)
+    log.LogDebug(f"Scene {scene_id} deleted; dropped it from the local indexes")
+    return {"success": True, "message": f"Scene {scene_id} dropped from the local indexes"}
 
 
 def _split_scan_paths(value):
@@ -2862,6 +2928,8 @@ def main():
 
         if hook_type == "Scene.Update.Post":
             output = handle_scene_update_hook(hook_context, plugin_settings)
+        elif hook_type == "Scene.Destroy.Post":
+            output = handle_scene_destroy_hook(hook_context, plugin_settings)
         else:
             output = {"success": True, "message": f"Unhandled hook type: {hook_type}"}
 

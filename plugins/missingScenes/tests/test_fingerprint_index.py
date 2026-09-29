@@ -560,3 +560,110 @@ def test_unmatched_scene_is_rechecked_after_30_days_matched_is_not(monkeypatch):
     age(31)
     res = ms.build_fingerprint_index({})
     assert res["queried"] == 0, "both have matches now; matched scenes are not re-queried"
+
+
+# ---- a local scene's matches go with it (tagged or deleted) ------------------------------
+
+TWO_BOXES = [{"endpoint": EP, "api_key": "k", "name": "StashDB"},
+             {"endpoint": FANSDB, "api_key": "f", "name": "FansDB"}]
+
+
+def two_indexes(monkeypatch):
+    """StashDB: local scene 0 matches s-a, scene 1 matches s-b. FansDB: scene 0 matches f-a."""
+    scenes = [local_scene(0), local_scene(1)]
+    install(monkeypatch, scenes, FakeBox({"ph0": ["s-a"], "ph1": ["s-b"]}), boxes=TWO_BOXES)
+    assert "error" not in ms.build_fingerprint_index({}, endpoint=EP)
+    install(monkeypatch, scenes, FakeBox({"ph0": ["f-a"]}), boxes=TWO_BOXES)
+    assert "error" not in ms.build_fingerprint_index({}, endpoint=FANSDB)
+    assert owned(EP) == {"s-a", "s-b"} and owned(FANSDB) == {"f-a"}
+
+
+def hook_stash(monkeypatch, stash_ids=None, found=True, boxes=TWO_BOXES):
+    """Stash for the hooks: the configured boxes, and scene 0 with these stash_ids."""
+    queries = []
+
+    def gql(query, variables=None):
+        queries.append(query)
+        if "stashBoxes" in query:
+            return {"configuration": {"general": {"stashBoxes": boxes}}}
+        if "findScene(" in query:
+            scene = {"id": str(variables["id"]), "title": "T", "stash_ids": stash_ids or []}
+            return {"findScene": scene if found else None}
+        raise AssertionError(f"unexpected Stash query: {query}")
+
+    monkeypatch.setattr(ms, "stash_graphql", gql)
+    return queries
+
+
+def no_whisparr(monkeypatch):
+    import urllib.request
+    seen = []
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, *a, **k: seen.append(req) or pytest.fail(
+        f"unexpected request {req.full_url}"))
+    return seen
+
+
+UPDATE = {"id": 0, "type": "Scene.Update.Post", "input": {"id": "0"}, "inputFields": ["id", "stash_ids"]}
+DESTROY = {"id": 0, "type": "Scene.Destroy.Post",
+           "input": {"id": "0", "checksum": "", "oshash": "os0", "path": "/data/a.mp4"}}
+CLEANUP_ON = {"enableAutoCleanup": True, "whisparrUrl": "http://h:6969", "whisparrApiKey": "K"}
+
+
+def test_tagging_a_scene_drops_its_matches_from_that_boxes_index(monkeypatch):
+    two_indexes(monkeypatch)
+    hook_stash(monkeypatch, stash_ids=[{"endpoint": EP, "stash_id": "s-real"}])
+    res = ms.handle_scene_update_hook(UPDATE, {})
+    assert res["success"] is True
+    # Its StashDB ID speaks for it now; s-a no longer counts as owned
+    assert owned(EP) == {"s-b"}
+    # Still untagged on FansDB, so its FansDB match still counts
+    assert owned(FANSDB) == {"f-a"}
+
+
+def test_an_update_of_a_scene_stash_no_longer_has_drops_it_everywhere(monkeypatch):
+    two_indexes(monkeypatch)
+    hook_stash(monkeypatch, found=False)
+    ms.handle_scene_update_hook(UPDATE, {})
+    assert owned(EP) == {"s-b"} and owned(FANSDB) == set()
+
+
+def test_an_update_that_did_not_set_stash_ids_leaves_the_index(monkeypatch):
+    two_indexes(monkeypatch)
+    queries = hook_stash(monkeypatch, stash_ids=[{"endpoint": EP, "stash_id": "s-real"}])
+    ms.handle_scene_update_hook(dict(UPDATE, inputFields=["id", "title"]), {})
+    assert owned(EP) == {"s-a", "s-b"} and queries == []
+
+
+def test_deleting_a_scene_drops_its_matches_everywhere_and_skips_whisparr(monkeypatch):
+    two_indexes(monkeypatch)
+    hook_stash(monkeypatch)
+    seen = no_whisparr(monkeypatch)
+    ms._write_cache_to_disk(EP, {"s-real"})
+    res = ms.handle_scene_destroy_hook(DESTROY, CLEANUP_ON)
+    assert res["success"] is True
+    assert owned(EP) == {"s-b"} and owned(FANSDB) == set()
+    assert seen == []
+    assert ms._read_cache_from_disk(EP) is None  # its stash_ids no longer count as owned either
+
+
+def test_deleting_a_scene_without_an_index_creates_nothing(monkeypatch):
+    hook_stash(monkeypatch)
+    res = ms.handle_scene_destroy_hook(DESTROY, {})
+    assert res["success"] is True
+    assert not [f for f in os.listdir(ms.CACHE_DIR) if f.startswith("fingerprints_")]
+
+
+def test_main_dispatches_the_destroy_hook_without_whisparr(monkeypatch, tmp_path, capsys):
+    got = []
+    monkeypatch.setattr(ms, "handle_scene_update_hook", lambda *a: pytest.fail("not the update hook"))
+    monkeypatch.setattr(ms, "handle_scene_destroy_hook", lambda c, s: got.append(c) or {"success": True})
+    out = run_main(monkeypatch, tmp_path, capsys, {"hookContext": DESTROY}, CLEANUP_ON)
+    assert got == [DESTROY] and out == {"output": {"success": True}}
+
+
+def test_the_manifest_declares_the_destroy_hook():
+    import yaml
+    with open(os.path.join(os.path.dirname(ms.__file__), "missingScenes.yml"), encoding="utf-8") as f:
+        manifest = yaml.safe_load(f)
+    triggers = [t for hook in manifest["hooks"] for t in hook["triggeredBy"]]
+    assert "Scene.Update.Post" in triggers and "Scene.Destroy.Post" in triggers

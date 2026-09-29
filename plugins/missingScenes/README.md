@@ -69,6 +69,7 @@ A scene you own may have no stash ID for the stash-box (not tagged yet, or tagge
 2. A stash-box scene that one of your scenes matches by fingerprint counts as owned. The stats show "N counted as owned by fingerprint".
 3. Matches are checked against duration to avoid false positives.
 4. Later builds only look up new or changed scenes. Scenes that matched nothing are checked again after 30 days.
+5. When you tag a scene for a stash-box, or delete it, its matches stop counting right away (the `Scene.Update.Post` and `Scene.Destroy.Post` hooks), without waiting for the next build.
 
 On a large library the first build takes a while, so the task is the better way to run it. To count only scenes linked by stash ID, turn on **Ignore Fingerprint Matches**.
 
