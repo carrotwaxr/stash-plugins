@@ -741,11 +741,24 @@
   }
 
   /**
-   * Remove a pending change by index; the others stay applied
+   * Remove a pending change by index; the others stay applied. Refused (with a
+   * toast) when another pending change needs it to stay out of a cycle.
    */
   function removePendingChange(index) {
     if (isSaving) return;
-    pendingChanges.splice(index, 1);
+    const rest = pendingChanges.filter((_, i) => i !== index);
+    const base = baseParentMap();
+    const before = studiosOnCycle(effectiveParentMap(base, pendingChanges));
+    const after = studiosOnCycle(effectiveParentMap(base, rest));
+    const dependents = rest.filter(c => after.has(c.studioId) && !before.has(c.studioId));
+    if (dependents.length > 0) {
+      const names = dependents.map(c => `"${c.studioName}"`).join(', ');
+      showToast(dependents.length === 1
+        ? `Remove the change for ${names} first: it needs this one to avoid a cycle`
+        : `Remove the changes for ${names} first: they need this one to avoid a cycle`, 'error');
+      return;
+    }
+    pendingChanges = rest;
     if (pendingChanges.length === 0) {
       isEditMode = false;
       originalParentMap.clear();
@@ -835,7 +848,10 @@
         delete change.error;
         const parentId = change.type === 'set-parent' ? change.parentId : null;
         if (parentId && wouldCreateCycle(change.studioId, parentId, running)) {
-          change.error = 'Parent chain contains a cycle; fix that first';
+          const ownAncestor = parentId === change.studioId || ancestorsOf(parentId, running).includes(change.studioId);
+          change.error = ownAncestor
+            ? `Would make "${change.studioName}" its own ancestor`
+            : 'Its parent chain runs into an existing cycle; fix that first';
           failed.push(change);
           continue;
         }

@@ -142,6 +142,37 @@ test("context menu hasChildren uses the effective tree", () => {
   assert.ok(/expand|Expand/.test(el.innerHTML), "2 has children after 1 moves in");
 });
 
+const toastTexts = (sm) => sm.document.body.children
+  .filter((c) => c.className === "sh-toast-container")
+  .flatMap((c) => c.children.map((t) => t.textContent));
+
+test("removing a change the others need to stay acyclic is refused", () => {
+  const { sm, x, container } = setup(); // 5 is under 4
+  x.removeParent("5");
+  x.setParent("4", "5"); // fine while 5 has no parent
+  assert.deepStrictEqual(plain(sm.getState().pendingChanges.map((c) => c.studioId)), ["5", "4"]);
+  const html = container.innerHTML;
+  x.removePendingChange(0); // would put 5 back under 4, with 4 under 5
+  assert.deepStrictEqual(plain(sm.getState().pendingChanges.map((c) => c.studioId)), ["5", "4"], "both kept");
+  assert.ok(toastTexts(sm).includes('Remove the change for "S4" first: it needs this one to avoid a cycle'),
+    toastTexts(sm).join("|"));
+  assert.ok(!/sh-cycle/.test(container.innerHTML), "no cycle shown");
+  assert.strictEqual(container.innerHTML, html, "view unchanged");
+  x.removePendingChange(1); // the dependent one goes first
+  x.removePendingChange(0);
+  assert.strictEqual(sm.getState().pendingChanges.length, 0);
+});
+
+test("removing a change that fixed a cycle already in the data is allowed", () => {
+  const { sm, x } = setup();
+  const loop = [studio("1", "2"), studio("2", "1")];
+  sm.setState({ hierarchyStudios: loop, originalParentMap: new Map() });
+  x.removeParent("1");
+  assert.strictEqual(sm.getState().pendingChanges.length, 1);
+  x.removePendingChange(0); // back to the server's own loop: no pending change depends on it
+  assert.strictEqual(sm.getState().pendingChanges.length, 0);
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {

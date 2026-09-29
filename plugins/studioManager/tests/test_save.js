@@ -104,7 +104,20 @@ test("a parent chain that runs into an existing cycle is refused before any requ
   assert.strictEqual(updates.length, 0);
   const c = sm.getState().pendingChanges;
   assert.strictEqual(c.length, 1);
-  assert.strictEqual(c[0].error, "Parent chain contains a cycle; fix that first");
+  assert.strictEqual(c[0].error, "Its parent chain runs into an existing cycle; fix that first");
+});
+
+test("a change that would make a studio its own ancestor says so", async () => {
+  // 1 is under 2; a pending 2 -> 1 (e.g. re-applied on data changed elsewhere)
+  const { sm, x, updates, toasts } = setup([["1", "2"], ["2", null]]);
+  sm.setState({
+    isEditMode: true, originalParentMap: new Map([["1", "2"], ["2", null]]),
+    pendingChanges: [{ type: "set-parent", studioId: "2", studioName: "S2", parentId: "1", parentName: "S1" }],
+  });
+  await x.savePendingChanges();
+  assert.strictEqual(updates.length, 0);
+  assert.strictEqual(sm.getState().pendingChanges[0].error, 'Would make "S2" its own ancestor');
+  assert.ok(toastTexts(toasts).some((t) => t.includes('"S2": Would make "S2" its own ancestor')), toastTexts(toasts).join("|"));
 });
 
 test("partial failure: others saved, failed stays pending with its error", async () => {
