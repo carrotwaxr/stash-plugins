@@ -83,16 +83,14 @@ class TestSyncHistory(TempDir):
 
         self.assertEqual(self.open_history().get(STASHDB, "s1", "sd-1"), {"a", "b"})
 
-    def test_commits_every_200_records(self):
+    def test_record_is_durable_without_close(self):
         history = self.open_history()
 
-        for i in range(199):
-            history.record(STASHDB, f"s{i}", f"sd-{i}", ["a"])
-        with sqlite3.connect(self.path) as other:
-            self.assertEqual(other.execute("SELECT COUNT(*) FROM scene_tags").fetchone()[0], 0)
-        history.record(STASHDB, "s199", "sd-199", ["a"])
-        with sqlite3.connect(self.path) as other:
-            self.assertEqual(other.execute("SELECT COUNT(*) FROM scene_tags").fetchone()[0], 200)
+        history.record(STASHDB, "s1", "sd-1", ["a", "b"])
+
+        other = SyncHistory(self.path)  # a second process would see it; history never closed
+        self.addCleanup(other.close)
+        self.assertEqual(other.get(STASHDB, "s1", "sd-1"), {"a", "b"})
 
     def test_reset_returns_count(self):
         history = self.open_history()

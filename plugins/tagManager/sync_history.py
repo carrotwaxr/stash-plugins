@@ -11,15 +11,16 @@ added.
 
 A scene re-linked to a different stash-box scene starts over. The history is a
 SQLite file (tagManager keeps it in Stash's config dir, see plugin_data), sized
-for tens of thousands of scenes; the "Reset Scene Tag Sync History" task empties
-it.
+for tens of thousands of scenes. Every record is committed as it is made, because
+tags are written to Stash immediately: a sync that is cancelled or killed must not
+lose history for scenes it already changed. The "Reset Scene Tag Sync History" task
+empties it.
 """
 
 import sqlite3
 import time
 
 SCHEMA_VERSION = 1  # PRAGMA user_version, so a later schema change can tell
-COMMIT_EVERY = 200  # records per commit
 
 
 class SyncHistory:
@@ -27,9 +28,9 @@ class SyncHistory:
 
     def __init__(self, path):
         self._db = sqlite3.connect(path, timeout=30)
-        self._pending = 0
         try:
             self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA synchronous=NORMAL")  # safe with WAL; a commit per record stays cheap
             self._db.execute(
                 "CREATE TABLE IF NOT EXISTS scene_tags ("
                 "endpoint TEXT, scene_id TEXT, remote_id TEXT, tag_ids TEXT, synced_at INTEGER, "
@@ -58,21 +59,19 @@ class SyncHistory:
         return set((row[1] or "").split())
 
     def record(self, endpoint, scene_id, remote_id, stashdb_tag_ids):
-        """Replace a scene's record. Commits every COMMIT_EVERY records, and on close()."""
+        """Replace a scene's record and commit it, so a killed sync keeps its history."""
         tag_ids = " ".join(sorted({str(t) for t in stashdb_tag_ids}))
         self._db.execute(
             "INSERT OR REPLACE INTO scene_tags (endpoint, scene_id, remote_id, tag_ids, synced_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (endpoint, str(scene_id), str(remote_id), tag_ids, int(time.time())),
         )
-        self._pending += 1
-        if self._pending >= COMMIT_EVERY:
-            self._commit()
+        self._db.commit()
 
     def reset(self):
         """Forget every scene. Returns how many records were removed."""
         cleared = self._db.execute("DELETE FROM scene_tags").rowcount
-        self._commit()
+        self._db.commit()
         return cleared
 
     def close(self):
@@ -84,7 +83,3 @@ class SyncHistory:
         finally:
             self._db.close()
             self._db = None
-
-    def _commit(self):
-        self._db.commit()
-        self._pending = 0
