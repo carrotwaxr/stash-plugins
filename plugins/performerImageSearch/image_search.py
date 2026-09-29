@@ -20,6 +20,7 @@ import json
 import sys
 import re
 import time
+import ipaddress
 import urllib.request
 import urllib.parse
 from html import unescape
@@ -47,6 +48,68 @@ ASPECT_THRESHOLDS = {
     "Square": (0.9, 1.1),     # 0.9 <= ratio <= 1.1
     "Landscape": (1.1, float('inf')),  # ratio > 1.1
 }
+
+
+# Image hosts each scraper returns. The Stash server fetches the chosen URL itself
+# (performerUpdate image:), so results pointing anywhere else are dropped.
+SOURCE_IMAGE_HOSTS = {
+    "Babepedia": {"www.babepedia.com"},
+    "FreeOnes": {"thumbs.freeones.com", "ch-thumbs.freeones.com", "img.freeones.com"},
+    "PornPics": {"cdni.pornpics.com"},
+    "EliteBabes": {"cdn.elitebabes.com"},
+    "Boobpedia": {"www.boobpedia.com"},
+    "JavDatabase": {"www.javdatabase.com"},
+}
+
+# Sources whose images come from arbitrary sites. Only public hosts are allowed.
+OPEN_WEB_SOURCES = {"DuckDuckGo"}
+
+LOCAL_HOST_SUFFIXES = (".localhost", ".local", ".lan", ".internal", ".home.arpa", ".localdomain")
+
+
+def _is_public_host(host):
+    """True if host looks like an internet host rather than this machine or the LAN."""
+    if not host or host == "localhost" or host.endswith(LOCAL_HOST_SUFFIXES):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
+    # Single-label names only resolve on a LAN. A numeric or hex last label is IPv4
+    # shorthand (127.1, 0x7f.1) that some resolvers accept; no real TLD looks like that.
+    last_label = host.rsplit(".", 1)[-1]
+    return "." in host and not re.fullmatch(r"\d+|0x[0-9a-f]*", last_label)
+
+
+def is_allowed_image_url(url, source):
+    """Check that the Stash server may be asked to fetch this image URL for this source."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if source in SOURCE_IMAGE_HOSTS:
+        return host in SOURCE_IMAGE_HOSTS[source]
+    if source in OPEN_WEB_SOURCES:
+        return _is_public_host(host)
+    return False
+
+
+def drop_disallowed_hosts(results, label):
+    """Remove results whose image or thumbnail URL fails is_allowed_image_url."""
+    allowed = []
+    for result in results:
+        source = result.get("source")
+        urls = [result.get("image", "")]
+        if result.get("thumbnail"):
+            urls.append(result["thumbnail"])
+        if all(is_allowed_image_url(u, source) for u in urls):
+            allowed.append(result)
+    if len(allowed) != len(results):
+        log.LogWarning(f"[{label}] Dropped {len(results) - len(allowed)} images from unexpected hosts")
+    return allowed
 
 
 def normalize_name_for_url(name):
@@ -1012,6 +1075,8 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
     elapsed = time.time() - start_time
     log.LogDebug(f"[{source}] Search completed in {elapsed:.2f}s, found {len(results)} results")
 
+    results = drop_disallowed_hosts(results, source)
+
     # Deduplicate within this source
     seen_urls = set()
     unique_results = []
@@ -1061,6 +1126,8 @@ def search_all_sources(name, query, size_filter="All", layout_filter="All"):
         # Use the full query (with suffix) for DuckDuckGo, pass filters
         ddg_results = search_duckduckgo_images(query, size_filter, layout_filter, 50)
         all_results.extend(ddg_results)
+
+    all_results = drop_disallowed_hosts(all_results, "all")
 
     # Deduplicate by image URL
     seen_urls = set()
