@@ -16,6 +16,7 @@ from performer import process_all_performers
 from scene import process_all_scenes, process_scene
 from conditions import should_process, describe_active_conditions
 from plugin_settings import map_settings
+from utils.self_updates import plugin_data_dir, should_skip_hook
 
 # Minimum stashapp-tools version required for schema 72+ compatibility
 MIN_STASHAPP_TOOLS_VERSION = "0.2.59"
@@ -89,6 +90,8 @@ def get_settings(stash_instance):
 
 # Load settings from Stash
 SETTINGS = get_settings(stash)
+# Where the plugin keeps its own files (self-update markers); not a user setting
+SETTINGS["data_dir"] = plugin_data_dir(json_input["server_connection"])
 
 
 def get_plugin_mode():
@@ -153,7 +156,15 @@ def main():
                 log.debug("Hook disabled, skipping")
                 return
 
-            scene_id = PLUGIN_ARGS["hookContext"]["id"]
+            hook_context = PLUGIN_ARGS["hookContext"]
+            scene_id = hook_context["id"]
+
+            # mcMetadata's own organized update (the renamer's mark-organized step)
+            # fires this hook while that run is still processing the scene
+            if should_skip_hook(hook_context, SETTINGS["data_dir"]):
+                log.debug(f"Scene {scene_id}: skipping mcMetadata's own organized update")
+                return
+
             scene = stash.find_scene(scene_id)
 
             if not scene:

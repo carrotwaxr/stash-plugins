@@ -6,6 +6,7 @@ from utils.files import download_image, rename_file, replace_file_ext
 from utils.nfo import build_nfo_xml
 from utils.paths import is_inside
 from utils.replacer import get_new_path
+from utils.self_updates import consume, mark
 from conditions import should_process, build_scene_filter, format_bulk_summary
 
 SKIP_SAMPLE_LIMIT = 10
@@ -340,15 +341,9 @@ def __rename_videos(scene, stash, settings):
                 primary_path = video_path
             continue
 
-    # Mark as organized if enabled and files were actually moved
-    if files_moved and settings.get("renamer_enable_mark_organized", False) and not settings["dry_run"]:
-        try:
-            stash.update_scene({"id": scene["id"], "organized": True})
-            log.debug(f"Marked Scene {scene['id']} as organized")
-        except Exception as err:
-            log.warning(f"Failed to mark scene as organized: {err}")
-
-    # Relocate metadata files for primary video
+    # Relocate metadata files for primary video. This runs before marking the scene
+    # organized: that update fires the Scene.Update.Post hook, which must find the
+    # NFO and poster already at their new paths.
     if primary_path and primary_path != original_primary_path:
         potential_nfo_path = replace_file_ext(original_primary_path, "nfo")
         if os.path.exists(potential_nfo_path):
@@ -366,7 +361,28 @@ def __rename_videos(scene, stash, settings):
                 settings,
             )
 
+    # Mark as organized if enabled and files were actually moved
+    if files_moved and settings.get("renamer_enable_mark_organized", False) and not settings["dry_run"]:
+        __mark_organized(scene["id"], stash, settings)
+
     return primary_path or files[0]["path"]
+
+
+def __mark_organized(scene_id, stash, settings):
+    """Set organized=true, with a marker so the hook run this fires skips the scene.
+
+    Stash runs the Scene.Update.Post hook inside update_scene, so the marker must exist
+    before the call. With the hook off nothing would consume it, so none is written.
+    """
+    data_dir = settings.get("data_dir")
+    marked = settings.get("enable_hook", False) and mark(scene_id, data_dir)
+    try:
+        stash.update_scene({"id": scene_id, "organized": True})
+        log.debug(f"Marked Scene {scene_id} as organized")
+    except Exception as err:
+        if marked:
+            consume(scene_id, data_dir)
+        log.warning(f"Failed to mark scene as organized: {err}")
 
 
 def __move_file_graphql(stash, file_id, dest_folder, dest_basename):
