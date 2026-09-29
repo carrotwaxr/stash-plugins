@@ -21,6 +21,7 @@ import concurrent.futures
 import http.client
 import ipaddress
 import json
+import os
 import re
 import socket
 import sys
@@ -57,21 +58,6 @@ GALLERY_WORKERS = 4
 
 # Text that only appears on Cloudflare's "checking your browser" challenge pages
 CLOUDFLARE_CHALLENGE_MARKERS = ("cf-chl", "Just a moment...")
-
-# Size filter thresholds (in pixels)
-SIZE_THRESHOLDS = {
-    "Large": 500000,    # >= 500k pixels (e.g., 700x700 or larger)
-    "Medium": 100000,   # >= 100k pixels (e.g., 316x316)
-    "Small": 0,         # < 100k pixels
-}
-
-# Aspect ratio thresholds
-ASPECT_THRESHOLDS = {
-    "Portrait": (0, 0.9),     # width/height < 0.9
-    "Square": (0.9, 1.1),     # 0.9 <= ratio <= 1.1
-    "Landscape": (1.1, float('inf')),  # ratio > 1.1
-}
-
 
 # Image hosts each scraper returns. The Stash server fetches the chosen URL itself
 # (performerUpdate image:), so results pointing anywhere else are dropped.
@@ -137,12 +123,6 @@ def drop_disallowed_hosts(results, label):
     if dropped:
         log.LogWarning(f"[{label}] Dropped {dropped} images from unexpected hosts")
     return allowed, dropped
-
-
-def normalize_name_for_url(name):
-    """Convert performer name to URL-friendly format."""
-    # Replace spaces with underscores or hyphens depending on the site
-    return name.strip()
 
 
 # --- Fetching -----------------------------------------------------------------
@@ -830,27 +810,32 @@ def search_javdatabase(name, max_results=100, max_pages=5, deadline=None):
     return SourceResult(results, warnings, partial=bool(warnings))
 
 
-def search_duckduckgo_images(query, size="Large", layout="All", max_results=50, deadline=None):
+DDG_RETRY_WAIT_SECONDS = 2
+DDG_RATE_LIMITED = "DuckDuckGo rate-limited this search; try again later"
+
+# DDG wants these on top of the shared HEADERS to avoid 403
+DDG_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Encoding": "identity",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+DDG_VQD_PATTERNS = (
+    r'vqd="([^"]+)"',
+    r"vqd='([^']+)'",
+    r'vqd=([0-9a-zA-Z_-]+)',
+    r'"vqd":"([^"]+)"',
+)
+
+
+def _duckduckgo_images_once(query, size, layout, deadline):
+    """One attempt: get a vqd token, then the image API's results (a list of dicts).
+
+    Raises SourceBlocked on a 403 or 429, a page without a token or a reply that is
+    not JSON; those are how DDG turns away a search it is rate-limiting.
     """
-    Search DuckDuckGo Images with safe search off.
-    Used as a fallback when performer-specific sites don't have results.
-    DDG requires a two-step process: get vqd token, then query /i.js
-    """
-    deadline = _default_deadline(deadline)
-    results = []
-
-    log.LogDebug(f"[DuckDuckGo] Query: {query}, size: {size}, layout: {layout}")
-
-    # DDG wants these on top of the shared HEADERS to avoid 403
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Encoding": "identity",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    }
-
-    # Step 1: Get the vqd token from the HTML search page
     search_params = urllib.parse.urlencode({
         "q": query,
         "t": "h_",
@@ -860,112 +845,75 @@ def search_duckduckgo_images(query, size="Large", layout="All", max_results=50, 
     })
     search_url = f"https://duckduckgo.com/?{search_params}"
 
-    log.LogDebug(f"[DuckDuckGo] Getting vqd token...")
-    html = _fetch(search_url, deadline, headers)
+    log.LogDebug("[DuckDuckGo] Getting vqd token...")
+    html = _fetch(search_url, deadline, DDG_HEADERS)
 
-    # Extract vqd token - multiple patterns
     vqd = None
-    vqd_patterns = [
-        r'vqd="([^"]+)"',
-        r"vqd='([^']+)'",
-        r'vqd=([0-9a-zA-Z_-]+)',
-        r'"vqd":"([^"]+)"',
-    ]
-    for pattern in vqd_patterns:
+    for pattern in DDG_VQD_PATTERNS:
         match = re.search(pattern, html)
         if match:
             vqd = match.group(1)
             break
-
     if not vqd:
-        log.LogWarning("[DuckDuckGo] Could not extract vqd token, trying HTML scraping")
-        # Fallback: scrape images directly from HTML
-        img_pattern = r'"image":"(https?://[^"]+)"'
-        thumb_pattern = r'"thumbnail":"(https?://[^"]+)"'
-
-        images_found = re.findall(img_pattern, html)
-        thumbs_found = re.findall(thumb_pattern, html)
-
-        for i, img_url in enumerate(images_found[:max_results]):
-            thumb_url = thumbs_found[i] if i < len(thumbs_found) else img_url
-            img_url = img_url.replace("\\u002F", "/").replace("\\/", "/")
-            thumb_url = thumb_url.replace("\\u002F", "/").replace("\\/", "/")
-
-            results.append({
-                "thumbnail": thumb_url,
-                "image": img_url,
-                "title": query,
-                "source": "DuckDuckGo",
-                "width": 0,
-                "height": 0,
-            })
-
-        if not results:
-            # No token is how DDG turns away a search it is rate-limiting
-            raise SourceBlocked("DuckDuckGo did not return a search token; it may be rate-limiting this address")
-        log.LogInfo(f"[DuckDuckGo] Found {len(results)} images via HTML scraping")
-        return SourceResult(results)
-
+        raise SourceBlocked("DuckDuckGo did not return a search token")
     log.LogDebug(f"[DuckDuckGo] Got vqd token: {vqd[:20]}...")
 
-    # Step 2: Query the image API
     size_map = {"Large": "Large", "Medium": "Medium", "Small": "Small", "All": ""}
     layout_map = {"Portrait": "Tall", "Landscape": "Wide", "Square": "Square", "All": ""}
-
     filters = []
     if size_map.get(size):
         filters.append(f"size:{size_map[size]}")
     if layout_map.get(layout):
         filters.append(f"aspectratio:{layout_map[layout]}")
-    filter_str = ",".join(filters) if filters else ""
 
     image_params = {
         "l": "us-en",
         "o": "json",
         "q": query,
         "vqd": vqd,
-        "f": filter_str + ",,,",
+        "f": ",".join(filters) + ",,,",
         "p": "-1",  # SafeSearch off (-1 = off, 1 = moderate)
         "s": "0",
     }
-
     api_url = "https://duckduckgo.com/i.js?" + urllib.parse.urlencode(image_params)
-    log.LogDebug(f"[DuckDuckGo] Fetching images from API...")
-
-    # Update headers for API request
     api_headers = {
-        **headers,
+        **DDG_HEADERS,
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Referer": search_url,
         "X-Requested-With": "XMLHttpRequest",
     }
-
+    log.LogDebug("[DuckDuckGo] Fetching images from API...")
     data = _fetch(api_url, deadline, api_headers)
 
-    # Parse JSON response
     try:
-        json_data = json.loads(data)
-        images = json_data.get("results", [])
-        log.LogDebug(f"[DuckDuckGo] Got {len(images)} results from API")
-    except json.JSONDecodeError:
-        log.LogDebug("[DuckDuckGo] JSON parse failed, trying regex extraction")
-        pattern = r'"image"\s*:\s*"([^"]+)"'
-        thumb_pat = r'"thumbnail"\s*:\s*"([^"]+)"'
-        title_pat = r'"title"\s*:\s*"([^"]*)"'
+        images = json.loads(data).get("results", [])
+    except (json.JSONDecodeError, AttributeError):
+        raise SourceBlocked("DuckDuckGo did not return image data") from None
+    log.LogDebug(f"[DuckDuckGo] Got {len(images)} results from API")
+    return images
 
-        img_matches = re.findall(pattern, data)
-        thumb_matches = re.findall(thumb_pat, data)
-        title_matches = re.findall(title_pat, data)
 
-        images = []
-        for i, img in enumerate(img_matches):
-            images.append({
-                "image": img,
-                "thumbnail": thumb_matches[i] if i < len(thumb_matches) else img,
-                "title": title_matches[i] if i < len(title_matches) else "",
-            })
-        log.LogDebug(f"[DuckDuckGo] Regex found {len(images)} images")
+def search_duckduckgo_images(query, size="Large", layout="All", max_results=50, deadline=None):
+    """
+    Search DuckDuckGo Images with safe search off.
+    DDG requires a two-step process: get a vqd token, then query /i.js.
+    A blocked attempt is retried once, with a fresh token, after
+    DDG_RETRY_WAIT_SECONDS; a second one raises SourceBlocked.
+    """
+    deadline = _default_deadline(deadline)
+    log.LogDebug(f"[DuckDuckGo] Query: {query}, size: {size}, layout: {layout}")
 
+    try:
+        images = _duckduckgo_images_once(query, size, layout, deadline)
+    except SourceBlocked as first:
+        log.LogWarning(f"[DuckDuckGo] {first}; retrying in {DDG_RETRY_WAIT_SECONDS}s")
+        time.sleep(DDG_RETRY_WAIT_SECONDS)
+        try:
+            images = _duckduckgo_images_once(query, size, layout, deadline)
+        except SourceBlocked:
+            raise SourceBlocked(DDG_RATE_LIMITED) from None
+
+    results = []
     for img in images[:max_results]:
         img_url = img.get("image", "")
         thumb_url = img.get("thumbnail", "")
@@ -999,43 +947,6 @@ def search_duckduckgo_images(query, size="Large", layout="All", max_results=50, 
     return SourceResult(results)
 
 
-def _is_small_image_url(img_url, min_size=300):
-    """
-    Check if an image URL indicates a small/thumbnail image.
-    Returns True if the image should be skipped.
-    """
-    lower_url = img_url.lower()
-
-    # Skip common thumbnail/icon patterns
-    if '_tn.' in lower_url or '/tn/' in lower_url:
-        return True
-    if 'favico' in lower_url or 'icon' in lower_url or 'logo' in lower_url:
-        return True
-    if '/thumb/' in lower_url or '_thumb' in lower_url:
-        return True
-    # Skip UI elements, tiles, backgrounds
-    if 'tile_' in lower_url or 'bg_' in lower_url or 'bg__' in lower_url:
-        return True
-    if 'ageconfirm' in lower_url or 'placeholder' in lower_url:
-        return True
-
-    # Check for dimension patterns in URL (e.g., 32x32, 57x57, 200x300)
-    size_match = re.search(r'(\d+)x(\d+)', img_url)
-    if size_match:
-        w, h = int(size_match.group(1)), int(size_match.group(2))
-        if w < min_size or h < min_size:
-            return True
-
-    # Check for small dimension in path (e.g., /460/, /200/)
-    dim_match = re.search(r'/(\d{2,3})/', img_url)
-    if dim_match:
-        dim = int(dim_match.group(1))
-        if dim < min_size:
-            return True
-
-    return False
-
-
 def _run_scraper(source, name, query, size_filter, layout_filter, deadline):
     """Call the scraper for source. Returns its SourceResult, or None for an unknown source."""
     if source == "babepedia":
@@ -1052,10 +963,6 @@ def _run_scraper(source, name, query, size_filter, layout_filter, deadline):
         return search_javdatabase(name, 100, 5, deadline=deadline)
     if source == "duckduckgo":
         # Use the full query (with suffix) for DuckDuckGo
-        return search_duckduckgo_images(query, size_filter, layout_filter, 50, deadline=deadline)
-    if source == "bing":
-        # Legacy - kept for backwards compatibility but DuckDuckGo preferred
-        log.LogDebug("[Bing] Redirecting to DuckDuckGo (Bing deprecated)")
         return search_duckduckgo_images(query, size_filter, layout_filter, 50, deadline=deadline)
     return None
 
@@ -1133,50 +1040,15 @@ def search_single_source(source, name, query, size_filter="All", layout_filter="
     return outcome
 
 
-def search_all_sources(name, query, size_filter="All", layout_filter="All"):
+def _reply(payload):
+    """Print the reply, flush, and end the process at once.
+
+    os._exit skips the interpreter's exit wait for abandoned gallery threads (stuck
+    in a socket read), so the reply is never held up past the source budget.
     """
-    Search all sources and combine results.
-    Prioritizes adult-specific sites, falls back to DuckDuckGo.
-    Returns ALL results at once (no pagination) since sources are finite.
-    Note: This is kept for backwards compatibility, but per-source searching
-    is now preferred for streaming results to the client.
-    """
-    all_results = []
-
-    # Extract just the performer name (remove search suffix like "pornstar nude")
-    performer_name = name.strip()
-
-    # Search adult-specific sites first (these have curated, relevant images)
-    log.LogInfo(f"Searching for performer: {performer_name}")
-
-    # 1. Babepedia - usually has good profile photos (up to 50)
-    # 2. PornPics - drills into galleries (up to 200 images from 20 galleries)
-    # 3. FreeOnes - drills into galleries (up to 200 images from 20 galleries)
-    # Each one's host check and time budget apply (see search_single_source)
-    for source in ("babepedia", "pornpics", "freeones"):
-        all_results.extend(search_single_source(source, performer_name, query)["results"])
-
-    # 4. DuckDuckGo as fallback if we didn't find much from adult sites
-    if len(all_results) < 20:
-        # Use the full query (with suffix) for DuckDuckGo, pass filters
-        ddg = search_single_source("duckduckgo", performer_name, query, size_filter, layout_filter)
-        all_results.extend(ddg["results"])
-
-    # Deduplicate by image URL
-    seen_urls = set()
-    unique_results = []
-    for result in all_results:
-        img_url = result.get("image", "")
-        if img_url and img_url not in seen_urls:
-            seen_urls.add(img_url)
-            unique_results.append(result)
-
-    log.LogInfo(f"Total unique images found: {len(unique_results)}")
-
-    # Note: Filtering is now done client-side for performance
-    # Backend returns all results, client filters after thumbnails load
-
-    return unique_results
+    print(json.dumps(payload))
+    sys.stdout.flush()
+    os._exit(0)
 
 
 def main():
@@ -1185,8 +1057,7 @@ def main():
     try:
         input_data = json.loads(sys.stdin.read())
     except json.JSONDecodeError as e:
-        print(json.dumps({"error": f"Failed to parse input: {e}"}))
-        return
+        return _reply({"error": f"Failed to parse input: {e}"})
 
     args = input_data.get("args", {})
     mode = args.get("mode", "search")
@@ -1194,13 +1065,15 @@ def main():
     log.LogDebug(f"Plugin called with mode: {mode}, args: {args}")
 
     if mode != "search":
-        print(json.dumps({"error": f"Unknown mode: {mode}"}))
-        return
+        return _reply({"error": f"Unknown mode: {mode}"})
 
     query = args.get("query", "")
     if not query:
-        print(json.dumps({"error": "No search query provided"}))
-        return
+        return _reply({"error": "No search query provided"})
+
+    source = args.get("source")
+    if not source:
+        return _reply({"error": "source is required"})
 
     # Use explicit performer name if provided, otherwise extract from query
     performer_name = args.get("performerName", "").strip()
@@ -1212,42 +1085,17 @@ def main():
                 performer_name = performer_name[:-len(suffix)]
                 break
 
-    # Get filter options from args
-    size_filter = args.get("size", "All")
-    layout_filter = args.get("layout", "All")
-
-    # Check if searching a specific source (for streaming)
-    source = args.get("source", None)
-
     log.LogInfo(f"Searching for: {performer_name} (query={query}, source={source})")
 
     try:
-        if source:
-            # Search single source (streaming mode): results, status, and error
-            # and warnings when there are any
-            outcome = search_single_source(
-                source=source,
-                name=performer_name,
-                query=query,
-                size_filter=size_filter,
-                layout_filter=layout_filter
-            )
-            output = {"output": {**outcome, "query": query, "source": source}}
-        else:
-            # Search all sources (legacy mode)
-            results = search_all_sources(
-                name=performer_name,
-                query=query,
-                size_filter=size_filter,
-                layout_filter=layout_filter
-            )
-            output = {
-                "output": {
-                    "results": results,
-                    "query": query,
-                    "source": source
-                }
-            }
+        outcome = search_single_source(
+            source=source,
+            name=performer_name,
+            query=query,
+            size_filter=args.get("size", "All"),
+            layout_filter=args.get("layout", "All"),
+        )
+        output = {"output": {**outcome, "query": query, "source": source}}
     except Exception as e:
         log.LogError(f"Search failed: {e}")
         output = {
@@ -1256,11 +1104,11 @@ def main():
                 "query": query,
                 "source": source,
                 "status": "error",
-                "error": str(e)
+                "error": str(e),
             }
         }
 
-    print(json.dumps(output))
+    _reply(output)
 
 
 if __name__ == "__main__":

@@ -627,8 +627,98 @@ def test_duckduckgo_fixture(web):
     assert (found[0]["width"], found[0]["height"]) == (1280, 1920)
 
 
-def test_duckduckgo_without_a_token_is_blocked(web):
+RATE_LIMITED = "DuckDuckGo rate-limited this search; try again later"
+
+
+@pytest.fixture
+def sleeps(monkeypatch):
+    """Records time.sleep calls instead of waiting."""
+    calls = []
+    monkeypatch.setattr(image_search.time, "sleep", calls.append)
+    return calls
+
+
+def ddg_sequence(web, token_pages, api_pages):
+    """Serve DuckDuckGo's token page and API with the n-th answer for the n-th request.
+
+    An answer that is an exception is raised.
+    """
+    counts = {"token": 0, "api": 0}
+
+    def route(url):
+        if url.startswith("https://duckduckgo.com/i.js?"):
+            kind, pages = "api", api_pages
+        elif url.startswith("https://duckduckgo.com/?"):
+            kind, pages = "token", token_pages
+        else:
+            return None
+        page = pages[min(counts[kind], len(pages) - 1)]
+        counts[kind] += 1
+        return page
+    web.fallback = route
+    return counts
+
+
+def ddg_kinds(web):
+    return ["api" if u.startswith("https://duckduckgo.com/i.js?") else "token" for u in web.urls()]
+
+
+def test_duckduckgo_without_a_token_retries_once_then_is_blocked(web, sleeps):
     ddg_routes(web, vqd_page="<html><body>Sorry</body></html>")
+    with pytest.raises(SourceBlocked, match=RATE_LIMITED):
+        image_search.search_duckduckgo_images("Jane Example pornstar")
+    assert sleeps == [2]
+    assert ddg_kinds(web) == ["token", "token"]
+
+
+def test_duckduckgo_retries_after_a_missing_token(web, sleeps):
+    ddg_sequence(web, ["<html>Sorry</html>", fixture("duckduckgo_vqd.html")], [fixture("duckduckgo.json")])
+    found = image_search.search_duckduckgo_images("Jane Example pornstar")
+    assert len(found) == 2
+    assert sleeps == [2]
+    assert ddg_kinds(web) == ["token", "token", "api"]
+
+
+def test_duckduckgo_retries_after_a_403_on_the_token_page(web, sleeps):
+    ddg_sequence(web, [SourceBlocked("duckduckgo.com blocked the request (HTTP 403)"), fixture("duckduckgo_vqd.html")],
+                 [fixture("duckduckgo.json")])
+    assert len(image_search.search_duckduckgo_images("Jane Example pornstar")) == 2
+    assert sleeps == [2]
+
+
+def test_duckduckgo_403_on_the_api_gets_a_fresh_token_and_one_retry(web, sleeps):
+    ddg_sequence(web, [fixture("duckduckgo_vqd.html")],
+                 [SourceBlocked("duckduckgo.com blocked the request (HTTP 403)"), fixture("duckduckgo.json")])
+    assert len(image_search.search_duckduckgo_images("Jane Example pornstar")) == 2
+    assert sleeps == [2]
+    assert ddg_kinds(web) == ["token", "api", "token", "api"]
+
+
+def test_duckduckgo_a_second_403_is_rate_limited(web, sleeps):
+    ddg_sequence(web, [fixture("duckduckgo_vqd.html")], [SourceBlocked("HTTP 403")])
+    with pytest.raises(SourceBlocked, match=RATE_LIMITED):
+        image_search.search_duckduckgo_images("Jane Example pornstar")
+    assert sleeps == [2]
+    assert ddg_kinds(web) == ["token", "api", "token", "api"]
+
+
+def test_duckduckgo_does_not_retry_a_timeout(web, sleeps):
+    ddg_sequence(web, [SourceTimeout("duckduckgo.com did not answer in time")], [""])
+    with pytest.raises(SourceTimeout):
+        image_search.search_duckduckgo_images("Jane Example pornstar")
+    assert sleeps == []
+    assert ddg_kinds(web) == ["token"]
+
+
+def test_duckduckgo_unreadable_reply_is_blocked_not_scraped(web, sleeps):
+    ddg_routes(web, api="<html>not json \"image\":\"https://x.example/a.jpg\"</html>")
+    with pytest.raises(SourceBlocked, match=RATE_LIMITED):
+        image_search.search_duckduckgo_images("Jane Example pornstar")
+
+
+def test_duckduckgo_html_page_images_are_not_scraped(web, sleeps):
+    page = '<html>"image":"https://x.example/a.jpg","thumbnail":"https://x.example/t.jpg"</html>'
+    ddg_routes(web, vqd_page=page)
     with pytest.raises(SourceBlocked):
         image_search.search_duckduckgo_images("Jane Example pornstar")
 
@@ -935,17 +1025,33 @@ def test_warnings_are_combined(web, monkeypatch):
 # main(): the reply the current UI reads
 # ---------------------------------------------------------------------------
 
-def run_main(monkeypatch, capsys, args):
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"args": args})))
-    image_search.main()
-    return json.loads(capsys.readouterr().out)
+class Exited(BaseException):
+    pass
+
+
+def run_main(monkeypatch, capsys, payload):
+    """Run main() with payload as stdin. Returns (parsed stdout, exit code or None)."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload if isinstance(payload, str) else json.dumps(payload)))
+    codes = []
+
+    def fake_exit(code):
+        codes.append(code)
+        raise Exited
+
+    monkeypatch.setattr(image_search.os, "_exit", fake_exit)
+    try:
+        image_search.main()
+    except Exited:
+        pass
+    out = capsys.readouterr().out
+    return json.loads(out), (codes[0] if codes else None)
 
 
 def test_main_reply_shape(web, monkeypatch, capsys):
     web.routes[BABEPEDIA_URL] = fixture("babepedia.html")
-    reply = run_main(monkeypatch, capsys, {
+    reply, _ = run_main(monkeypatch, capsys, {"args": {
         "mode": "search", "query": "Jane Example pornstar", "performerName": NAME, "source": "babepedia",
-    })
+    }})
     output = reply["output"]
     assert output["query"] == "Jane Example pornstar"
     assert output["source"] == "babepedia"
@@ -956,9 +1062,117 @@ def test_main_reply_shape(web, monkeypatch, capsys):
 
 def test_main_reply_carries_the_source_error(web, monkeypatch, capsys):
     web.routes[BABEPEDIA_URL] = SourceBlocked("www.babepedia.com blocked the request (HTTP 403)")
-    reply = run_main(monkeypatch, capsys, {
+    reply, _ = run_main(monkeypatch, capsys, {"args": {
         "mode": "search", "query": NAME, "performerName": NAME, "source": "babepedia",
-    })
+    }})
     assert reply["output"]["status"] == "blocked"
     assert reply["output"]["error"] == "www.babepedia.com blocked the request (HTTP 403)"
     assert reply["output"]["results"] == []
+
+
+# ---------------------------------------------------------------------------
+# main(): the plugin's stdin/stdout contract, and dead code
+# ---------------------------------------------------------------------------
+
+def search_args(**over):
+    args = {"mode": "search", "query": "Jane Example pornstar", "performerName": NAME, "source": "babepedia"}
+    args.update(over)
+    return {"args": {k: v for k, v in args.items() if v is not None}}
+
+
+def test_main_prints_the_source_outcome(web, monkeypatch, capsys):
+    web.routes[BABEPEDIA_URL] = fixture("babepedia.html")
+    reply, code = run_main(monkeypatch, capsys, search_args())
+    out = reply["output"]
+    assert out["status"] == "ok" and out["results"]
+    assert out["query"] == "Jane Example pornstar" and out["source"] == "babepedia"
+    assert code == 0
+
+
+def test_main_without_a_source_needs_one(monkeypatch, capsys):
+    reply, code = run_main(monkeypatch, capsys, search_args(source=None))
+    assert reply == {"error": "source is required"}
+    assert code == 0
+
+
+def test_main_unknown_mode_and_missing_query(monkeypatch, capsys):
+    reply, _ = run_main(monkeypatch, capsys, search_args(mode="frobnicate"))
+    assert "error" in reply and "output" not in reply
+    reply, _ = run_main(monkeypatch, capsys, search_args(query=""))
+    assert "error" in reply and "output" not in reply
+    reply, _ = run_main(monkeypatch, capsys, "not json")
+    assert "error" in reply
+
+
+def test_main_exception_becomes_an_error_outcome(monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("kaboom")
+    monkeypatch.setattr(image_search, "search_single_source", boom)
+    reply, code = run_main(monkeypatch, capsys, search_args())
+    out = reply["output"]
+    assert out["status"] == "error" and "kaboom" in out["error"] and out["results"] == []
+    assert out["source"] == "babepedia" and out["query"] == "Jane Example pornstar"
+    assert code == 0
+
+
+def test_bing_is_no_longer_a_source(web):
+    outcome = image_search.search_single_source("bing", NAME, "Jane Example pornstar")
+    assert outcome["status"] == "error" and outcome["error"] == "Unknown source"
+    assert web.requests == []
+
+
+REMOVED_NAMES = [
+    "SIZE_THRESHOLDS", "ASPECT_THRESHOLDS", "normalize_name_for_url", "get_image_dimensions",
+    "filter_by_size_and_layout", "_is_small_image_url", "search_all_sources",
+]
+
+
+@pytest.mark.parametrize("name", REMOVED_NAMES)
+def test_removed_names_have_no_references(name):
+    assert not hasattr(image_search, name)
+    for filename in ("image_search.py", "test_image_search.py", "test_image_hosts.py", "performerImageSearch.yml"):
+        with open(os.path.join(PLUGIN_DIR, filename), encoding="utf-8") as f:
+            assert name not in f.read(), f"{name} still in {filename}"
+
+
+def test_duckduckgo_description_in_the_manifest():
+    with open(os.path.join(PLUGIN_DIR, "performerImageSearch.yml"), encoding="utf-8") as f:
+        text = f.read()
+    assert "description: Web image search with SafeSearch off. It often gets rate-limited, so it is off by default." in text
+
+
+HANG_SCRIPT = r"""
+import json, sys, time
+sys.path.insert(0, {plugin_dir!r})
+import image_search
+from image_search import SourceNotFound
+
+def fetch(url, deadline, headers=None):
+    if url == {index_url!r}:
+        return open({index_file!r}, encoding="utf-8").read()
+    time.sleep(3600)  # every gallery never answers
+
+image_search._fetch = fetch
+image_search.SOURCE_BUDGET_SECONDS = {budget}
+image_search.main()
+"""
+
+
+def test_main_replies_and_exits_while_a_gallery_thread_is_stuck():
+    """Without os._exit, a gallery thread stuck in a socket read holds the process open
+    (concurrent.futures joins its workers at exit) long past the source budget."""
+    import subprocess
+    budget = 2
+    script = HANG_SCRIPT.format(
+        plugin_dir=PLUGIN_DIR, index_url=PORNPICS_INDEX_URL,
+        index_file=os.path.join(FIXTURES, "pornpics_index.html"), budget=budget)
+    payload = json.dumps(search_args(source="pornpics"))
+    started = time.monotonic()
+    proc = subprocess.run([sys.executable, "-c", script], input=payload, capture_output=True,
+                          text=True, timeout=budget + 10)
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0, proc.stderr
+    assert elapsed < budget + 5
+    out = json.loads(proc.stdout)["output"]
+    assert out["source"] == "pornpics"
+    assert out["status"] in ("timeout", "error", "partial", "empty")

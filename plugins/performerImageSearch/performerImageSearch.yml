@@ -49,7 +49,7 @@ settings:
     type: BOOLEAN
   enableDuckDuckGo:
     displayName: Enable DuckDuckGo Images
-    description: Fallback search with SafeSearch off. Works for all performer types. Enabled by default.
+    description: Web image search with SafeSearch off. It often gets rate-limited, so it is off by default.
     type: BOOLEAN
 
 # Python backend for image search (called via runPluginOperation from JS)

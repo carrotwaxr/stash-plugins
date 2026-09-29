@@ -12,7 +12,6 @@ Tests verify:
 """
 
 import sys
-import re
 
 # Import the module to test
 import image_search
