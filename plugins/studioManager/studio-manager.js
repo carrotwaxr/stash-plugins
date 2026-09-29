@@ -326,6 +326,56 @@
   }
 
   /**
+   * Parent map of the server state, with the edit snapshot when one exists.
+   */
+  function baseParentMap() {
+    if (originalParentMap.size > 0) return originalParentMap;
+    const base = new Map();
+    for (const studio of hierarchyStudios) {
+      base.set(studio.id, studio.parent_studio?.id || null);
+    }
+    return base;
+  }
+
+  /**
+   * The displayed studios: copies of hierarchyStudios (the server state, never
+   * mutated by edits) with parent_studio and child_studios taken from the
+   * effective parent map (original parents plus pending changes).
+   */
+  function derivedStudios() {
+    const effective = effectiveParentMap(baseParentMap(), pendingChanges);
+    const byId = new Map(hierarchyStudios.map(s => [s.id, s]));
+    const kids = new Map();
+    for (const studio of hierarchyStudios) {
+      const pid = effective.get(studio.id);
+      if (pid && byId.has(pid)) {
+        if (!kids.has(pid)) kids.set(pid, []);
+        kids.get(pid).push({ id: studio.id, name: studio.name });
+      }
+    }
+    return hierarchyStudios.map(studio => {
+      const pid = effective.get(studio.id);
+      const parent = pid ? byId.get(pid) : null;
+      return {
+        ...studio,
+        parent_studio: pid ? { ...(studio.parent_studio || {}), id: pid, name: parent ? parent.name : studio.parent_studio?.name } : null,
+        child_studios: kids.get(studio.id) || []
+      };
+    });
+  }
+
+  /**
+   * Recompute the tree and stats from the derived studios; re-render if the page is mounted.
+   */
+  function refreshView() {
+    const studios = derivedStudios();
+    hierarchyTree = buildStudioTree(studios);
+    hierarchyStats = getTreeStats(studios);
+    const container = document.querySelector('.studio-hierarchy-container');
+    if (container) renderHierarchyPage(container);
+  }
+
+  /**
    * Calculate hierarchy statistics
    */
   function getTreeStats(studios) {
@@ -409,7 +459,7 @@
     hideContextMenu();
     contextMenuStudioId = studioId;
 
-    const studio = hierarchyStudios.find(s => s.id === studioId);
+    const studio = derivedStudios().find(s => s.id === studioId);
     if (!studio) return;
 
     const hasParent = !!studio.parent_studio?.id;
@@ -543,59 +593,37 @@
   }
 
   /**
-   * Add a pending change
+   * Add a pending change. A change that returns a studio to its original parent
+   * just drops its pending entry.
    */
   function addPendingChange(type, studioId, studioName, parentId, parentName) {
     enterEditMode();
 
-    // Check if this change cancels out an existing one
-    const existingIndex = pendingChanges.findIndex(c =>
-      c.studioId === studioId &&
-      ((c.type === 'set-parent' && type === 'remove-parent') ||
-       (c.type === 'remove-parent' && type === 'set-parent'))
-    );
+    // Replace any existing change for this studio
+    pendingChanges = pendingChanges.filter(c => c.studioId !== studioId);
 
-    if (existingIndex >= 0) {
-      // Check if this returns to original state
-      const originalParent = originalParentMap.get(studioId);
-      if ((type === 'set-parent' && parentId === originalParent) ||
-          (type === 'remove-parent' && originalParent === null)) {
-        pendingChanges.splice(existingIndex, 1);
-        renderChangesPanel();
-        return;
-      }
+    const originalParent = originalParentMap.get(studioId) || null;
+    const target = type === 'set-parent' ? parentId : null;
+    if (target !== originalParent) {
+      pendingChanges.push({ type, studioId, studioName, parentId, parentName });
     }
-
-    // Remove any existing change for this studio
-    const existingChangeIndex = pendingChanges.findIndex(c => c.studioId === studioId);
-    if (existingChangeIndex >= 0) {
-      pendingChanges.splice(existingChangeIndex, 1);
-    }
-
-    // Check if this is actually a change from original
-    const originalParent = originalParentMap.get(studioId);
-    if (type === 'set-parent' && parentId === originalParent) {
-      renderChangesPanel();
-      return; // No actual change
-    }
-    if (type === 'remove-parent' && originalParent === null) {
-      renderChangesPanel();
-      return; // Already a root
-    }
-
-    pendingChanges.push({
-      type,
-      studioId,
-      studioName,
-      parentId,
-      parentName
-    });
 
     renderChangesPanel();
   }
 
   /**
-   * Remove a pending change by index
+   * Leave edit mode and forget pending changes (no refetch: the server state is intact)
+   */
+  function cancelPendingChanges() {
+    pendingChanges = [];
+    isEditMode = false;
+    originalParentMap.clear();
+    renderChangesPanel();
+    refreshView();
+  }
+
+  /**
+   * Remove a pending change by index; the others stay applied
    */
   function removePendingChange(index) {
     pendingChanges.splice(index, 1);
@@ -604,12 +632,7 @@
       originalParentMap.clear();
     }
     renderChangesPanel();
-
-    // Re-render tree to reflect removed change
-    const container = document.querySelector('.studio-hierarchy-container');
-    if (container) {
-      reloadHierarchy(container);
-    }
+    refreshView();
   }
 
   /**
@@ -663,15 +686,7 @@
     });
 
     panel.querySelector('#sh-cancel-changes')?.addEventListener('click', () => {
-      pendingChanges = [];
-      isEditMode = false;
-      originalParentMap.clear();
-      renderChangesPanel();
-
-      const container = document.querySelector('.studio-hierarchy-container');
-      if (container) {
-        reloadHierarchy(container);
-      }
+      cancelPendingChanges();
     });
 
     panel.querySelector('#sh-save-changes')?.addEventListener('click', savePendingChanges);
@@ -759,21 +774,17 @@
     addPendingChange('set-parent', studioId, studio.name, newParentId, parent.name);
     showToast(`Will set "${studio.name}" parent to "${parent.name}"`);
 
-    // Update local state for immediate visual feedback
-    studio.parent_studio = { id: newParentId };
-    hierarchyTree = buildStudioTree(hierarchyStudios);
-
-    const container = document.querySelector('.studio-hierarchy-container');
-    if (container) {
-      renderHierarchyPage(container);
-    }
+    // Make the moved studio visible: expand every ancestor in the edited tree
+    const effective = effectiveParentMap(baseParentMap(), pendingChanges);
+    for (const id of ancestorsOf(studioId, effective)) expandedNodes.add(id);
+    refreshView();
   }
 
   /**
    * Remove a studio's parent (make it a root studio)
    */
   function removeParent(studioId) {
-    const studio = hierarchyStudios.find(s => s.id === studioId);
+    const studio = derivedStudios().find(s => s.id === studioId);
 
     if (!studio) {
       showToast('Studio not found', 'error');
@@ -788,14 +799,7 @@
     addPendingChange('remove-parent', studioId, studio.name, null, null);
     showToast(`Will remove parent from "${studio.name}"`);
 
-    // Update local state for immediate visual feedback
-    studio.parent_studio = null;
-    hierarchyTree = buildStudioTree(hierarchyStudios);
-
-    const container = document.querySelector('.studio-hierarchy-container');
-    if (container) {
-      renderHierarchyPage(container);
-    }
+    refreshView();
   }
 
   /**
@@ -1266,6 +1270,8 @@
     window.__STUDIO_MANAGER_TEST__.exports = {
       effectiveParentMap, ancestorsOf, wouldCreateCycle, findCycleMembers,
       buildStudioTree, orderForSave, wouldCreateCircularRef, getTreeStats,
+      derivedStudios, addPendingChange, removePendingChange, cancelPendingChanges,
+      setParent, removeParent, renderChangesPanel, showContextMenu,
     };
     window.__STUDIO_MANAGER_TEST__.getState = () => ({
       hierarchyStudios, hierarchyTree, hierarchyStats, expandedNodes, selectedStudioId,
