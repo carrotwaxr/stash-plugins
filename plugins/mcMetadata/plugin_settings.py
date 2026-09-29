@@ -55,7 +55,7 @@ def map_settings(plugin_config):
         "nfo_skip_existing": plugin_config.get("nfoSkipExisting", False),
         "nfo_exclude_fields": [
             f.strip().lower()
-            for f in plugin_config.get("nfoExcludeFields", "").split(",")
+            for f in (plugin_config.get("nfoExcludeFields") or "").split(",")
             if f.strip()
         ],
         # Actor images

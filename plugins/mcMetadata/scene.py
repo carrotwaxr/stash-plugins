@@ -454,9 +454,10 @@ def __write_nfo(scene, filepath, settings, video_path=None):
                 log.info(f"[DRY RUN] Would create NFO: {filepath}")
             return
 
+        existed = os.path.exists(filepath)
         with open(filepath, "w", encoding="utf-8-sig") as f:
             f.write(nfo_xml)
-        log.info(f"{'Updated' if os.path.exists(filepath) else 'Created'} NFO file: {filepath}")
+        log.info(f"{'Updated' if existed else 'Created'} NFO file: {filepath}")
 
     except IOError as err:
         log.error(f"Error writing NFO file {filepath}: {err}")

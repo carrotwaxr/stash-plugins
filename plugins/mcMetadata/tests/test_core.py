@@ -113,14 +113,6 @@ class TestNFO(unittest.TestCase):
     <title>someFile.mp4</title>
     <originaltitle>someFile.mp4</originaltitle>
     <sorttitle>someFile.mp4</sorttitle>
-    <criticrating></criticrating>
-    <rating></rating>
-    <userrating></userrating>
-    <plot><![CDATA[]]></plot>
-    <premiered></premiered>
-    <releasedate></releasedate>
-    <year></year>
-    <studio></studio>
     <genre>Adult</genre>
     <uniqueid type="stash">1337</uniqueid>
 </movie>""",

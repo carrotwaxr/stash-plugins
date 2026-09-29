@@ -83,7 +83,7 @@ settings:
     type: BOOLEAN
   nfoExcludeFields:
     displayName: NFO Exclude Fields
-    description: "Comma-separated list of NFO fields to omit. Available: name, title, originaltitle, sorttitle, criticrating, rating, userrating, plot, premiered, releasedate, year, studio, uniqueid, genre. Leave empty to include all fields."
+    description: "Comma-separated list of NFO fields to omit. Available: name, title, originaltitle, sorttitle, criticrating, rating, userrating, plot, premiered, releasedate, year, studio, uniqueid, genre, thumb (or poster), actor, tag. Unknown names are ignored with a warning. Leave empty to include all fields."
     type: STRING
   enableActorImages:
     displayName: Enable Actor Images

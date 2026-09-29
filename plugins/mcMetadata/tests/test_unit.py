@@ -151,15 +151,15 @@ class TestBuildNfoXml(unittest.TestCase):
         self.mock_scene["studio"] = None
         nfo = build_nfo_xml(self.mock_scene)
 
-        self.assertIn("<studio></studio>", nfo)
+        self.assertNotIn("<studio", nfo)
 
     def test_nfo_handles_missing_date(self):
-        """Missing date should produce empty fields."""
+        """Missing date omits the date elements."""
         self.mock_scene["date"] = None
         nfo = build_nfo_xml(self.mock_scene)
 
-        self.assertIn("<premiered></premiered>", nfo)
-        self.assertIn("<year></year>", nfo)
+        self.assertNotIn("<premiered", nfo)
+        self.assertNotIn("<year", nfo)
 
     def test_nfo_handles_no_performers(self):
         """No performers should not crash."""

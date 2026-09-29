@@ -1,5 +1,25 @@
 import os
+import re
 from xml.sax.saxutils import escape
+
+import utils.logger as log
+
+# Characters XML 1.0 does not allow: C0 controls except tab/LF/CR, surrogates, U+FFFE/U+FFFF
+_XML_ILLEGAL = re.compile("[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+# Keys accepted in nfoExcludeFields. thumb/poster are aliases for the poster <thumb>.
+EXCLUDABLE_FIELDS = frozenset({
+    "name", "title", "originaltitle", "sorttitle", "criticrating", "rating", "userrating",
+    "plot", "premiered", "releasedate", "year", "studio", "genre", "uniqueid",
+    "thumb", "poster", "actor", "tag",
+})
+
+
+def xml_safe(text):
+    """Remove characters outside XML 1.0's allowed set (None becomes "")."""
+    if text is None:
+        return ""
+    return _XML_ILLEGAL.sub("", str(text))
 
 
 def escape_xml(text):
@@ -15,7 +35,7 @@ def escape_xml(text):
     """
     if text is None:
         return ""
-    return escape(str(text), {'"': '&quot;', "'": '&apos;'})
+    return escape(xml_safe(text), {'"': '&quot;', "'": '&apos;'})
 
 
 def _get_actor_thumb_path(performer_name, settings):
@@ -54,16 +74,21 @@ def build_nfo_xml(scene, settings=None, video_path=None):
     """
     exclude = set()
     if settings:
-        exclude = set(settings.get("nfo_exclude_fields") or [])
+        exclude = {str(f).strip().lower() for f in (settings.get("nfo_exclude_fields") or [])}
+        unknown = sorted(exclude - EXCLUDABLE_FIELDS)
+        if unknown:
+            log.warning(
+                f"Ignoring unknown nfoExcludeFields: {', '.join(unknown)}. "
+                f"Valid: {', '.join(sorted(EXCLUDABLE_FIELDS))}"
+            )
 
     id = scene["id"]
-    details = scene["details"] or ""
+    details = xml_safe(scene["details"]).strip()
 
-    title = ""
-    if scene["title"] is not None and scene["title"] != "":
-        title = escape_xml(scene["title"])
-    else:
-        title = escape_xml(os.path.basename(os.path.normpath(scene["files"][0]["path"])))
+    title = xml_safe(scene["title"]).strip()
+    if not title:
+        title = os.path.basename(os.path.normpath(scene["files"][0]["path"]))
+    title = escape_xml(title)
 
     custom_rating = ""
     rating = ""
@@ -73,44 +98,46 @@ def build_nfo_xml(scene, settings=None, video_path=None):
 
     date = ""
     year = ""
-    if scene["date"] is not None:
-        date = scene["date"]
-        year = scene["date"].split("-")[0]
+    if scene["date"]:
+        date = escape_xml(scene["date"]).strip()
+        year = date.split("-")[0]
 
     studio = ""
     if scene["studio"] is not None:
-        studio = escape_xml(scene["studio"]["name"])
+        studio = escape_xml(scene["studio"]["name"]).strip()
 
-    # Build XML lines, filtering excluded fields
+    # A CDATA section cannot contain "]]>": split it across two sections
+    plot_cdata = details.replace("]]>", "]]]]><![CDATA[>")
+
     lines = ['<?xml version="1.0" encoding="utf-8" standalone="yes"?>', '<movie>']
 
     field_lines = {
-        "name": f"    <name>{title}</name>",
-        "title": f"    <title>{title}</title>",
-        "originaltitle": f"    <originaltitle>{title}</originaltitle>",
-        "sorttitle": f"    <sorttitle>{title}</sorttitle>",
-        "criticrating": f"    <criticrating>{custom_rating}</criticrating>",
-        "rating": f"    <rating>{rating}</rating>",
-        "userrating": f"    <userrating>{rating}</userrating>",
-        "plot": f"    <plot><![CDATA[{details}]]></plot>",
-        "premiered": f"    <premiered>{date}</premiered>",
-        "releasedate": f"    <releasedate>{date}</releasedate>",
-        "year": f"    <year>{year}</year>",
-        "studio": f"    <studio>{studio}</studio>",
+        "name": ("title", f"    <name>{title}</name>"),
+        "title": ("title", f"    <title>{title}</title>"),
+        "originaltitle": ("title", f"    <originaltitle>{title}</originaltitle>"),
+        "sorttitle": ("title", f"    <sorttitle>{title}</sorttitle>"),
+        "criticrating": (custom_rating, f"    <criticrating>{custom_rating}</criticrating>"),
+        "rating": (rating, f"    <rating>{rating}</rating>"),
+        "userrating": (rating, f"    <userrating>{rating}</userrating>"),
+        "plot": (details, f"    <plot><![CDATA[{plot_cdata}]]></plot>"),
+        "premiered": (date, f"    <premiered>{date}</premiered>"),
+        "releasedate": (date, f"    <releasedate>{date}</releasedate>"),
+        "year": (year, f"    <year>{year}</year>"),
+        "studio": (studio, f"    <studio>{studio}</studio>"),
     }
 
-    for field_name, line in field_lines.items():
-        if field_name not in exclude:
+    for field_name, (value, line) in field_lines.items():
+        if field_name not in exclude and value != "":
             lines.append(line)
 
-    # Poster thumb (always included if video_path provided)
-    if video_path:
+    # Poster thumb (needs video_path)
+    if video_path and not exclude & {"thumb", "poster"}:
         base = os.path.splitext(os.path.basename(video_path))[0]
         poster_filename = f"{base}-poster.jpg"
         lines.append(f'    <thumb aspect="poster">{escape_xml(poster_filename)}</thumb>')
 
-    # Performers (always included)
-    for i, p in enumerate(scene["performers"]):
+    # Performers
+    for i, p in enumerate([] if "actor" in exclude else scene["performers"]):
         performer_name = escape_xml(p["name"])
         actor_thumb = ""
         actor_image_path = _get_actor_thumb_path(p["name"], settings)
@@ -124,15 +151,13 @@ def build_nfo_xml(scene, settings=None, video_path=None):
         <type>Actor</type>{actor_thumb}
     </actor>""")
 
-    # Genre (excludable)
     if "genre" not in exclude:
         lines.append("    <genre>Adult</genre>")
 
-    # Tags (always included)
-    for t in scene["tags"]:
-        lines.append(f"    <tag>{escape_xml(t['name'])}</tag>")
+    if "tag" not in exclude:
+        for t in scene["tags"]:
+            lines.append(f"    <tag>{escape_xml(t['name'])}</tag>")
 
-    # Unique ID (excludable)
     if "uniqueid" not in exclude:
         lines.append(f'    <uniqueid type="stash">{id}</uniqueid>')
 
