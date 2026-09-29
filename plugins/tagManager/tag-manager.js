@@ -1209,6 +1209,44 @@
   }
 
   /**
+   * F19: whether the Parent row (select, Search, Remember) is rendered in the diff dialog.
+   */
+  function shouldShowParentControls(settings, hasCategory) {
+    return !!hasCategory && !settings.leaveParentTagsAlone;
+  }
+
+  /**
+   * F4: options for the diff dialog's parent dropdown. Exactly one is selected.
+   * A saved mapping is offered (once) only if its tag still exists.
+   * Values: '' = no parent, '__create__' = create the category tag, otherwise a tag id.
+   *
+   * @returns {{value: string, label: string, selected: boolean}[]}
+   */
+  function buildParentOptions({ existingParents = [], parentMatches = [], savedMappingId, categoryName, localTags: tags = [] }) {
+    const saved = savedMappingId ? tags.find(t => t.id === savedMappingId) : null;
+    const savedId = saved ? saved.id : null;
+    const createLabel = `Create "${categoryName}"`;
+
+    let selectedValue;
+    if (savedId) selectedValue = savedId;
+    else if (existingParents.length) selectedValue = existingParents[0].id;
+    else if (parentMatches.length) selectedValue = parentMatches[0].tag.id;
+    else selectedValue = '__create__';
+
+    const opts = [];
+    const add = (value, label) => opts.push({ value, label, selected: value === selectedValue });
+    add('', '-- No parent --');
+    if (saved) add(saved.id, `${saved.name} (saved mapping)`);
+    existingParents.filter(p => p.id !== savedId).forEach(p => add(p.id, `${p.name} (current parent)`));
+    if (!existingParents.length && !parentMatches.length && !savedId) add('__create__', createLabel);
+    parentMatches
+      .filter(m => m.tag.id !== savedId && !existingParents.some(p => p.id === m.tag.id))
+      .forEach(m => add(m.tag.id, `${m.tag.name} (${m.matchType})`));
+    if (existingParents.length || parentMatches.length || savedId) add('__create__', createLabel);
+    return opts;
+  }
+
+  /**
    * Resolve parent tags for categories found among selected StashDB tags.
    * Returns: { categoryName: { parentTagId, parentTagName, resolution, description } }
    * resolution is one of: 'saved', 'exact', 'create'
@@ -2910,22 +2948,25 @@
     let parentMatches = [];
     const existingParents = tag.parents || [];
 
+    let parentOptions = [];
+    let savedMappingId = null;
+    const showParentControls = shouldShowParentControls(settings, hasCategory);
     if (hasCategory) {
-      // Check for saved mapping first
-      const savedMapping = categoryMappings[stashdbTag.category.name];
-      if (savedMapping) {
-        selectedParentId = savedMapping;
-      } else if (existingParents.length > 0) {
-        // Tag already has a parent - use it
-        selectedParentId = existingParents[0].id;
-        createParentIfMissing = false;
-      } else {
-        // Find local matches by category name
-        parentMatches = findLocalParentMatches(stashdbTag.category.name);
-        if (parentMatches.length > 0) {
-          selectedParentId = parentMatches[0].tag.id;
-        }
+      const categoryName = stashdbTag.category.name;
+      savedMappingId = categoryMappings[categoryName] || null;
+      if (savedMappingId && !localTags.some(t => t.id === savedMappingId)) {
+        // Stale mapping (tag deleted): drop it so it is not offered or re-saved
+        delete categoryMappings[categoryName];
+        savedMappingId = null;
+        Promise.resolve(saveCategoryMappings()).catch(e =>
+          console.warn('[tagManager] Failed to drop stale category mapping:', e));
       }
+      parentMatches = findLocalParentMatches(categoryName);
+      parentOptions = buildParentOptions({
+        existingParents, parentMatches, savedMappingId, categoryName, localTags,
+      });
+      const sel = parentOptions.find(o => o.selected);
+      selectedParentId = sel && sel.value !== '' ? sel.value : null;
     }
 
     // Helper function to render alias checkboxes for a column
@@ -3061,6 +3102,8 @@
               }
               select.value = tagId;
               selectedParentId = tagId;
+              const remember = modal.querySelector('#tm-remember-mapping');
+              if (remember) remember.checked = tagId !== savedMappingId;
             }
             searchModal.remove();
           });
@@ -3162,7 +3205,7 @@
                   </div>
                 </td>
               </tr>
-              ${hasCategory ? `
+              ${showParentControls ? `
               <tr>
                 <td>Parent Tag</td>
                 <td colspan="3">
@@ -3173,29 +3216,15 @@
                     </div>
                     <div class="tm-parent-select">
                       <select id="tm-parent-select" class="form-control">
-                        <option value="">-- No parent --</option>
-                        ${existingParents.map(p => `
-                          <option value="${p.id}" ${selectedParentId === p.id ? 'selected' : ''}>
-                            ${escapeHtml(p.name)} (current parent)
-                          </option>
+                        ${parentOptions.map(o => `
+                          <option value="${escapeHtml(o.value)}" ${o.selected ? 'selected' : ''}>${escapeHtml(o.label)}</option>
                         `).join('')}
-                        ${(!existingParents.length && !parentMatches.length) ? `
-                          <option value="__create__" selected>Create "${escapeHtml(stashdbTag.category.name)}"</option>
-                        ` : ''}
-                        ${parentMatches.filter(m => !existingParents.some(p => p.id === m.tag.id)).map(m => `
-                          <option value="${m.tag.id}" ${selectedParentId === m.tag.id ? 'selected' : ''}>
-                            ${escapeHtml(m.tag.name)} (${m.matchType})
-                          </option>
-                        `).join('')}
-                        ${(existingParents.length || parentMatches.length) ? `
-                          <option value="__create__">Create "${escapeHtml(stashdbTag.category.name)}"</option>
-                        ` : ''}
                       </select>
                       <button type="button" class="btn btn-secondary btn-sm" id="tm-parent-search-btn">Search...</button>
                     </div>
                     <div class="tm-parent-remember">
                       <label>
-                        <input type="checkbox" id="tm-remember-mapping" checked>
+                        <input type="checkbox" id="tm-remember-mapping" ${selectedParentId && selectedParentId === savedMappingId ? '' : 'checked'}>
                         Remember this mapping
                       </label>
                     </div>
@@ -3238,6 +3267,8 @@
       if (parentSelect) {
         parentSelect.addEventListener('change', (e) => {
           selectedParentId = e.target.value === '' ? null : e.target.value;
+          const remember = modal.querySelector('#tm-remember-mapping');
+          if (remember) remember.checked = selectedParentId !== savedMappingId;
         });
       }
 
@@ -5260,6 +5291,8 @@
       callBackend,
       formatBackendError,
       loadTagsFromCache,
+      buildParentOptions,
+      shouldShowParentControls,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,
