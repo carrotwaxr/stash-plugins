@@ -101,7 +101,7 @@ class TestBuildNfoXml(unittest.TestCase):
         self.assertIn("<name>John Smith</name>", nfo)
         self.assertIn("<tag>Tag1</tag>", nfo)
         self.assertIn("<tag>Tag2</tag>", nfo)
-        self.assertIn('<uniqueid type="stash">123</uniqueid>', nfo)
+        self.assertIn('<uniqueid type="stash" default="true">123</uniqueid>', nfo)
 
     def test_nfo_escapes_ampersand_in_title(self):
         """Ampersands in title should be escaped (Issue #9)."""
@@ -151,15 +151,15 @@ class TestBuildNfoXml(unittest.TestCase):
         self.mock_scene["studio"] = None
         nfo = build_nfo_xml(self.mock_scene)
 
-        self.assertIn("<studio></studio>", nfo)
+        self.assertNotIn("<studio", nfo)
 
     def test_nfo_handles_missing_date(self):
-        """Missing date should produce empty fields."""
+        """Missing date omits the date elements."""
         self.mock_scene["date"] = None
         nfo = build_nfo_xml(self.mock_scene)
 
-        self.assertIn("<premiered></premiered>", nfo)
-        self.assertIn("<year></year>", nfo)
+        self.assertNotIn("<premiered", nfo)
+        self.assertNotIn("<year", nfo)
 
     def test_nfo_handles_no_performers(self):
         """No performers should not crash."""
@@ -277,6 +277,50 @@ class TestPerformerImagePath(unittest.TestCase):
 
         path = get_actor_image_path("Jane Doe", settings)
         self.assertIsNone(path)
+
+
+    def _norm(self, path):
+        return path.replace("\\", "/") if path else path
+
+    def test_slash_in_name_is_one_component(self):
+        from performer import get_actor_image_path
+        base = "/metadata/People"
+        for server, expected in (
+            ("jellyfin", "/metadata/People/A/AC DC/folder.jpg"),
+            ("emby", "/metadata/People/AC DC/folder.jpg"),
+        ):
+            path = get_actor_image_path("AC/DC", {"media_server": server, "actor_metadata_path": base})
+            self.assertEqual(self._norm(path), expected)
+
+    def test_traversal_and_absolute_names_stay_under_base(self):
+        from performer import get_actor_image_path
+        base = "/metadata/People"
+        for server in ("jellyfin", "emby"):
+            for name in ("../../etc", "/abs", "..", "/etc/passwd"):
+                path = get_actor_image_path(name, {"media_server": server, "actor_metadata_path": base})
+                if path is not None:
+                    self.assertTrue(self._norm(path).startswith(base + "/"), (server, name, path))
+                    self.assertNotIn("..", self._norm(path).split("/"))
+
+    def test_leading_space_stripped(self):
+        from performer import get_actor_image_path
+        settings = {"media_server": "jellyfin", "actor_metadata_path": "/metadata/People"}
+        path = get_actor_image_path("  Jane Doe", settings)
+        self.assertEqual(self._norm(path), "/metadata/People/J/Jane Doe/folder.jpg")
+        settings["media_server"] = "emby"
+        path = get_actor_image_path(" Jane Doe", settings)
+        self.assertEqual(self._norm(path), "/metadata/People/Jane Doe/folder.jpg")
+
+    def test_media_server_case_insensitive(self):
+        from performer import get_actor_image_path
+        base = {"actor_metadata_path": "/metadata/People"}
+        self.assertEqual(
+            self._norm(get_actor_image_path("Jane Doe", {**base, "media_server": "Jellyfin"})),
+            "/metadata/People/J/Jane Doe/folder.jpg")
+        self.assertEqual(
+            self._norm(get_actor_image_path("Jane Doe", {**base, "media_server": "EMBY"})),
+            "/metadata/People/Jane Doe/folder.jpg")
+        self.assertIsNone(get_actor_image_path("Jane Doe", {**base, "media_server": "Plex"}))
 
 
 class TestNfoArtworkReferences(unittest.TestCase):
@@ -628,6 +672,38 @@ class TestHookTriggerMode(unittest.TestCase):
         settings = {}
         mode = settings.get("hook_trigger_mode", "always")
         self.assertEqual(mode, "always")
+
+
+class TestModuleImports(unittest.TestCase):
+    """scene.py uses only public helpers of the other modules, and imports nothing it doesn't use."""
+
+    def test_scene_imports_are_public_and_used(self):
+        import ast
+
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scene.py")
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        imported = {}
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    imported[alias.asname or alias.name] = node.module
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported[(alias.asname or alias.name).split(".")[0]] = alias.name
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        private = sorted(name for name in imported if name.startswith("_"))
+        unused = sorted(name for name in imported if name not in used)
+        self.assertEqual(private, [])
+        self.assertEqual(unused, [])
+
+    def test_nfo_helpers_are_public(self):
+        from utils import nfo
+
+        self.assertEqual(nfo.render_filename("{basename}-poster.jpg", "/x/My Video.mp4"), "My Video-poster.jpg")
+        self.assertEqual(nfo.count_videos("/nonexistent/folder"), 0)
+        for old_name in ("_render", "_count_videos"):
+            self.assertFalse(hasattr(nfo, old_name), old_name)
 
 
 if __name__ == "__main__":

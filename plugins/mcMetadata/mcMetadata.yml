@@ -1,7 +1,7 @@
 name: mcMetadata
 description: Generates NFO metadata files for Jellyfin/Emby/Plex, organizes/renames video files using customizable templates, and exports performer images to media server folders.
 url: https://github.com/carrotwaxr/stash-plugins/tree/main/plugins/mcMetadata
-version: 1.5.0
+version: 1.6.0
 exec:
   - python
   - "{pluginDir}/mcMetadata.py"
@@ -43,7 +43,7 @@ settings:
     type: STRING
   hookTriggerMode:
     displayName: Hook Trigger Mode (deprecated)
-    description: "DEPRECATED — use Organized Condition instead. Still honored for back-compat when Organized Condition is unset: 'on_organized' maps to require, 'always' maps to ignore."
+    description: "DEPRECATED. Use Organized Condition instead. Still honored for back-compat when Organized Condition is unset: 'on_organized' maps to require, 'always' maps to ignore."
     type: STRING
   enableRenamer:
     displayName: Enable File Renamer
@@ -73,21 +73,41 @@ settings:
     displayName: Multi-File Mode
     description: "How to handle scenes with multiple files: all (process all), primary_only (first file only), skip (skip multi-file scenes). Default is 'all'."
     type: STRING
+  renamerMoveSidecars:
+    displayName: Move Sidecar Files
+    description: Moves subtitles, funscripts, NFOs, posters and other files named like the video along with it; never overwrites. When OFF, only the NFO and poster move. Default is ON.
+    type: BOOLEAN
   nfoSkipExisting:
     displayName: Skip Existing NFO Files
     description: Don't overwrite NFO files that already exist. Default is OFF.
     type: BOOLEAN
   nfoExcludeFields:
     displayName: NFO Exclude Fields
-    description: "Comma-separated list of NFO fields to omit. Available: name, title, originaltitle, sorttitle, criticrating, rating, userrating, plot, premiered, releasedate, year, studio, uniqueid, genre. Leave empty to include all fields."
+    description: "Comma-separated list of NFO fields to omit. Available: name, title, originaltitle, sorttitle, criticrating, rating, userrating, plot, premiered, releasedate, year, studio, uniqueid, genre, thumb (or poster), actor, tag. Unknown names are ignored with a warning. Leave empty to include all fields."
+    type: STRING
+  nfoFilename:
+    displayName: NFO File Name
+    description: "Name of the NFO file. {basename} is the video file name without extension. Default {basename}.nfo. Use movie.nfo for Jellyfin folder-per-movie libraries. Names without {basename} (movie.nfo) are only written when the folder holds one video. Must end in .nfo and contain no slash."
+    type: STRING
+  posterFilename:
+    displayName: Poster File Name
+    description: "Name of the poster image (downloaded from the scene screenshot). {basename} is the video file name without extension. Default {basename}-poster.jpg. Other options poster.jpg or folder.jpg, which are only written when the folder holds one video. Must end in an image extension and contain no slash."
+    type: STRING
+  backdropFilename:
+    displayName: Backdrop File Name
+    description: "Optional backdrop image, downloaded from the scene screenshot. Examples {basename}-fanart.jpg or backdrop.jpg (only written when the folder holds one video). Leave empty for none. In Plex mode this replaces the default {basename}-fanart.jpg; only one backdrop file is written."
+    type: STRING
+  nfoRatingField:
+    displayName: NFO Rating Field
+    description: "Which NFO rating tag to write from the Stash rating: both (rating and userrating, the default), rating, or userrating. criticrating is controlled by NFO Exclude Fields."
     type: STRING
   enableActorImages:
     displayName: Enable Actor Images
-    description: Copy performer images to media server metadata folder. Default is OFF.
+    description: Copy performer images to media server metadata folder, and re-export a performer's image whenever you update that performer in Stash. Default is OFF.
     type: BOOLEAN
   mediaServer:
     displayName: Media Server Type
-    description: "Target media server: jellyfin, emby, or plex. Default is 'jellyfin'. Note: Plex does not support external performer images."
+    description: "Target media server: jellyfin, emby, or plex. Default is 'jellyfin'. Plex needs Plex Media Server 1.43.1+ (Plex NFO Movie agent); it also writes a fanart file and uses Stash performer image URLs as actor thumbs only when Stash has no API key."
     type: STRING
   actorMetadataPath:
     displayName: Actor Metadata Path
@@ -99,6 +119,10 @@ hooks:
     description: Organize/rename video files and create/update NFO metadata when you update a scene.
     triggeredBy:
       - Scene.Update.Post
+  - name: hook_mcmetadata_performer
+    description: Re-export a performer's image to the media server People folder when you update the performer. Only runs when Enable Actor Images is on.
+    triggeredBy:
+      - Performer.Update.Post
 tasks:
   - name: "Bulk Update Scenes"
     description: Process all scenes - rename files, generate NFOs, and copy performer images

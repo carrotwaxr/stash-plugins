@@ -247,5 +247,32 @@ class TestDescribeActiveConditions(unittest.TestCase):
         self.assertIn("x", desc)
 
 
+class TestGlobAndTagMatching(unittest.TestCase):
+    def _p(self, path, **kw):
+        return should_process(scene(files=[{"path": path}]), settings(**kw))
+
+    def test_brackets_match_literally(self):
+        self.assertEqual(self._p("/media/[curated]/a.mp4", include_paths=["/media/[curated]/*"]), (True, ""))
+        self.assertFalse(self._p("/media/c/a.mp4", include_paths=["/media/[curated]/*"])[0])
+
+    def test_bare_directory_excludes_everything_under_it(self):
+        for pat in ("/media/trash", "/media/trash/"):
+            self.assertEqual(self._p("/media/trash/a/b.mp4", exclude_paths=[pat]), (False, "excluded_path"))
+            self.assertTrue(self._p("/media/trash2/b.mp4", exclude_paths=[pat])[0])
+            self.assertTrue(self._p("/media/other/b.mp4", exclude_paths=[pat])[0])
+
+    def test_windows_backslashes_match_forward_slash_glob(self):
+        self.assertEqual(self._p("D:\\media\\x.mp4", include_paths=["D:/media/*"]), (True, ""))
+
+    def test_star_spans_directories(self):
+        self.assertEqual(self._p("/media/a/b/c.mp4", include_paths=["/media/*"]), (True, ""))
+
+    def test_required_tags_case_insensitive(self):
+        s = scene(tags=[{"name": "Curated"}])
+        self.assertEqual(should_process(s, settings(required_tags=["curated"])), (True, ""))
+        self.assertEqual(should_process(scene(tags=[{"name": "x"}]), settings(required_tags=["curated"])),
+                         (False, "missing_required_tag"))
+
+
 if __name__ == "__main__":
     unittest.main()

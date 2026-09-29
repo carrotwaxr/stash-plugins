@@ -1,6 +1,8 @@
 import os
 import utils.logger as log
-from utils.files import download_image
+from utils.files import authenticated_url, download_image
+from utils.paths import PathEscapeError, join_under, sanitize_component
+from utils.run_flow import is_dry_run
 
 # Constants
 BATCH_SIZE = 100
@@ -73,11 +75,15 @@ def process_performer(performer, settings, api_key, overwrite=False):
         log.debug(f"Skipping performer {performer_name}: no image available")
         return
 
+    if "default=true" in performer["image_path"]:
+        log.debug(f"Skipping performer {performer_name}: only a default image")
+        return
+
     image_path = get_actor_image_path(performer_name, settings)
     if not image_path:
         return
 
-    image_url = f"{performer['image_path']}&apikey={api_key}"
+    image_url = authenticated_url(performer["image_path"], settings, api_key)
     dest_dir = os.path.dirname(image_path)
 
     # Check if we should skip this performer
@@ -86,7 +92,7 @@ def process_performer(performer, settings, api_key, overwrite=False):
         return
 
     # In dry run mode, just log what would happen
-    if settings.get("dry_run", False):
+    if is_dry_run(settings):
         if os.path.exists(image_path):
             log.info(f"[DRY RUN] Would overwrite image for {performer_name}: {image_path}")
         else:
@@ -123,20 +129,40 @@ def get_actor_image_path(performer_name, settings):
     if not base_path:
         return None
 
-    media_server = settings.get("media_server", "jellyfin")
-    first_letter = performer_name[0]
+    media_server = str(settings.get("media_server", "jellyfin")).lower()
+    # One safe folder name; the letter folder comes from it (still the raw first character)
+    safe_name = sanitize_component(performer_name)
+    first_letter = safe_name[0]
 
-    # Different media servers use different folder structures
-    if media_server == "jellyfin":
-        # Jellyfin: /metadata/People/J/John Doe/folder.jpg
-        return os.path.join(base_path, first_letter, performer_name, "folder.jpg")
-    elif media_server == "emby":
+    if media_server not in ("jellyfin", "emby"):
+        if media_server == "plex":
+            # Plex manages performer images internally; no People folder to export to
+            log.debug(f"Plex does not support external performer images, skipping {performer_name}")
+        else:
+            log.warning(f"Unknown media server type: {media_server}")
+        return None
+
+    try:
+        if media_server == "jellyfin":
+            # Jellyfin: /metadata/People/J/John Doe/folder.jpg
+            return join_under(base_path, first_letter, safe_name, "folder.jpg")
         # Emby: /metadata/People/John Doe/folder.jpg (no A-Z subfolders)
-        return os.path.join(base_path, performer_name, "folder.jpg")
-    elif media_server == "plex":
-        # Plex manages performer images internally; no People folder to export to
-        log.debug(f"Plex does not support external performer images, skipping {performer_name}")
+        return join_under(base_path, safe_name, "folder.jpg")
+    except PathEscapeError as err:
+        log.warning(f"Skipping performer image for {performer_name!r}: {err}")
         return None
-    else:
-        log.warning(f"Unknown media server type: {media_server}")
-        return None
+
+
+def process_performer_hook(stash, performer_id, settings, api_key):
+    """Performer.Update.Post: re-export that performer's image when actor images are on."""
+    if not settings.get("enable_actor_images", False):
+        log.debug(f"Performer {performer_id}: actor images are disabled, skipping")
+        return
+    performer = stash.find_performer(performer_id, False, "id name image_path")
+    if not performer:
+        log.warning(f"Performer {performer_id} not found")
+        return
+    if is_dry_run(settings):
+        log.info(f"[DRY RUN] Would re-export image for performer {performer.get('name', performer_id)}")
+        return
+    process_performer(performer, settings, api_key, overwrite=True)

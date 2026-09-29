@@ -1,10 +1,14 @@
 import os
+import re
 import shutil
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 import utils.logger as log
+from utils.run_flow import is_dry_run
+from utils.videos import is_video
 
 # JPEG magic bytes (SOI marker)
 JPEG_MAGIC = b'\xff\xd8\xff'
@@ -73,6 +77,56 @@ def _is_valid_image(filepath):
         return False
 
 
+def authenticated_url(url, settings, api_key):
+    """Add auth to a Stash image URL: nothing with a session cookie, else the API key, else nothing."""
+    if (settings or {}).get("session_cookie") or not api_key:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}apikey={urllib.parse.quote(str(api_key), safe='')}"
+
+
+def _safe_url(url):
+    """The URL with any apikey query value hidden, for logging."""
+    parts = urllib.parse.urlsplit(url)
+    if "apikey=" not in parts.query:
+        return url
+    query = "&".join(
+        "apikey=***" if p.startswith("apikey=") else p for p in parts.query.split("&")
+    )
+    return urllib.parse.urlunsplit(parts._replace(query=query))
+
+
+_APIKEY_VALUE = re.compile(r"(apikey=)[^&\s'\"]*", re.IGNORECASE)
+
+
+def _scrub(text):
+    """text (e.g. an exception's) with every apikey= value hidden, for logging."""
+    return _APIKEY_VALUE.sub(r"\1***", str(text))
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Don't follow redirects: urllib would copy the session Cookie header to the new
+    URL, possibly another host. A 3xx then raises HTTPError with its code."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirects)
+
+
+def _urlopen(request, timeout):
+    """urllib's urlopen, refusing redirects."""
+    return _OPENER.open(request, timeout=timeout)
+
+
+def _current_umask():
+    """The process umask (os.umask can only be read by setting it)."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
 def download_image(url, dest_filepath, settings):
     """Download an image from a URL and save it to a file.
 
@@ -86,13 +140,14 @@ def download_image(url, dest_filepath, settings):
         settings: Plugin settings dict (checks dry_run)
 
     Returns:
-        bool: True if successful, False otherwise
+        bool: True if successful (or would be, in a dry run), False otherwise
     """
-    if settings.get("dry_run", False):
+    if is_dry_run(settings):
+        log.info(f"[DRY RUN] Would download image to: {dest_filepath}")
         return True
 
     # Sanitize URL for logging (hide API key)
-    safe_url = url.split('&apikey=')[0] + '&apikey=***' if '&apikey=' in url else url
+    safe_url = _safe_url(url)
 
     log.debug(f"Downloading image from {safe_url}")
 
@@ -104,7 +159,10 @@ def download_image(url, dest_filepath, settings):
         try:
             # Make the request
             request = urllib.request.Request(url)
-            with urllib.request.urlopen(request, timeout=30) as response:
+            cookie = (settings or {}).get("session_cookie")
+            if cookie and cookie.get("value"):
+                request.add_header("Cookie", f"{cookie.get('name') or 'session'}={cookie['value']}")
+            with _urlopen(request, timeout=30) as response:
                 # Check HTTP status
                 if response.status != 200:
                     log.error(f"Failed to download image: HTTP {response.status} from {safe_url}")
@@ -112,6 +170,13 @@ def download_image(url, dest_filepath, settings):
 
                 # Check content type
                 content_type = response.headers.get('Content-Type', '')
+                if content_type.startswith('text/html'):
+                    log.error(
+                        f"Got an HTML page instead of an image from {safe_url}. Stash likely redirected "
+                        "to its login page: the plugin isn't authenticated. Check that Stash passes a "
+                        "session to plugins, or generate an API key in Settings > Security."
+                    )
+                    return False
                 if not content_type.startswith('image/'):
                     log.error(f"Invalid content type '{content_type}' from {safe_url} (expected image/*)")
                     return False
@@ -161,14 +226,24 @@ def download_image(url, dest_filepath, settings):
 
             # Move temp file to destination (shutil.move handles cross-filesystem moves)
             shutil.move(temp_path, dest_filepath)
+            # mkstemp made it 0600; give it a normal file's mode so a media server
+            # running as another user can read it
+            os.chmod(dest_filepath, 0o666 & ~_current_umask())
             log.debug(f"Saved image ({actual_size} bytes) to {dest_filepath}")
             return True
 
         except urllib.error.HTTPError as e:
-            log.error(f"HTTP error downloading image: {e.code} {e.reason} from {safe_url}")
+            if 300 <= e.code < 400:
+                log.error(
+                    f"Image download from {safe_url} was redirected (HTTP {e.code}), likely to the "
+                    "login page: not authenticated. Check that Stash passes a session to plugins, "
+                    "or generate an API key in Settings > Security."
+                )
+            else:
+                log.error(f"HTTP error downloading image: {e.code} {_scrub(e.reason)} from {safe_url}")
             return False
         except urllib.error.URLError as e:
-            log.error(f"URL error downloading image: {e.reason} from {safe_url}")
+            log.error(f"URL error downloading image: {_scrub(e.reason)} from {safe_url}")
             if attempt <= MAX_RETRIES:
                 log.info(f"Retrying download (attempt {attempt + 1}/{MAX_RETRIES + 1})...")
                 time.sleep(RETRY_DELAY)
@@ -182,7 +257,7 @@ def download_image(url, dest_filepath, settings):
                 continue
             return False
         except Exception as e:
-            log.error(f"Error downloading image from {safe_url}: {e}")
+            log.error(f"Error downloading image from {safe_url}: {_scrub(e)}")
             return False
         finally:
             # Clean up temp file if it still exists
@@ -195,21 +270,75 @@ def download_image(url, dest_filepath, settings):
     return False
 
 
-def rename_file(filepath, dest_filepath, settings):
-    dir = os.path.dirname(dest_filepath)
+def _owner_stem(name, stems):
+    """The longest stem in stems that name starts with, followed by "." or "-"; None if none."""
+    owner = None
+    for stem in stems:
+        if (
+            len(name) > len(stem)
+            and name.startswith(stem)
+            and name[len(stem)] in ".-"
+            and (owner is None or len(stem) > len(owner))
+        ):
+            owner = stem
+    return owner
+
+
+def find_sidecars(video_path, other_videos=()):
+    """Files in the video's folder that belong to it: named `<stem>.<anything>` or `<stem>-<anything>`.
+
+    A file belongs to the video in its folder with the longest stem it starts with, so
+    `Show-Part2.srt` is Show-Part2.mp4's, not Show.mp4's. other_videos are more video
+    paths to count as in the folder (a scene's videos this run already moved away).
+    Excludes the video itself and every other video.
+    """
+    folder = os.path.dirname(video_path)
+    video_name = os.path.basename(video_path)
+    stem = os.path.splitext(video_name)[0]
     try:
-        if not os.path.exists(dir) and settings["dry_run"] is False:
-            os.makedirs(dir)  # pragma: no cover
-        try:
-            if settings["dry_run"] is False:
-                shutil.move(filepath, dest_filepath)  # pragma: no cover
-                log.debug(f"Renamed {filepath} to {dest_filepath}")  # pragma: no cover
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    stems = {stem}
+    stems.update(
+        os.path.splitext(n)[0] for n in names if is_video(n) and os.path.isfile(os.path.join(folder, n))
+    )
+    stems.update(
+        os.path.splitext(os.path.basename(p))[0] for p in other_videos if os.path.dirname(p) == folder
+    )
+    found = []
+    for name in names:
+        if name == video_name or is_video(name) or _owner_stem(name, stems) != stem:
+            continue
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            found.append(path)
+    return found
+
+
+def is_same_file(path, other):
+    """True if other exists and is path's own file: a case-only rename (movie.mp4 -> Movie.mp4)
+    on a case-insensitive filesystem (Windows, macOS), which isn't a collision."""
+    try:
+        return os.path.exists(other) and os.path.samefile(path, other)
+    except OSError:
+        return False
+
+
+def rename_file(filepath, dest_filepath, settings):
+    """Move a file, never overwriting (a case-only rename is allowed). Returns the destination, or False."""
+    if os.path.exists(dest_filepath) and not is_same_file(filepath, dest_filepath):
+        log.warning(f"Not moving {filepath}: destination already exists at {dest_filepath}")
+        return False
+    try:
+        if is_dry_run(settings):
             return dest_filepath
-        except Exception as err:  # pragma: no cover
-            log.error(f"Error renaming file {filepath} to {dest_filepath}: {str(err)}")
-            return False
-    except Exception as d_err:
-        log.error(f"Error creating directory {dir}: {str(d_err)}")
+        os.makedirs(os.path.dirname(dest_filepath), exist_ok=True)
+        shutil.move(filepath, dest_filepath)
+        log.debug(f"Renamed {filepath} to {dest_filepath}")
+        return dest_filepath
+    except Exception as err:
+        log.error(f"Error renaming file {filepath} to {dest_filepath}: {str(err)}")
         return False
 
 

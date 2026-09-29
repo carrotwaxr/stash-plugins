@@ -2,15 +2,26 @@ import os
 from collections import Counter
 import utils.logger as log
 from performer import process_performer
-from utils.files import download_image, rename_file, replace_file_ext
-from utils.nfo import build_nfo_xml
-from utils.replacer import get_new_path
+from utils.files import authenticated_url, download_image, find_sidecars, is_same_file, rename_file
+from utils.nfo import (
+    artwork_filenames, artwork_templates, build_nfo_xml, count_videos, is_folder_level, render_filename,
+)
+from utils.paths import is_inside
+from utils.replacer import get_new_path, with_collision_suffix
+from utils.run_flow import is_dry_run
+from utils.self_updates import consume, mark
+from utils.videos import is_video
 from conditions import should_process, build_scene_filter, format_bulk_summary
 
 SKIP_SAMPLE_LIMIT = 10
+# process_scene's skip reason for a scene without files (counted in the bulk histogram)
+NO_FILES = "no_files"
 
 BATCH_SIZE = 100
 IMPOSSIBLE_PATH = "$%^&@"
+# stashapi's Studio fragment only has parent_studio { id }, so each level is fetched
+STUDIO_FRAGMENT = "id name parent_studio { id }"
+MAX_STUDIO_DEPTH = 10
 
 
 def process_all_scenes(stash, settings, api_key):
@@ -46,39 +57,62 @@ def process_all_scenes(stash, settings, api_key):
         log.info("No scenes to process")
         return summary
 
-    # Calculate total pages (ceiling division)
-    total_pages = (count + BATCH_SIZE - 1) // BATCH_SIZE
     processed = 0
     errors = 0
     scanned = 0
+    last_id = 0
+    page_num = 0
 
-    # Pages are 1-indexed in Stash API
-    for page in range(1, total_pages + 1):
-        start = (page - 1) * BATCH_SIZE + 1
-        end = min(page * BATCH_SIZE, count)
+    def note_skip(scene, reason):
+        skipped[reason] += 1
+        if len(samples) < SKIP_SAMPLE_LIMIT:
+            samples.append((scene.get("id", "?"), reason))
 
-        log.info(f"Evaluating scenes {start}-{end} of {count} (page {page}/{total_pages})")
+    # Cursor paging on id: the run itself can change which scenes match (e.g. marking
+    # scenes organized under organized_condition=skip), so offset paging would skip
+    # unprocessed scenes. count is for progress display only.
+    while True:
+        page_num += 1
+        page_filter = dict(scene_filter)
+        if last_id:
+            page_filter["id"] = {"value": last_id, "modifier": "GREATER_THAN"}
+
+        progress = min(scanned / count, 1.0)
+        log.info(f"Evaluating scenes after id {last_id} (batch {page_num}, {progress:.0%} of ~{count})")
 
         scenes = stash.find_scenes(
-            f=scene_filter,
-            filter={"page": page, "per_page": BATCH_SIZE},
+            f=page_filter,
+            filter={"per_page": BATCH_SIZE, "sort": "id", "direction": "ASC"},
         )
+        if not scenes:
+            break
+
+        max_id = max(int(sc["id"]) for sc in scenes)
+        if max_id <= last_id:
+            log.error(f"Paging did not advance past scene id {last_id}; stopping to avoid an infinite loop")
+            break
+        last_id = max_id
 
         for scene in scenes:
             scanned += 1
             ok, reason = should_process(scene, settings)
             if not ok:
-                skipped[reason] += 1
-                if len(samples) < SKIP_SAMPLE_LIMIT:
-                    samples.append((scene.get("id", "?"), reason))
+                note_skip(scene, reason)
                 log.debug(f"Scene {scene.get('id', '?')} skipped by processing conditions: {reason}")
                 continue
             try:
-                process_scene(scene, stash, settings, api_key)
-                processed += 1
+                skip_reason = process_scene(scene, stash, settings, api_key)
             except Exception as err:
                 errors += 1
                 log.error(f"Error processing scene {scene.get('id', 'unknown')}: {err}")
+                continue
+            if isinstance(skip_reason, str):
+                note_skip(scene, skip_reason)
+            else:
+                processed += 1
+
+        if len(scenes) < BATCH_SIZE:
+            break
 
     summary["scanned"] = scanned
     summary["processed"] = processed
@@ -86,7 +120,7 @@ def process_all_scenes(stash, settings, api_key):
     summary["skipped"] = dict(skipped)
     summary["samples"] = samples
 
-    for line in format_bulk_summary(summary, dry_run=settings.get("dry_run", False)):
+    for line in format_bulk_summary(summary, dry_run=is_dry_run(settings)):
         log.info(line)
     return summary
 
@@ -94,24 +128,41 @@ def process_all_scenes(stash, settings, api_key):
 def process_scene(scene, stash, settings, api_key):
     """Process a single scene: rename video, generate NFO, copy performer images.
 
+    A dry run takes the same steps on the paths a live run would produce, so the NFO,
+    poster and sidecars are reported at their post-move paths.
+
     Args:
         scene: Scene dict from Stash API
         stash: StashInterface instance
         settings: Plugin settings dict
         api_key: Stash API key for image URLs
+
+    Returns:
+        None once processed, or a skip reason (NO_FILES) for a scene that can't be
     """
     scene_id = scene.get("id", "unknown")
     log.debug(f"Processing Scene ID: {scene_id}")
 
+    if not scene.get("files"):
+        log.warning(f"Scene {scene_id} has no files; skipping it")
+        return NO_FILES
+
     scene = __hydrate_scene(scene, stash)
 
-    # rename/move video files if settings configured for that
-    # if not, function will just return the current path and we'll proceed with that
-    target_video_path = __rename_videos(scene, stash, settings)
+    # rename/move video files if settings configured for that; returns the primary
+    # video's path after the run (in a dry run, where it would be, with the moves the
+    # dry run skipped recorded in pending)
+    pending = _PendingMoves()
+    target_video_path = __rename_videos(scene, stash, settings, pending)
 
-    # overwrite nfo named after file, at file location (use renamed path if applicable)
-    nfo_path = replace_file_ext(target_video_path, "nfo")
-    __write_nfo(scene, nfo_path, settings, target_video_path)
+    folder = os.path.dirname(target_video_path)
+    video_count = pending.video_count(folder) if pending.videos else None
+    names = artwork_filenames(settings, target_video_path, video_count=video_count)
+
+    # overwrite the nfo at file location (use renamed path if applicable)
+    if names["nfo"]:
+        __write_nfo(scene, os.path.join(folder, names["nfo"]), settings, target_video_path, api_key,
+                    exists=pending.exists)
 
     # copy any performer images to people directory
     for performer in scene["performers"] or []:
@@ -120,11 +171,74 @@ def process_scene(scene, stash, settings, api_key):
         except Exception as err:
             log.error(f"Error processing performer image for {performer.get('name', 'unknown')}: {err}")
 
-    # download any missing artwork images from stash into path
-    poster_path = replace_file_ext(target_video_path, "jpg", "-poster")
-    if not os.path.exists(poster_path):
-        screenshot_url = f"{scene['paths']['screenshot']}&apikey={api_key}"
-        download_image(screenshot_url, poster_path, settings)
+    # download any missing artwork images from stash into path (poster, then backdrop)
+    for key in ("poster", "backdrop"):
+        if not names[key]:
+            continue
+        image_path = os.path.join(folder, names[key])
+        if not pending.exists(image_path):
+            screenshot_url = authenticated_url(scene["paths"]["screenshot"], settings, api_key)
+            download_image(screenshot_url, image_path, settings)
+    return None
+
+
+class _PendingMoves:
+    """Moves a dry run only logged, so later steps see the folders as a live run leaves them.
+
+    Stays empty in a live run: its moves really happened, so the disk is the truth.
+    """
+
+    def __init__(self):
+        self.arrived = set()
+        self.left = set()
+        self.videos = []  # (source, destination) of each video move
+
+    def add(self, source, dest, video=False):
+        self.left.add(source)
+        self.left.discard(dest)
+        self.arrived.discard(source)
+        self.arrived.add(dest)
+        if video:
+            self.videos.append((source, dest))
+
+    def exists(self, path):
+        """Whether path would exist after the run."""
+        if path in self.arrived:
+            return True
+        if path in self.left:
+            return False
+        return os.path.exists(path)
+
+    def same_file(self, source, dest):
+        """Whether dest is source's own file (a case-only rename), not another file.
+
+        Not when a recorded move sends another file to dest, or source has moved away.
+        """
+        if dest in self.arrived or source in self.left:
+            return False
+        return is_same_file(source, dest)
+
+    def video_count(self, folder):
+        """Videos folder would hold after the run."""
+        count = count_videos(folder)
+        for source, dest in self.videos:
+            count += (os.path.dirname(dest) == folder) - (os.path.dirname(source) == folder)
+        return count
+
+    def other_videos(self, video_path):
+        """Videos besides video_path its folder holds once the moves so far are done."""
+        folder = os.path.dirname(video_path)
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            names = []
+        paths = {os.path.join(folder, n) for n in names if is_video(n) and os.path.isfile(os.path.join(folder, n))}
+        for source, dest in self.videos:
+            paths.discard(source)
+            if os.path.dirname(dest) == folder:
+                paths.add(dest)
+        paths.discard(video_path)
+        return len(paths)
 
 
 def __hydrate_scene(scene, stash):
@@ -134,6 +248,11 @@ def __hydrate_scene(scene, stash):
         performer = stash.find_performer(
             fragmented_performer["id"], False, "id name gender image_path"
         )
+        if not performer:
+            log.debug(
+                f"Scene {scene.get('id', '?')}: performer {fragmented_performer['id']} no longer exists; ignoring it"
+            )
+            continue
         performers.append(performer)
     scene["performers"] = sorted(
         performers,
@@ -141,14 +260,46 @@ def __hydrate_scene(scene, stash):
     )
 
     if scene["studio"]:
-        scene["studio"] = stash.find_studio(
-            scene["studio"]["id"], "id name parent_studio { ...Studio }"
-        )
+        scene["studio"] = __fetch_studio_chain(stash, scene["studio"]["id"])
 
     return scene
 
 
-def __rename_videos(scene, stash, settings):
+def __fetch_studio_chain(stash, studio_id):
+    """Fetch a studio and its parents by following parent_studio.id, one find_studio per level.
+
+    Stops after MAX_STUDIO_DEPTH levels or at a studio already seen (a loop), so a
+    bad hierarchy can't hang the plugin. Every returned level has a name.
+    """
+    root = stash.find_studio(studio_id, STUDIO_FRAGMENT)
+    node = root
+    seen = {str(studio_id)}
+    depth = 1
+    while node:
+        parent_id = (node.get("parent_studio") or {}).get("id")
+        if not parent_id:
+            node["parent_studio"] = None
+            break
+        if str(parent_id) in seen or depth >= MAX_STUDIO_DEPTH:
+            problem = (
+                f"loops back to studio {parent_id}"
+                if str(parent_id) in seen
+                else f"is deeper than {MAX_STUDIO_DEPTH} levels"
+            )
+            log.warning(
+                f"Studio hierarchy of studio {studio_id} {problem}; "
+                f"ignoring parents above studio {node.get('id')}"
+            )
+            node["parent_studio"] = None
+            break
+        seen.add(str(parent_id))
+        node["parent_studio"] = stash.find_studio(parent_id, STUDIO_FRAGMENT)
+        node = node["parent_studio"]
+        depth += 1
+    return root
+
+
+def __rename_videos(scene, stash, settings, pending=None):
     """Rename/move all video files for a scene according to template settings.
 
     Handles scenes with multiple files. If the template includes file-level variables
@@ -160,18 +311,25 @@ def __rename_videos(scene, stash, settings):
     - "primary_only": Only process the first/primary file
     - "skip": Skip scenes that have multiple files entirely
 
+    A dry run makes the same decisions and records the moves it skips in pending.
+
     Args:
         scene: Hydrated scene dict
         stash: StashInterface instance for GraphQL mutations
         settings: Plugin settings dict
+        pending: _PendingMoves that collects a dry run's skipped moves
 
     Returns:
-        str: The primary video path (renamed or original) for NFO generation
+        str: The primary video's path after the run (renamed or original; in a dry run,
+        where it would be) for NFO generation
     """
     files = scene.get("files", [])
     if not files:
         log.warning(f"Scene {scene['id']} has no files")
         return None
+    if pending is None:
+        pending = _PendingMoves()
+    dry_run = is_dry_run(settings)
 
     if settings["enable_renamer"] is not True:
         log.debug("Skipping renaming because it's disabled in settings")
@@ -198,6 +356,11 @@ def __rename_videos(scene, stash, settings):
     original_primary_path = files_to_process[0]["path"]  # Store before loop
     used_paths = set()  # Track paths we've used to detect conflicts
     files_moved = False  # Track if any files were actually moved
+    # Videos per source folder before anything moves: folder-level files (movie.nfo,
+    # poster.jpg ...) only travel from a folder that held just this one video
+    folder_video_counts = {
+        os.path.dirname(f["path"]): count_videos(os.path.dirname(f["path"])) for f in files_to_process
+    }
 
     for idx, file_info in enumerate(files_to_process):
         video_path = file_info["path"]
@@ -209,14 +372,15 @@ def __rename_videos(scene, stash, settings):
         scene_for_file["files"] = [file_info] + [f for f in files if f != file_info]
 
         # Calculate expected path for this specific file
+        budget = settings.get("renamer_filepath_budget", 250)
         expected_path = get_new_path(
             scene_for_file,
             settings["renamer_path"],
             settings["renamer_path_template"],
-            settings.get("renamer_filepath_budget", 250),
+            budget,
         )
 
-        if expected_path is False:
+        if not expected_path:
             if idx == 0:
                 primary_path = video_path
             continue
@@ -225,15 +389,23 @@ def __rename_videos(scene, stash, settings):
         # This handles cases where files have the same resolution
         original_expected = expected_path
         suffix_num = 2
-        while expected_path in used_paths:
-            base, ext = os.path.splitext(original_expected)
-            expected_path = f"{base} ({suffix_num}){ext}"
+        while expected_path and expected_path in used_paths:
+            expected_path = with_collision_suffix(original_expected, suffix_num, budget)
             suffix_num += 1
+        if not expected_path:
+            log.error(
+                f"Skipping renaming file {idx + 1} of Scene {scene['id']}: {original_expected} is taken "
+                f"by another file of the scene, and a numbered suffix doesn't fit your "
+                f"renamerFilepathBudget ({budget} characters)"
+            )
+            if idx == 0:
+                primary_path = video_path
+            continue
 
         # Check if we should rename this file
         renamer_path = settings.get("renamer_path", IMPOSSIBLE_PATH)
         renamer_ignore_in_path = settings.get("renamer_ignore_files_in_path", False)
-        in_target_dir = video_path.startswith(renamer_path)
+        in_target_dir = is_inside(video_path, renamer_path)
 
         if renamer_ignore_in_path and in_target_dir:
             log.debug(f"Skipping file {idx + 1}: already in target directory")
@@ -248,8 +420,24 @@ def __rename_videos(scene, stash, settings):
                 primary_path = video_path
             continue
 
-        if os.path.exists(expected_path):
+        if pending.exists(expected_path) and not pending.same_file(video_path, expected_path):
             log.warning(f"File {idx + 1}: Destination already exists at {expected_path}")
+            if idx == 0:
+                primary_path = video_path
+            continue
+
+        dest_folder = os.path.dirname(expected_path)
+        dest_basename = os.path.basename(expected_path)
+
+        # Stash's moveFiles refuses a destination outside its libraries: don't ask it to
+        if not __in_a_library(dest_folder, stash, settings):
+            if dry_run:
+                log.info(f"[DRY RUN] Would be refused by Stash (outside every library): {expected_path}")
+            else:
+                log.warning(
+                    f"Not moving file {idx + 1} of Scene {scene['id']}: {expected_path} is outside "
+                    "every Stash library, so Stash would refuse the move"
+                )
             if idx == 0:
                 primary_path = video_path
             continue
@@ -257,18 +445,21 @@ def __rename_videos(scene, stash, settings):
         # Track this path as used
         used_paths.add(expected_path)
 
+        # The scene's other videos own their files even once this run has moved them
+        sidecars = __collect_sidecars(video_path, settings, [f["path"] for f in files])
+
         # In dry run mode, log what would happen but don't actually do anything
-        if settings["dry_run"]:
+        if dry_run:
             log.info(f"[DRY RUN] Would move file {idx + 1}: {video_path}")
             log.info(f"[DRY RUN]                    To: {expected_path}")
+            pending.add(video_path, expected_path, video=True)
+            __relocate_sidecars(video_path, expected_path, sidecars, settings, pending)
+            __relocate_folder_level(video_path, expected_path, folder_video_counts, settings, pending)
             if idx == 0:
-                primary_path = video_path
+                primary_path = expected_path
             continue
 
         # Use GraphQL moveFiles mutation
-        dest_folder = os.path.dirname(expected_path)
-        dest_basename = os.path.basename(expected_path)
-
         try:
             result = __move_file_graphql(stash, file_id, dest_folder, dest_basename)
             if not result:
@@ -281,6 +472,10 @@ def __rename_videos(scene, stash, settings):
             files_moved = True
             if idx == 0:
                 primary_path = expected_path
+            # Runs before the organized update: that update fires the Scene.Update.Post
+            # hook, which must find the NFO and poster already at their new paths.
+            __relocate_sidecars(video_path, expected_path, sidecars, settings, pending)
+            __relocate_folder_level(video_path, expected_path, folder_video_counts, settings, pending)
 
         except Exception as err:
             log.error(f"Error moving file {idx + 1} for Scene {scene['id']}: {err}")
@@ -289,32 +484,129 @@ def __rename_videos(scene, stash, settings):
             continue
 
     # Mark as organized if enabled and files were actually moved
-    if files_moved and settings.get("renamer_enable_mark_organized", False) and not settings["dry_run"]:
-        try:
-            stash.update_scene({"id": scene["id"], "organized": True})
-            log.debug(f"Marked Scene {scene['id']} as organized")
-        except Exception as err:
-            log.warning(f"Failed to mark scene as organized: {err}")
-
-    # Relocate metadata files for primary video
-    if primary_path and primary_path != original_primary_path:
-        potential_nfo_path = replace_file_ext(original_primary_path, "nfo")
-        if os.path.exists(potential_nfo_path):
-            log.debug(f"Relocating existing NFO file: {potential_nfo_path}")
-            rename_file(
-                potential_nfo_path, replace_file_ext(primary_path, "nfo"), settings
-            )
-
-        potential_poster_path = replace_file_ext(original_primary_path, "jpg", "-poster")
-        if os.path.exists(potential_poster_path):
-            log.debug(f"Relocating existing Poster image: {potential_poster_path}")
-            rename_file(
-                potential_poster_path,
-                replace_file_ext(primary_path, "jpg", "-poster"),
-                settings,
-            )
+    if files_moved and settings.get("renamer_enable_mark_organized", False) and not dry_run:
+        __mark_organized(scene["id"], stash, settings)
 
     return primary_path or files[0]["path"]
+
+
+def __collect_sidecars(video_path, settings, other_videos=()):
+    """Files to move with a video: all sidecars, or just its NFO and poster when the setting is off."""
+    sidecars = find_sidecars(video_path, other_videos)
+    if settings.get("renamer_move_sidecars", True):
+        return sidecars
+    keep = tuple(
+        render_filename(t, video_path) for t in artwork_templates(settings) if t and not is_folder_level(t)
+    )
+    return [p for p in sidecars if os.path.basename(p) in keep]
+
+
+def __relocate_sidecars(video_path, new_video_path, sidecars, settings, pending):
+    """Move each sidecar next to the moved video, keeping the part of its name after the stem."""
+    old_stem = os.path.splitext(os.path.basename(video_path))[0]
+    new_stem = os.path.splitext(os.path.basename(new_video_path))[0]
+    new_folder = os.path.dirname(new_video_path)
+    for sidecar in sidecars:
+        rest = os.path.basename(sidecar)[len(old_stem):]
+        dest = os.path.join(new_folder, new_stem + rest)
+        __move_with_video(sidecar, dest, "sidecar", settings, pending)
+
+
+def __relocate_folder_level(video_path, new_video_path, folder_video_counts, settings, pending):
+    """Move folder-level files (movie.nfo, poster.jpg ...) with a video that was alone in its folder.
+
+    Only into a folder that then holds just that video: elsewhere they would become
+    the folder art of other videos. A dry run counts with the moves it recorded in pending.
+    """
+    old_folder = os.path.dirname(video_path)
+    new_folder = os.path.dirname(new_video_path)
+    if old_folder == new_folder or folder_video_counts.get(old_folder) != 1:
+        return
+    sources = [
+        os.path.join(old_folder, template)
+        for template in artwork_templates(settings)
+        if template and is_folder_level(template) and os.path.isfile(os.path.join(old_folder, template))
+    ]
+    if not sources:
+        return
+    if pending.other_videos(new_video_path):
+        log.warning(
+            f"Not moving folder-level files ({', '.join(os.path.basename(s) for s in sources)}) "
+            f"from {old_folder}: {new_folder} holds other videos"
+        )
+        return
+    for source in sources:
+        dest = os.path.join(new_folder, os.path.basename(source))
+        __move_with_video(source, dest, "folder-level file", settings, pending)
+
+
+def __move_with_video(source, dest, kind, settings, pending):
+    """Move a file that travels with a video, never overwriting.
+
+    A dry run makes the same destination check, then logs the move and records it in pending.
+    """
+    dry_run = is_dry_run(settings)
+    if not dry_run:
+        log.debug(f"Relocating {kind}: {source}")
+    moved = rename_file(source, dest, settings)
+    if moved and dry_run:
+        log.info(f"[DRY RUN] Would move {kind}: {source} -> {dest}")
+        pending.add(source, dest)
+    return moved
+
+
+def __library_roots(stash):
+    """Stash's library folders (configuration.general.stashes[].path), or None if unreadable."""
+    try:
+        stashes = stash.get_configuration()["general"]["stashes"]
+    except Exception as err:
+        stashes = None
+        problem = f": {err}"
+    else:
+        problem = ""
+    if not isinstance(stashes, list):
+        log.warning(
+            f"Could not read Stash's library folders{problem}. Moves are not checked against them "
+            "(Stash still refuses a move outside every library)."
+        )
+        return None
+    return [s["path"] for s in stashes if isinstance(s, dict) and isinstance(s.get("path"), str) and s["path"]]
+
+
+def __in_a_library(folder, stash, settings):
+    """False if folder is outside every Stash library, where moveFiles refuses to move files.
+
+    The library folders are read once per run and kept in settings["library_roots"].
+    When they can't be read nothing is blocked.
+    """
+    if "library_roots" not in settings:
+        settings["library_roots"] = __library_roots(stash)
+    roots = settings["library_roots"]
+    if roots is None:
+        return True
+    # Stash compares paths case-insensitively on Windows; normcase is a no-op elsewhere
+    folder = os.path.normcase(folder)
+    return any(is_inside(folder, os.path.normcase(root)) for root in roots)
+
+
+def __mark_organized(scene_id, stash, settings):
+    """Set organized=true, with a marker so the hook run this fires skips the scene.
+
+    Stash runs the Scene.Update.Post hook inside update_scene, so the marker must exist
+    before the call. With the hook off nothing would consume it, so none is written.
+    When update_scene returns (or fails) that hook run is over: a marker it didn't
+    consume is removed, so it can't skip the user's next Organized click.
+    """
+    data_dir = settings.get("data_dir")
+    marked = settings.get("enable_hook", False) and mark(scene_id, data_dir)
+    try:
+        stash.update_scene({"id": scene_id, "organized": True})
+        log.debug(f"Marked Scene {scene_id} as organized")
+    except Exception as err:
+        log.warning(f"Failed to mark scene as organized: {err}")
+    finally:
+        if marked:
+            consume(scene_id, data_dir)
 
 
 def __move_file_graphql(stash, file_id, dest_folder, dest_basename):
@@ -350,7 +642,7 @@ def __move_file_graphql(stash, file_id, dest_folder, dest_basename):
         return False
 
 
-def __write_nfo(scene, filepath, settings, video_path=None):
+def __write_nfo(scene, filepath, settings, video_path=None, api_key=None, exists=None):
     """Write NFO file for a scene.
 
     Args:
@@ -358,26 +650,29 @@ def __write_nfo(scene, filepath, settings, video_path=None):
         filepath: Destination path for NFO file
         settings: Plugin settings dict
         video_path: Path to the video file (for poster thumb references)
+        api_key: Stash API key; only used to decide whether Plex actor thumb URLs are fetchable
+        exists: Tells whether a path exists (default os.path.exists); a dry run passes
+            one that knows the moves it skipped
     """
+    exists = exists or os.path.exists
+
     # Check if we should skip existing NFO files
     skip_existing = settings.get("nfo_skip_existing", False)
-    if skip_existing and os.path.exists(filepath):
+    if skip_existing and exists(filepath):
         log.debug(f"Skipping existing NFO file: {filepath}")
         return
 
     try:
-        nfo_xml = build_nfo_xml(scene, settings=settings, video_path=video_path)
+        nfo_xml = build_nfo_xml(scene, settings=settings, video_path=video_path, api_key=api_key)
+        existed = exists(filepath)
 
-        if settings["dry_run"]:
-            if os.path.exists(filepath):
-                log.info(f"[DRY RUN] Would update NFO: {filepath}")
-            else:
-                log.info(f"[DRY RUN] Would create NFO: {filepath}")
+        if is_dry_run(settings):
+            log.info(f"[DRY RUN] Would {'update' if existed else 'create'} NFO: {filepath}")
             return
 
         with open(filepath, "w", encoding="utf-8-sig") as f:
             f.write(nfo_xml)
-        log.info(f"{'Updated' if os.path.exists(filepath) else 'Created'} NFO file: {filepath}")
+        log.info(f"{'Updated' if existed else 'Created'} NFO file: {filepath}")
 
     except IOError as err:
         log.error(f"Error writing NFO file {filepath}: {err}")
