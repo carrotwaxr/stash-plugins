@@ -6100,10 +6100,15 @@
           : null;
         if (!childrenContainer) return;
 
-        if (expandedNodes.has(tagId)) {
-          expandedNodes.delete(tagId);
+        // Decide from THIS copy's DOM: a multi-parent tag has one copy per
+        // parent, and expanding one copy must not make another copy collapse.
+        // expandedNodes keeps a tag while any of its copies is expanded.
+        if (childrenContainer.classList.contains('th-expanded')) {
           childrenContainer.classList.remove('th-expanded');
           toggle.innerHTML = '&#9654;';  // Right arrow
+          if (!container.querySelector(`.th-children.th-expanded[data-parent-id="${tagId}"]`)) {
+            expandedNodes.delete(tagId);
+          }
         } else {
           expandedNodes.add(tagId);
           // Collapsed branches are not rendered up front; build them now
@@ -6518,6 +6523,7 @@
       searchAllOnPage,
       searchSingleTag,
       initTagManagerPage,
+      attachNodeHandlers,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults, matchErrors,

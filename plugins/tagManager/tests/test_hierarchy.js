@@ -1,10 +1,11 @@
 /**
  * Tag Hierarchy page, against the REAL tag-manager.js (via the vm harness):
  * tree building, circular-reference checks, edit state reset, re-fetched saves,
- * alias search, lazy tree rendering, dialog listener cleanup and keyboard scoping.
+ * alias search, lazy tree rendering (each copy of a multi-parent tag expands on
+ * its own), dialog listener cleanup and keyboard scoping.
  * Run with: node plugins/tagManager/tests/test_hierarchy.js
  */
-const { loadTagManager, createQueryableElement } = require("./harness");
+const { loadTagManager, createElement, createQueryableElement } = require("./harness");
 
 let failed = 0;
 function check(name, ok, detail) {
@@ -213,6 +214,51 @@ const T = (id, name, parents = [], extra = {}) => ({
     check("expanded container has th-expanded", /th-children th-expanded/.test(html));
     tm.setState({ expandedNodes: new Set(["1", "2"]) });
     check("nested expanded renders all", renderTreeNode(tree[0], true).includes('data-tag-id="3"'));
+  }
+
+  // ---------------- multi-parent lazy expand ----------------
+  console.log("\n=== multi-parent expand ===");
+  {
+    const tm = loadTagManager();
+    const tags = [
+      T("1", "PA", [], { child_count: 1 }), T("2", "PB", [], { child_count: 1 }),
+      T("3", "Multi", ["1", "2"], { child_count: 1 }), T("4", "Kid", ["3"]),
+    ];
+    tm.setState({ hierarchyTags: tags, hierarchyTree: tm.exports.buildTagTree(tags), expandedNodes: new Set() });
+    // Two collapsed, not-yet-rendered DOM copies of "Multi" (one under each parent)
+    const copy = () => {
+      const children = createElement("div");
+      children.classList.add("th-children");
+      const nodeEl = createElement("div");
+      nodeEl.children = [children];
+      const toggle = createElement("span");
+      toggle.dataset.tagId = "3";
+      toggle.closest = (sel) => (sel === ".th-node" ? nodeEl : null);
+      return { toggle, children };
+    };
+    const a = copy();
+    const b = copy();
+    const openCopies = () => [a, b].map((c) => c.children).filter((c) => c.classList.contains("th-expanded"));
+    const container = createElement("div");
+    container.querySelectorAll = (sel) => (sel === ".th-toggle" ? [a.toggle, b.toggle] : []);
+    container.querySelector = (sel) => (sel === '.th-children.th-expanded[data-parent-id="3"]' ? openCopies()[0] || null : null);
+    tm.exports.attachNodeHandlers(container, container);
+    const click = (c) => c.toggle.listeners.click[0]();
+    const isOpen = (c) => c.children.classList.contains("th-expanded");
+    const hasKid = (c) => c.children.innerHTML.includes('data-tag-id="4"');
+
+    click(a);
+    check("copy A expands and renders its children", isOpen(a) && hasKid(a));
+    check("tag marked expanded", tm.getState().expandedNodes.has("3"));
+    click(b);
+    check("copy B then expands too (it does not take the collapse branch)", isOpen(b) && hasKid(b), b.children.innerHTML);
+    check("copy B shows the expanded arrow", b.toggle.innerHTML === "&#9660;", b.toggle.innerHTML);
+    check("copy A stays expanded", isOpen(a));
+    click(b);
+    check("collapsing B leaves A open", !isOpen(b) && isOpen(a) && b.toggle.innerHTML === "&#9654;");
+    check("tag stays marked while a copy is open", tm.getState().expandedNodes.has("3"));
+    click(a);
+    check("collapsing the last open copy unmarks the tag", !isOpen(a) && !tm.getState().expandedNodes.has("3"));
   }
 
   // ---------------- keyboard ----------------
