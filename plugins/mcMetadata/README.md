@@ -125,10 +125,14 @@ live run:
   (UTF-8, so non-Latin names count more per character). Longer names are trimmed at a
   character boundary, and the file extension is kept.
 - **Path length.** Max Filepath Length (default 250) limits the whole path. Only a path that
-  is too long is shortened. mcMetadata drops `$Tags` first, then `$Performers` names, whole
-  names at a time, until it fits. Other parts of the template are never shortened.
-- **Collisions.** If two files would get the same name, the later ones get a numbered suffix
-  such as ` (2)`, kept within the length limit. mcMetadata never overwrites an existing file.
+  is too long is shortened. mcMetadata shortens `$Tags` first, then the performer variables,
+  dropping whole names from the end. A last remaining name is cut short rather than dropped.
+  Other parts of the template are never shortened; if the path still doesn't fit, the scene
+  is skipped with an error.
+- **Collisions.** When two files of the same scene would get the same name, the later ones
+  get a numbered suffix such as ` (2)`, kept within the length limit. When the name is taken
+  by a file already on disk, that file is left alone and the move is skipped with a warning.
+  mcMetadata never overwrites an existing file.
 - **Templates that may collide.** A template without `$StashID`, or without a studio plus
   `$Title` plus `$ReleaseDate`, logs a warning. Renames still run. An **empty** template turns
   renaming off for that run.
@@ -228,9 +232,11 @@ Wrap parts of your template in `{curly braces}` to include them only when a vari
 
 If a block contains multiple variables, ALL must have values for the block to appear.
 
-**Uniqueness Requirement**: Templates must contain either:
+**Uniqueness**: so that no two scenes get the same path, a template should contain either:
 - `$StashID`, OR
 - (`$Studio` or `$Studios`) AND `$Title` AND `$ReleaseDate`
+
+Other templates log a warning but still rename. A scene whose path is already taken is not moved.
 
 ## Usage
 
@@ -271,7 +277,7 @@ looks for `movie.nfo`, `poster.jpg` and `backdrop.jpg`:
 
 | Setting | Value |
 |---------|-------|
-| Renamer Path Template | `$Studio/$Title {$ReleaseDate}/$Title` |
+| Renamer Path Template | `$Studio/$Title{ ($ReleaseDate)}/$Title` |
 | NFO File Name | `movie.nfo` |
 | Poster File Name | `poster.jpg` |
 | Backdrop File Name | `backdrop.jpg` |

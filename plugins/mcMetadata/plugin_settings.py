@@ -150,11 +150,11 @@ def map_settings(plugin_config):
         enable_renamer = False
     elif enable_renamer and not template_is_unique(template):
         # Warn only: this was never enforced before, and a clash can't lose data
-        # (the renamer adds " (2)", and Stash's moveFiles refuses to overwrite).
+        # (a taken destination is skipped, and Stash's moveFiles refuses to overwrite).
         log.warning(
             "renamerPathTemplate may give two scenes the same path: include $StashID, "
             "or $Studio (or $Studios) together with $Title and $ReleaseDate. "
-            "Clashing scenes get a numbered suffix."
+            "A scene whose path is already taken is not moved."
         )
 
     return {
