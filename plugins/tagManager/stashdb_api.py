@@ -320,7 +320,7 @@ def query_all_tags(url, api_key, per_page=1000):
         page += 1
         time.sleep(DEFAULT_CONFIG["request_delay"])
 
-    log.LogInfo(f"StashDB: Fetched {len(all_tags)} tags total in {pages_fetched} pages")
+    log.LogInfo(f"Fetched {len(all_tags)} tags total in {pages_fetched} pages from {url}")
     return all_tags
 
 
