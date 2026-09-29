@@ -6,6 +6,7 @@ Searches StashDB for scenes matching a local scene's performers and/or studio.
 Uses only Python standard library - no pip dependencies.
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import tempfile
 import time
 import urllib.request
 import urllib.error
+from collections import namedtuple
 
 import log
 import plugin_data
@@ -183,6 +185,7 @@ def get_local_scene(scene_id):
         findScene(id: $id) {
             id
             title
+            date
             files {
                 path
                 basename
@@ -315,52 +318,125 @@ def local_stash_ids(endpoint):
 # Title Cleaning
 # ============================================================================
 
-# Common tags to strip from filenames (applied AFTER separator conversion)
+# Video extensions clean_title strips from the very end of a name. Only real ones:
+# a name that has already lost its extension ends in a title word ("...Hot.Day").
+# Two-letter ones (.ts, .rm) are left out because "TS" also ends real names.
+VIDEO_EXTENSION = re.compile(
+    r'\.(mp4|m4v|mkv|avi|wmv|mov|flv|f4v|webm|mpe?g|m2ts|mts|vob|3gp|ogv|divx|asf|rmvb)$',
+    re.IGNORECASE)
+
+# Resolution, encoding, source and container tags, as they appear in a raw release name.
+RELEASE_TAG = (r'2160p|1080p|720p|480p|4k|uhd|hevc|h\.?26[45]|x26[45]|avc|'
+               r'web-dl|webrip|web|bluray|bdrip|dvdrip|hdtv|xxx|mp4|mkv|wmv|m4v')
+
+# A trailing "-GROUP" is a release group only when it follows one of those tags
+# ("...1080p.MP4-WRB"); otherwise it is the last word of the title ("jane-doe-hot-scene").
+RELEASE_GROUP = re.compile(r'(?<![a-z0-9])(' + RELEASE_TAG + r')-[a-z0-9]{2,12}\s*$', re.IGNORECASE)
+BRACKET_GROUP = re.compile(r'\[[a-z]{2,8}\]\s*$', re.IGNORECASE)
+
+# File sizes, matched before separators become spaces ("1.5GB", "Day_700MB")
+FILE_SIZE = re.compile(r'(?<![0-9a-z])\d+(\.\d+)?\s*(gb|mb)(?![0-9a-z])', re.IGNORECASE)
+
+# Tags to strip once separators are spaces (so "WEB-DL" is "WEB DL", "H.264" is "H 264").
+# "sex" and "porn" are not here: they are title words ("Sex On The Beach").
 STRIP_PATTERNS = [
     # Resolutions
     r'\b(2160p|1080p|720p|480p|4k|uhd)\b',
     # Encoding
-    r'\b(hevc|h\.?264|h\.?265|x264|x265|avc)\b',
+    r'\b(hevc|h ?26[45]|x26[45]|avc)\b',
     # Sources
-    r'\b(web|webrip|web-dl|bluray|bdrip|dvdrip|hdtv)\b',
+    r'\b(web ?dl|webrip|web|bluray|bdrip|dvdrip|hdtv)\b',
     # Adult-specific
-    r'\b(xxx|porn|sex)\b',
-    # File size patterns
-    r'\b\d+(\.\d+)?\s*(gb|mb)\b',
-    # Date patterns that aren't scene dates
-    r'\b(19|20)\d{2}[-.]?(0[1-9]|1[0-2])[-.]?(0[1-9]|[12]\d|3[01])\b',
+    r'\bxxx\b',
+    # Containers named as tags ("...1080p.MP4-WRB")
+    r'\b(mp4|mkv|wmv|m4v)\b',
 ]
+
+# Date shapes in names, not inside a longer word or number. The kind says how to read them.
+_NB, _NA = r'(?<![0-9a-z])', r'(?![0-9a-z])'
+DATE_PATTERNS = [
+    # YYYY.MM.DD, YYYY-MM-DD, YYYY_MM_DD, YYYYMMDD
+    ("ymd", re.compile(_NB + r'((?:19|20)\d\d)([._-]?)(\d\d)\2(\d\d)' + _NA, re.IGNORECASE)),
+    # DD.MM.YYYY or MM.DD.YYYY
+    ("dmy", re.compile(_NB + r'(\d\d)([._-])(\d\d)\2((?:19|20)\d\d)' + _NA, re.IGNORECASE)),
+    # YY.MM.DD, the scene-release convention (dots only)
+    ("yymd", re.compile(_NB + r'(\d\d)(\.)(\d\d)\.(\d\d)' + _NA, re.IGNORECASE)),
+]
+
+
+def _valid_dates(year, month, day):
+    try:
+        return {datetime.date(year, month, day).isoformat()}
+    except ValueError:
+        return set()
+
+
+def _date_readings(kind, match):
+    """The ISO dates a matched date shape can be read as: none, one, or two when
+    DD.MM and MM.DD are both valid and differ."""
+    a, b, c = int(match.group(1)), int(match.group(3)), int(match.group(4))
+    if kind == "ymd":
+        return _valid_dates(a, b, c)
+    if kind == "yymd":
+        # Two-digit years pivot like strptime's %y: 69-99 are 1900s, 00-68 are 2000s
+        return _valid_dates(a + (1900 if a >= 69 else 2000), b, c)
+    return _valid_dates(c, b, a) | _valid_dates(c, a, b)  # day-month, month-day
+
+
+def extract_date(name):
+    """
+    The scene date in a filename or title as an ISO string, or None.
+
+    Reads, in this order of preference:
+    - YYYY.MM.DD, YYYY-MM-DD, YYYY_MM_DD and YYYYMMDD: a 4-digit year first is unambiguous.
+    - DD.MM.YYYY when the first number is over 12, and MM.DD.YYYY when the second is.
+      When both are 12 or under (and differ), it could be either, so it is skipped.
+    - YY.MM.DD: scene releases put the year first ("Studio.24.01.15.Title"), so it is
+      read that way whenever the month is 1-12 and the day 1-31, even though it could
+      also be DD.MM.YY. Years 69-99 are 1900s, 00-68 are 2000s.
+    Impossible dates (month 13, 30 February) are not dates.
+    """
+    if not name:
+        return None
+    for kind, pattern in DATE_PATTERNS:
+        for match in pattern.finditer(name):
+            readings = _date_readings(kind, match)
+            if len(readings) == 1:
+                return readings.pop()
+    return None
 
 
 def clean_title(title):
     """
-    Clean a title/filename for search.
-    Strips extensions, dots, underscores, and common release tags.
+    Clean a title/filename for search and scoring.
+
+    Strips a real video extension, a release group after a release tag, dates, file
+    sizes and release tags, and turns separators into spaces. Studio and performer
+    names stay: the stash-box text search matches them. Scoring removes them itself.
     """
     if not title:
         return ""
 
-    cleaned = title
+    cleaned = VIDEO_EXTENSION.sub('', title.strip())
 
-    # Remove file extension if present
-    cleaned = re.sub(r'\.[a-zA-Z0-9]{2,4}$', '', cleaned)
+    # Release groups, before separators change: "[XC]", then "x265-GUSH" -> "x265"
+    cleaned = BRACKET_GROUP.sub('', cleaned)
+    cleaned = RELEASE_GROUP.sub(r'\1', cleaned)
 
-    # Strip release groups BEFORE converting separators (they often use - or [])
-    # e.g., "-RARBG", "[YTS]", "-FGT"
-    cleaned = re.sub(r'[-]\s*[a-z]{2,8}\s*$', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\[[a-z]{2,8}\]\s*$', '', cleaned, flags=re.IGNORECASE)
+    # Dates and sizes use the separators, so they go before separators become spaces.
+    # Anything date-shaped goes, even when extract_date would call it ambiguous.
+    for kind, pattern in DATE_PATTERNS:
+        cleaned = pattern.sub(
+            lambda m, kind=kind: ' ' if _date_readings(kind, m) else m.group(0), cleaned)
+    cleaned = FILE_SIZE.sub(' ', cleaned)
 
-    # Replace dots, underscores, and dashes with spaces
-    cleaned = re.sub(r'[._-]+', ' ', cleaned)
+    # Dots, underscores, dashes and brackets become spaces
+    cleaned = re.sub(r'[._\-\[\](){}]+', ' ', cleaned)
 
-    # Apply remaining strip patterns (case insensitive)
     for pattern in STRIP_PATTERNS:
         cleaned = re.sub(pattern, ' ', cleaned, flags=re.IGNORECASE)
 
-    # Collapse multiple spaces
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-
-    return cleaned
+    return re.sub(r'\s+', ' ', cleaned).strip()
 
 
 def build_search_query(studio_name, performer_names):
@@ -489,12 +565,13 @@ def normalize_title(title):
     """Normalize a title for comparison."""
     if not title:
         return ""
-    # Lowercase, remove common punctuation, collapse whitespace
+    # Lowercase; apostrophes join ("Kate's" -> "kates", as release names write it);
+    # other punctuation and underscores split; collapse whitespace
     import re
     normalized = title.lower()
-    normalized = re.sub(r'[^\w\s]', ' ', normalized)
-    normalized = re.sub(r'\s+', ' ', normalized).strip()
-    return normalized
+    normalized = re.sub(r"['\u2019`]", '', normalized)  # ' and the typographic right quote
+    normalized = re.sub(r'[\W_]+', ' ', normalized)
+    return normalized.strip()
 
 
 def tokenize(text):
@@ -536,12 +613,17 @@ def levenshtein_ratio(s1, s2):
     return 1.0 - (distance / max_len)
 
 
-def token_similarity(tokens1, tokens2, fuzzy_threshold=0.75):
+def token_similarity(tokens1, tokens2, fuzzy_threshold=0.75, contained=False):
     """
     Calculate similarity between two token lists using fuzzy token matching.
 
-    For each token in the shorter list, finds the best matching token in the
-    longer list. Tokens with similarity >= fuzzy_threshold are considered matches.
+    For each token in the reference list, finds the best matching unused token in
+    the other list. Tokens with similarity >= fuzzy_threshold are considered matches.
+
+    By default the shorter list is the reference and the sum is divided by the longer
+    list's length, so extra tokens on either side cost. With contained=True, tokens1
+    is the reference and the sum is divided by its length: how much of tokens1 is
+    found in tokens2, whatever else tokens2 holds.
 
     Returns a score from 0 to 1.
     """
@@ -551,7 +633,7 @@ def token_similarity(tokens1, tokens2, fuzzy_threshold=0.75):
         return 0.0
 
     # Work with the shorter list as the reference
-    if len(tokens1) > len(tokens2):
+    if not contained and len(tokens1) > len(tokens2):
         tokens1, tokens2 = tokens2, tokens1
 
     total_score = 0.0
@@ -578,22 +660,50 @@ def token_similarity(tokens1, tokens2, fuzzy_threshold=0.75):
             if best_idx >= 0:
                 used_indices.add(best_idx)
 
+    if contained:
+        return total_score / len(tokens1)
     # Score is average of best matches, penalized by unmatched tokens
     # Denominator is max of token counts to penalize missing words
     max_tokens = max(len(tokens1), len(tokens2))
     return total_score / max_tokens
 
 
-def title_similarity(title1, title2):
+STOP_WORDS = frozenset("the a an and of in on with to for".split())
+
+
+def _remove_phrases(tokens, phrases):
+    """Drop every run of tokens that spells one of the phrases (token lists), longest first."""
+    for phrase in sorted(phrases, key=len, reverse=True):
+        n = len(phrase)
+        out, i = [], 0
+        while i < len(tokens):
+            if tokens[i:i + n] == phrase:
+                i += n
+            else:
+                out.append(tokens[i])
+                i += 1
+        tokens = out
+    return tokens
+
+
+def _content_tokens(normalized, phrases):
+    return [t for t in _remove_phrases(tokenize(normalized), phrases) if t not in STOP_WORDS]
+
+
+def title_similarity(title1, title2, ignore_names=()):
     """
-    Calculate similarity between two titles using token-based fuzzy matching.
+    How much of title2 (the stash-box title) is found in title1 (the local title,
+    already cleaned), from 0 to 1.
 
-    Handles:
-    - Word reordering ("Summer Beach" vs "Beach Summer")
-    - Typos ("Adventrue" vs "Adventure")
-    - Extra/missing words (partial matches still score)
+    - Containment: the share of title2's tokens with a fuzzy match (>= 0.75) in title1,
+      so a local name that also holds a studio, performers or tags still scores 1.0.
+    - Stop words (the, a, an, and, of, in, on, with, to, for) don't count on either side.
+    - ignore_names (studio and performer names) are removed from both titles as whole
+      phrases first: they say nothing about the title and score elsewhere.
+    - Identical titles score 1.0 before any of that.
 
-    Returns a score from 0 to 1.
+    Handles word reordering ("Summer Beach" vs "Beach Summer") and typos
+    ("Adventrue" vs "Adventure").
     """
     if not title1 or not title2:
         return 0.0
@@ -608,14 +718,21 @@ def title_similarity(title1, title2):
     if norm1 == norm2:
         return 1.0
 
-    # Tokenize and compare
-    tokens1 = tokenize(norm1)
-    tokens2 = tokenize(norm2)
+    phrases = [p for p in (tokenize(normalize_title(n)) for n in ignore_names if n) if p]
+    local = _content_tokens(norm1, phrases)
+    remote = _content_tokens(norm2, phrases)
 
-    if not tokens1 or not tokens2:
+    if not local or not remote:
         return 0.0
 
-    return token_similarity(tokens1, tokens2)
+    # Short-title guard: a stash-box title whose only content is one 1-2 character
+    # token ("2", "VR") turns up inside many local names by chance, so containment
+    # would call it a full match. Score it symmetrically instead, which divides by the
+    # longer side: it reaches 0.9 only when the local title is that token too.
+    if len(remote) == 1 and len(remote[0]) <= 2:
+        return token_similarity(remote, local)
+
+    return token_similarity(remote, local, contained=True)
 
 
 def calculate_duration_score(local_duration, stashdb_duration):
@@ -649,12 +766,75 @@ def calculate_duration_score(local_duration, stashdb_duration):
         return 0.1
 
 
-def score_scene(scene, performer_stash_ids, studio_stash_id, local_title=None, local_duration=None):
+_PARTIAL_DATE = re.compile(r'^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$')
+
+
+def parse_partial_date(value):
+    """(year, month, day) for "YYYY", "YYYY-MM" or "YYYY-MM-DD" (month and day may be
+    None), or None when the value is missing, malformed or impossible."""
+    if not isinstance(value, str):
+        return None
+    m = _PARTIAL_DATE.match(value.strip()[:10])
+    if not m:
+        return None
+    year, month, day = (int(g) if g else None for g in m.groups())
+    if month is not None and not 1 <= month <= 12:
+        return None
+    if day is not None and not _valid_dates(year, month, day):
+        return None
+    return year, month, day
+
+
+def date_bonus(local_date, stashbox_date):
+    """
+    Points for the stash-box release date agreeing with the local scene's date.
+
+    +3 for the same day. +1 when only the year-month can match: the stash-box date is
+    just "YYYY-MM" and the month is the same, or the dates are a day apart (release
+    time zones). A year-only stash-box date earns nothing. Missing or malformed: 0.
+    """
+    local, remote = parse_partial_date(local_date), parse_partial_date(stashbox_date)
+    if not local or not remote or local[1] is None or remote[1] is None:
+        return 0
+    if local[2] is not None and remote[2] is not None:
+        days = abs((datetime.date(*local) - datetime.date(*remote)).days)
+        return 3 if days == 0 else 1 if days == 1 else 0
+    return 1 if local[:2] == remote[:2] else 0
+
+
+def _scene_names(scene):
+    """The stash-box scene's studio name and performer names and credited aliases."""
+    names = [(scene.get("studio") or {}).get("name")]
+    for perf in scene.get("performers") or []:
+        names.append((perf.get("performer") or {}).get("name"))
+        names.append(perf.get("as"))
+    return [n for n in names if n]
+
+
+class SceneScore(namedtuple("SceneScore", "score matching_performers title_match duration_score")):
+    """What score_scene returns. It unpacks as the four values it has always returned;
+    matches_date (a date bonus was earned) rides along as an attribute."""
+
+    def __new__(cls, score, matching_performers, title_match, duration_score, matches_date=False):
+        self = super().__new__(cls, score, matching_performers, title_match, duration_score)
+        self.matches_date = matches_date
+        return self
+
+
+def score_scene(scene, performer_stash_ids, studio_stash_id, local_title=None, local_duration=None,
+                local_date=None, known_names=()):
     """
     Calculate relevance score for a scene.
-    +10 for exact title match, +5 for partial title match
+
+    local_title should already be cleaned (clean_title). known_names are the local
+    scene's studio and performer names; they and the stash-box scene's own names are
+    left out of the title comparison (see title_similarity).
+
+    +10 when the title similarity is >= 0.9, +5 when it is >= 0.5.
     +3 for matching studio, +2 per matching performer.
+    +3 for the same release date as local_date, +1 for a near one (see date_bonus).
     Score is then multiplied by duration proximity (0.5 + 0.5 * duration_score).
+    Returns a SceneScore.
     """
     base_score = 0
     title_match = False
@@ -662,13 +842,17 @@ def score_scene(scene, performer_stash_ids, studio_stash_id, local_title=None, l
     # Check title match (highest priority)
     if local_title:
         stashdb_title = scene.get("title", "")
-        similarity = title_similarity(local_title, stashdb_title)
+        names = list(known_names or ()) + _scene_names(scene)
+        similarity = title_similarity(local_title, stashdb_title, ignore_names=names)
         if similarity >= 0.9:
             base_score += 10
             title_match = True
         elif similarity >= 0.5:
             base_score += 5
             title_match = True
+
+    bonus = date_bonus(local_date, scene.get("release_date"))
+    base_score += bonus
 
     # Check studio match
     if studio_stash_id and scene.get("studio"):
@@ -689,7 +873,8 @@ def score_scene(scene, performer_stash_ids, studio_stash_id, local_title=None, l
     duration_score = calculate_duration_score(local_duration, scene.get("duration"))
     final_score = base_score * (0.5 + 0.5 * duration_score)
 
-    return final_score, len(matching_performers), title_match, duration_score
+    return SceneScore(final_score, len(matching_performers), title_match, duration_score,
+                      matches_date=bonus > 0)
 
 
 def result_sort_key(x):
@@ -768,6 +953,10 @@ def get_scene_context(scene_id, plugin_settings, endpoint=None):
         if basename:
             local_filename = basename.rsplit(".", 1)[0] if "." in basename else basename
 
+    # The scene's own date when set, else a date found in the filename or title
+    local_date = scene.get("date") if parse_partial_date(scene.get("date")) else None
+    local_date = local_date or extract_date(local_filename) or extract_date(local_title)
+
     context = {
         "scene": scene,
         "stashdb_url": stashdb_url,
@@ -781,6 +970,7 @@ def get_scene_context(scene_id, plugin_settings, endpoint=None):
         "local_duration": local_duration,
         "local_title": local_title,
         "local_filename": local_filename,
+        "local_date": local_date,
     }
 
     return context, None
@@ -790,24 +980,29 @@ def format_results(all_scenes, context, local_stash_ids):
     """Format and score all scenes for the response."""
     performer_stash_ids = context["performer_stash_ids"]
     studio_stash_id = context["studio_stash_id"]
-    local_title = context["local_title"]
-    local_filename = context["local_filename"]
+    # The same cleaned title the phase-1 text search uses
+    local_title = clean_title(context["local_title"] or context["local_filename"])
     local_duration = context["local_duration"]
+    known_names = [context.get("studio_name")] + list(context.get("performer_names") or [])
+    local_date = context.get("local_date")
 
     # Score and format results
     results = []
     for stashdb_scene_id, stashdb_scene in all_scenes.items():
-        score, matching_performer_count, title_match, duration_score = score_scene(
+        scored = score_scene(
             stashdb_scene, performer_stash_ids, studio_stash_id,
-            local_title=local_title or local_filename,
-            local_duration=local_duration
+            local_title=local_title,
+            local_duration=local_duration,
+            local_date=local_date,
+            known_names=known_names,
         )
 
         formatted = format_scene(stashdb_scene, stashdb_scene_id)
-        formatted["score"] = score
-        formatted["matching_performers"] = matching_performer_count
-        formatted["matches_title"] = title_match
-        formatted["duration_score"] = duration_score
+        formatted["score"] = scored.score
+        formatted["matching_performers"] = scored.matching_performers
+        formatted["matches_title"] = scored.title_match
+        formatted["matches_date"] = scored.matches_date
+        formatted["duration_score"] = scored.duration_score
         formatted["matches_studio"] = (
             studio_stash_id is not None and
             (stashdb_scene.get("studio") or {}).get("id") == studio_stash_id
