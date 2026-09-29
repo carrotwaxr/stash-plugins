@@ -9,6 +9,18 @@ Version: 1.5.0
 
 import json
 import sys
+from stashapi_check import stashapi_problem
+
+# Check stashapp-tools before anything imports stashapi, and report a clear error
+# instead of a traceback. (stashapi.log is unavailable here, so use Stash's raw
+# log protocol: \x01e\x02 prefix on stderr.)
+_PROBLEM = stashapi_problem()
+if _PROBLEM:
+    sys.stderr.write(f"\x01e\x02{_PROBLEM}\n")
+    sys.stderr.flush()
+    print(json.dumps({"error": _PROBLEM}))
+    sys.exit(0)
+
 from stashapi.stashapp import StashInterface
 from utils.logger import init_file_logger, close_file_logger
 import utils.logger as log
@@ -17,44 +29,6 @@ from scene import process_all_scenes, process_scene
 from conditions import should_process, describe_active_conditions
 from plugin_settings import map_settings
 from utils.self_updates import plugin_data_dir, should_skip_hook
-
-# Minimum stashapp-tools version required for schema 72+ compatibility
-MIN_STASHAPP_TOOLS_VERSION = "0.2.59"
-
-
-def _parse_version(version_str):
-    """Parse version string into tuple of integers for comparison."""
-    try:
-        return tuple(int(x) for x in version_str.split('.'))
-    except (ValueError, AttributeError):
-        return (0,)
-
-
-def check_stashapp_tools_version():
-    """Check if stashapp-tools is at minimum required version.
-
-    Older versions have a bug with auto-generated GraphQL fragments that
-    causes "Cannot spread fragment 'Folder' within itself" errors on
-    Stash schema 72+. Version 0.2.59 includes the fix.
-    """
-    try:
-        import importlib.metadata
-        version = importlib.metadata.version("stashapp-tools")
-        if _parse_version(version) < _parse_version(MIN_STASHAPP_TOOLS_VERSION):
-            log.warning(
-                f"stashapp-tools version {version} is outdated. "
-                f"Version {MIN_STASHAPP_TOOLS_VERSION}+ is required for Stash schema 72+. "
-                f"Run: pip install --upgrade stashapp-tools"
-            )
-            return False
-        log.debug(f"stashapp-tools version: {version}")
-        return True
-    except importlib.metadata.PackageNotFoundError:
-        log.debug("stashapp-tools package not found, skipping version check")
-        return True
-    except Exception as e:
-        log.debug(f"Could not check stashapp-tools version: {e}")
-        return True
 
 # Parse JSON context passed from Stash
 json_input = json.loads(sys.stdin.read())
@@ -88,10 +62,8 @@ def get_settings(stash_instance):
     return map_settings(plugin_config)
 
 
-# Load settings from Stash
-SETTINGS = get_settings(stash)
-# Where the plugin keeps its own files (self-update markers); not a user setting
-SETTINGS["data_dir"] = plugin_data_dir(json_input["server_connection"])
+# Loaded inside main() so a bad setting is a logged error, not a traceback
+SETTINGS = {}
 
 
 def get_plugin_mode():
@@ -115,14 +87,17 @@ def get_plugin_mode():
 def main():
     """Main entry point for the plugin."""
     try:
+        global SETTINGS
+        # Load settings from Stash
+        SETTINGS = get_settings(stash)
+        # Where the plugin keeps its own files (self-update markers); not a user setting
+        SETTINGS["data_dir"] = plugin_data_dir(json_input["server_connection"])
+
         mode = get_plugin_mode()
 
         # Initialize file logging if configured
         if SETTINGS.get("log_file_path"):
             init_file_logger(SETTINGS["log_file_path"])
-
-        # Check stashapp-tools version for schema compatibility
-        check_stashapp_tools_version()
 
         log.debug(f"Plugin mode: {mode}")
         log.debug(f"Dry run: {SETTINGS['dry_run']}")

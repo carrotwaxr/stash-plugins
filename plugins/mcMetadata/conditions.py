@@ -50,6 +50,8 @@ def describe_active_conditions(settings):
     organized_condition = settings.get("organized_condition", "ignore")
     if organized_condition in ("require", "skip"):
         parts.append(f"organized={organized_condition}")
+    elif organized_condition == "invalid":
+        parts.append("organized=INVALID (nothing will be processed)")
     if settings.get("require_stash_id", False):
         parts.append("stashID=required")
     required_tags = settings.get("required_tags") or []
@@ -103,6 +105,8 @@ def should_process(scene, settings):
     # --- organized -------------------------------------------------------
     organized_condition = settings.get("organized_condition", "ignore")
     organized = bool(scene.get("organized", False))
+    if organized_condition == "invalid":
+        return (False, "invalid_organized_condition")
     if organized_condition == "require" and not organized:
         return (False, "not_organized")
     if organized_condition == "skip" and organized:

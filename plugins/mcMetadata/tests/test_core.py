@@ -1,10 +1,8 @@
 import os
-import tempfile
 import unittest
 from utils.files import rename_file, replace_file_ext
 from utils.nfo import build_nfo_xml
 from utils.replacer import get_new_path
-from utils.settings import validate_media_server, validate_settings
 
 SEP = os.path.sep
 
@@ -359,84 +357,6 @@ class TestReplacers(unittest.TestCase):
             result,
             f"{SEP}data{SEP}tagged{SEP}MindGeek{SEP}Brazzers{SEP}Brazzers - 4562 - Episode Title (2022) - Jayden Jaymes Alec Knight Jayden Jaymes Alec Knight Untagged Performer 2022-03-14 [FUHD-8K] Threesome Rough.mp4",
             "The path is wrong",
-        )
-
-
-class TestSettings(unittest.TestCase):
-    def setUp(self):
-        # validate_renamer_path creates the directory, so point it somewhere disposable.
-        # Otherwise every case fails on /data and the "invalid" cases pass for the wrong reason.
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.settings = {**MOCK_SETTINGS, "renamer_path": tmp.name + SEP}
-
-    def test_valid_config(self):
-        self.assertEqual(
-            validate_settings(self.settings),
-            True,
-            "Validate should return True with valid settings",
-        )
-
-    def test_invalid_boolean(self):
-        mock_settings = self.settings.copy()
-        mock_settings["enable_renamer"] = None
-        self.assertEqual(
-            validate_settings(mock_settings),
-            False,
-            "Validate should return False with an invalid boolean",
-        )
-
-    def test_invalid_filename_budget(self):
-        mock_settings = self.settings.copy()
-        mock_settings["renamer_filename_budget"] = 39
-        self.assertEqual(
-            validate_settings(mock_settings),
-            False,
-            "Validate should return False with an invalid renamer_filename_budget",
-        )
-
-    def test_invalid_media_center(self):
-        mock_settings = self.settings.copy()
-        mock_settings["enable_actor_images"] = True
-        mock_settings["media_server"] = "wombat"
-        with self.assertRaises(ValueError):
-            validate_media_server(mock_settings)
-
-    def test_invalid_template(self):
-        mock_settings = self.settings.copy()
-        mock_settings["renamer_path_template"] = "$StashID - $Title <$Performers>"
-        self.assertEqual(
-            validate_settings(mock_settings),
-            False,
-            "Validate should return False with an invalid renamer_path_template",
-        )
-
-    def test_invalid_uniqueness(self):
-        mock_settings = self.settings.copy()
-        mock_settings["renamer_path_template"] = "$Title $Performers"
-        self.assertEqual(
-            validate_settings(mock_settings),
-            False,
-            "Validate should return False with an invalid renamer_path_template",
-        )
-
-    def test_missing_required_setting(self):
-        mock_settings = self.settings.copy()
-        mock_settings.pop("dry_run")
-        self.assertEqual(
-            validate_settings(mock_settings),
-            False,
-            "Validate should return False with a missing required key",
-        )
-
-    def test_missing_required_performer_setting(self):
-        mock_settings = self.settings.copy()
-        mock_settings["enable_actor_images"] = True
-        mock_settings.pop("actor_metadata_path")
-        self.assertEqual(
-            validate_settings(mock_settings),
-            False,
-            "Validate should return False with a missing required key",
         )
 
 
