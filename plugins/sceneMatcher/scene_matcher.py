@@ -699,14 +699,18 @@ def _content_tokens(normalized, phrases):
 
 def title_similarity(title1, title2, ignore_names=()):
     """
-    How much of title2 (the stash-box title) is found in title1 (the local title,
-    already cleaned), from 0 to 1.
+    How well title2 (the stash-box title) matches title1 (the local title, already
+    cleaned), from 0 to 1.
 
-    - Containment: the share of title2's tokens with a fuzzy match (>= 0.75) in title1,
-      so a local name that also holds a studio, performers or tags still scores 1.0.
-    - Stop words (the, a, an, and, of, in, on, with, to, for) don't count on either side.
     - ignore_names (studio and performer names) are removed from both titles as whole
-      phrases first: they say nothing about the title and score elsewhere.
+      phrases first: they say nothing about the title and score elsewhere. So are stop
+      words (the, a, an, and, of, in, on, with, to, for). What is left is the content.
+    - Tokens match fuzzily (>= 0.75), each local token at most once.
+    - Two shares of that match: containment, the share of the stash-box title found in
+      the local title, and coverage, the share of the local content the stash-box title
+      accounts for. The score is their harmonic mean (F1), 2 * matched / (both lengths).
+      Containment alone scores a short generic title ("Massage") as high as the full one
+      ("Stepsister Massage Surprise"); coverage tells them apart.
     - Identical titles score 1.0 before any of that.
 
     Handles word reordering ("Summer Beach" vs "Beach Summer") and typos
@@ -739,7 +743,12 @@ def title_similarity(title1, title2, ignore_names=()):
     if len(remote) == 1 and len(remote[0]) <= 2:
         return token_similarity(remote, local)
 
-    return token_similarity(remote, local, contained=True)
+    containment = token_similarity(remote, local, contained=True)
+    matched = containment * len(remote)
+    coverage = matched / len(local)
+    if not matched:
+        return 0.0
+    return 2 * containment * coverage / (containment + coverage)
 
 
 def calculate_duration_score(local_duration, stashdb_duration):

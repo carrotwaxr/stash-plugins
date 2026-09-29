@@ -115,15 +115,21 @@ class TestExtractDate(unittest.TestCase):
 
 
 class TestContainmentTitleScore(unittest.TestCase):
-    """title_similarity(local, stash_box): the share of the stash-box title found locally."""
+    """title_similarity(local, stash_box): F1 of the share of the stash-box title found
+    locally and the share of the local content it covers, names and stop words removed.
+    format_results always passes the local studio and performer names, so these do too."""
 
     def test_title_inside_cleaned_filename(self):
-        self.assertGreaterEqual(title_similarity("Jane Doe Hot Day", "Hot Day"), 0.9)
+        self.assertGreaterEqual(title_similarity("Jane Doe Hot Day", "Hot Day", ignore_names=["Jane Doe"]), 0.9)
+        # A local word the title does not account for now counts: partial band
+        sim = title_similarity("Jane Doe Hot Day", "Hot Day")
+        self.assertGreaterEqual(sim, 0.5)
+        self.assertLess(sim, 0.9)
 
     def test_score_band_for_title_inside_filename(self):
         scene = {"title": "Hot Day", "studio": None, "performers": [], "duration": 1800}
         score, _, title_match, _ = score_scene(scene, set(), None, local_title="Jane Doe Hot Day",
-                                               local_duration=1800)
+                                               local_duration=1800, known_names=["Jane Doe"])
         self.assertEqual(score, 10)
         self.assertTrue(title_match)
 
@@ -132,7 +138,7 @@ class TestContainmentTitleScore(unittest.TestCase):
         self.assertEqual(title_similarity("Jane Doe In Bed", "In"), 0)
 
     def test_stop_words_do_not_count_against(self):
-        self.assertGreaterEqual(title_similarity("Jane Doe Hot Day", "The Hot Day"), 0.9)
+        self.assertGreaterEqual(title_similarity("Jane Doe Hot Day", "The Hot Day", ignore_names=["Jane Doe"]), 0.9)
 
     def test_known_names_removed(self):
         # Without removing "Jane Doe", half the stash-box title would be found locally
@@ -141,7 +147,7 @@ class TestContainmentTitleScore(unittest.TestCase):
                                           ignore_names=["Brazzers", "Jane Doe"]), 0)
         self.assertEqual(title_similarity(local, "Jane Doe", ignore_names=["Jane Doe"]), 0)
         self.assertGreaterEqual(title_similarity(local, "Jane Doe Hot Day",
-                                                 ignore_names=["Jane Doe"]), 0.9)
+                                                 ignore_names=["Brazzers", "Jane Doe"]), 0.9)
 
     def test_candidate_names_removed(self):
         # A stash-box scene titled with its own performer's name proves nothing about ours
@@ -162,7 +168,7 @@ class TestContainmentTitleScore(unittest.TestCase):
 
     def test_fuzzy_threshold(self):
         # "adventrue" vs "adventure" is 0.78, above the 0.75 threshold
-        sim = title_similarity("Jane Doe Beach Adventrue", "Beach Adventure")
+        sim = title_similarity("Jane Doe Beach Adventrue", "Beach Adventure", ignore_names=["Jane Doe"])
         self.assertGreater(sim, 0.8)
         self.assertLess(sim, 0.9)
         # "hot" vs "hat" is 0.67, below it
@@ -259,6 +265,49 @@ class TestFormatResults(unittest.TestCase):
                                [candidate("a", "Hot Day", None)])
         self.assertTrue(out["a"]["matches_title"])
         self.assertEqual(out["a"]["score"], 10 * 0.75)  # no local duration: neutral multiplier
+
+
+class TestShortGenericTitle(unittest.TestCase):
+    """A short, generic stash-box title contained in the local name must not tie or beat
+    the full title: containment alone scores both 1.0."""
+
+    CASES = [
+        # (local title, right title, wrong title)
+        ("Jane Doe - Stepsister Massage Surprise", "Stepsister Massage Surprise", "Massage"),
+        ("Jane Doe - Hot Day At The Beach", "Hot Day At The Beach", "Hot Day"),
+    ]
+
+    def ranked(self, local_title, right, wrong):
+        box = {"name": "StashDB", "endpoint": EP, "api_key": "k"}
+        scene = local_scene(
+            title=local_title, files=[{"basename": "x.mp4", "duration": 1800}],
+            performers=[{"name": "Jane Doe", "stash_ids": [{"endpoint": EP, "stash_id": "p1"}]}],
+            studio={"name": "Brazzers", "stash_ids": [{"endpoint": EP, "stash_id": "st"}]})
+        # The wrong one is closer in duration, so the title has to decide
+        cands = {"right": {**candidate("right", right, None), "duration": 1500},
+                 "wrong": {**candidate("wrong", wrong, None), "duration": 1700}}
+        with mock.patch.object(scene_matcher, "get_stashbox_config", return_value=[box]), \
+             mock.patch.object(scene_matcher, "get_local_scene", return_value=scene):
+            context, err = scene_matcher.get_scene_context("1", {})
+        self.assertIsNone(err)
+        return scene_matcher.format_results(cands, context, set())
+
+    def test_right_title_ranks_first(self):
+        for local_title, right, wrong in self.CASES:
+            with self.subTest(local=local_title):
+                results = self.ranked(local_title, right, wrong)
+                self.assertEqual([r["stash_id"] for r in results], ["right", "wrong"],
+                                 [(r["stash_id"], r["score"]) for r in results])
+                self.assertGreater(results[0]["score"], results[1]["score"])
+
+    def test_similarity_counts_what_the_title_leaves_out(self):
+        names = ["Jane Doe"]
+        local = "Jane Doe Stepsister Massage Surprise"
+        self.assertEqual(title_similarity(local, "Stepsister Massage Surprise", ignore_names=names), 1.0)
+        self.assertLess(title_similarity(local, "Massage", ignore_names=names), 0.9)
+        self.assertLess(title_similarity("Jane Doe Hot Day At The Beach", "Hot Day", ignore_names=names), 0.9)
+        # Still a partial title match, not nothing
+        self.assertGreaterEqual(title_similarity(local, "Massage", ignore_names=names), 0.5)
 
 
 class TestLocalSceneQuery(unittest.TestCase):
