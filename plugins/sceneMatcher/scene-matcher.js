@@ -1023,11 +1023,19 @@
     return cfg.boxes.length ? cfg.boxes[0].endpoint : null;
   }
 
+  /** The box's name in Stash, else its endpoint's host (a box can be saved unnamed). */
   async function boxNameFor(endpoint) {
     const cfg = await getConfig();
     const norm = normalizeEndpoint(endpoint);
     const box = cfg.boxes.find((b) => normalizeEndpoint(b.endpoint) === norm);
-    return box && box.name ? box.name : null;
+    if (!box) return null;
+    const name = String(box.name || "").trim();
+    if (name) return name;
+    try {
+      return new URL(box.endpoint).hostname || null;
+    } catch (e) {
+      return null;
+    }
   }
 
   // Gate cache: `${normalized endpoint}|${scene id}` -> { sig, unlinked }

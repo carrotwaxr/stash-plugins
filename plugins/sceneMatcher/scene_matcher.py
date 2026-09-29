@@ -15,6 +15,7 @@ import re
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from collections import namedtuple
 
@@ -60,6 +61,19 @@ def site_base(endpoint):
     (the UI appends "/scenes/<id>")."""
     m = re.match(r"(https?://.*?/)graphql", endpoint or "")
     return (m.group(1) if m else endpoint or "").rstrip("/")
+
+
+def box_name(box):
+    """A stash-box's display name: its name in Stash, else its endpoint's host (a box can
+    be saved without a name), else "the stash-box"."""
+    name = (box.get("name") or "").strip()
+    if name:
+        return name
+    try:
+        host = urllib.parse.urlparse(box.get("endpoint") or "").hostname
+    except ValueError:
+        host = None
+    return host or "the stash-box"
 
 
 def resolve_endpoint(requested, boxes, setting):
@@ -937,7 +951,7 @@ def get_scene_context(scene_id, plugin_settings, endpoint=None):
     target = normalize_endpoint(graphql_url)
     stashdb_url = site_base(graphql_url)
     stashdb_api_key = stashbox.get("api_key", "")
-    stashdb_name = stashbox.get("name", "StashDB")
+    stashdb_name = box_name(stashbox)
 
     # Get the local scene
     scene = get_local_scene(scene_id)

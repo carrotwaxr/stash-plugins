@@ -102,6 +102,31 @@ class TestContext(unittest.TestCase):
         self.assertEqual(scene_matcher.site_base("https://x.test/api"), "https://x.test/api")
 
 
+class TestUnnamedBox(unittest.TestCase):
+    """A stash-box saved without a name is called by its host, never by an empty string."""
+
+    def test_empty_or_missing_name_falls_back_to_host(self):
+        for box in ({"name": "", "endpoint": "https://fansdb.cc/graphql", "api_key": "k"},
+                    {"name": None, "endpoint": "https://fansdb.cc/graphql", "api_key": "k"},
+                    {"name": "  ", "endpoint": "https://fansdb.cc/graphql", "api_key": "k"},
+                    {"endpoint": "https://fansdb.cc/graphql", "api_key": "k"}):
+            with self.subTest(name=box.get("name", "<missing>")):
+                linked = make_scene([{"endpoint": "https://fansdb.cc/graphql", "stash_id": "x"}])
+                with mock.patch.object(scene_matcher, "get_stashbox_config", return_value=[box]), \
+                     mock.patch.object(scene_matcher, "get_local_scene", return_value=linked):
+                    _, error = scene_matcher.get_scene_context("1", {})
+                self.assertEqual(error["error"], "Scene already has a fansdb.cc ID. No matching needed.")
+                with mock.patch.object(scene_matcher, "get_stashbox_config", return_value=[box]), \
+                     mock.patch.object(scene_matcher, "get_local_scene", return_value=make_scene([])):
+                    context, _ = scene_matcher.get_scene_context("1", {})
+                self.assertEqual(context["stashdb_name"], "fansdb.cc")
+
+    def test_box_name_helper(self):
+        self.assertEqual(scene_matcher.box_name({"name": "StashDB", "endpoint": "https://stashdb.org/graphql"}),
+                         "StashDB")
+        self.assertEqual(scene_matcher.box_name({"name": "", "endpoint": "not a url"}), "the stash-box")
+
+
 class TestFindMatches(unittest.TestCase):
     def test_response_has_endpoint_keys_and_uses_arg(self):
         scene = make_scene([])

@@ -237,6 +237,17 @@ test("Match click sends the endpoint to both ops", async () => {
   assert.ok(!("endpoint" in last));
 });
 
+test("a box saved without a name is labelled by its host", async () => {
+  const FANS = "https://fansdb.cc/graphql";
+  const cfg = { data: { configuration: {
+    general: { stashBoxes: [{ endpoint: FANS, name: "" }] }, ui: {}, plugins: {},
+  } } };
+  const rows = [makeRow(1)];
+  const sm = setup({ rows, select: sel(`stashbox:${FANS}`), config: cfg });
+  await sm.exports.syncMatchButtons();
+  assert.ok(/Match on fansdb\.cc/.test(rows[0].buttons[0].innerHTML), rows[0].buttons[0].innerHTML);
+});
+
 test("no client-side ID cache: nothing from a response is sent back", async () => {
   // An older backend still returned the IDs; the UI must not echo them to the server
   const reply = { data: { runPluginOperation: JSON.stringify({
