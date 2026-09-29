@@ -172,5 +172,20 @@ function setup(bySource, sources) {
     assert.ok(removed, "listener removed");
   });
 
+  await test("the chips sit in the footer, below the results, where the README says they are", async () => {
+    const p = loadPlugin({ fetchResponses: { Configuration: { data: { configuration: { plugins: {} } } } } });
+    p.exports.showModal("1", "Jane");
+    await p.settle();
+    const html = p.getState().modalRoot.innerHTML;
+    const results = html.indexOf('id="pis-results"');
+    const footer = html.indexOf('class="pis-modal-footer"');
+    const chips = html.indexOf('id="pis-source-chips"');
+    assert.ok(results >= 0 && results < footer && footer < chips, "chips are in the footer, after the results");
+    const readme = require("fs").readFileSync(require("path").join(__dirname, "..", "README.md"), "utf8");
+    const section = readme.split("## Source status chips")[1].split("\n## ")[0];
+    assert.ok(/below the results/.test(section), "README says where the chips are");
+    assert.ok(!/above the results/.test(readme));
+  });
+
   process.exit(failures ? 1 : 0);
 })();

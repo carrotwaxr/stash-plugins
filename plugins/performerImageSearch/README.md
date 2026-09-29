@@ -74,7 +74,7 @@ The filter uses the real size where it is known: the source's own data first, th
 
 ## Source status chips
 
-Each enabled source shows a chip above the results. Hover over a chip to see the error message.
+Each enabled source shows a chip in the footer of the search window, below the results. Hover over a chip to see its error or warnings.
 
 | Chip | Meaning |
 |---|---|
