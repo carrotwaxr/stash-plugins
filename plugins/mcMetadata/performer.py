@@ -1,6 +1,7 @@
 import os
 import utils.logger as log
 from utils.files import download_image
+from utils.paths import PathEscapeError, join_under, sanitize_component
 
 # Constants
 BATCH_SIZE = 100
@@ -123,20 +124,25 @@ def get_actor_image_path(performer_name, settings):
     if not base_path:
         return None
 
-    media_server = settings.get("media_server", "jellyfin")
-    first_letter = performer_name[0]
+    media_server = str(settings.get("media_server", "jellyfin")).lower()
+    # One safe folder name; the letter folder comes from it (still the raw first character)
+    safe_name = sanitize_component(performer_name)
+    first_letter = safe_name[0]
 
-    # Different media servers use different folder structures
-    if media_server == "jellyfin":
-        # Jellyfin: /metadata/People/J/John Doe/folder.jpg
-        return os.path.join(base_path, first_letter, performer_name, "folder.jpg")
-    elif media_server == "emby":
-        # Emby: /metadata/People/John Doe/folder.jpg (no A-Z subfolders)
-        return os.path.join(base_path, performer_name, "folder.jpg")
-    elif media_server == "plex":
-        # Plex manages performer images internally; no People folder to export to
-        log.debug(f"Plex does not support external performer images, skipping {performer_name}")
+    if media_server not in ("jellyfin", "emby"):
+        if media_server == "plex":
+            # Plex manages performer images internally; no People folder to export to
+            log.debug(f"Plex does not support external performer images, skipping {performer_name}")
+        else:
+            log.warning(f"Unknown media server type: {media_server}")
         return None
-    else:
-        log.warning(f"Unknown media server type: {media_server}")
+
+    try:
+        if media_server == "jellyfin":
+            # Jellyfin: /metadata/People/J/John Doe/folder.jpg
+            return join_under(base_path, first_letter, safe_name, "folder.jpg")
+        # Emby: /metadata/People/John Doe/folder.jpg (no A-Z subfolders)
+        return join_under(base_path, safe_name, "folder.jpg")
+    except PathEscapeError as err:
+        log.warning(f"Skipping performer image for {performer_name!r}: {err}")
         return None

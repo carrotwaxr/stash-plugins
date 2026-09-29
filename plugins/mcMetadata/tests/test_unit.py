@@ -279,6 +279,50 @@ class TestPerformerImagePath(unittest.TestCase):
         self.assertIsNone(path)
 
 
+    def _norm(self, path):
+        return path.replace("\\", "/") if path else path
+
+    def test_slash_in_name_is_one_component(self):
+        from performer import get_actor_image_path
+        base = "/metadata/People"
+        for server, expected in (
+            ("jellyfin", "/metadata/People/A/AC DC/folder.jpg"),
+            ("emby", "/metadata/People/AC DC/folder.jpg"),
+        ):
+            path = get_actor_image_path("AC/DC", {"media_server": server, "actor_metadata_path": base})
+            self.assertEqual(self._norm(path), expected)
+
+    def test_traversal_and_absolute_names_stay_under_base(self):
+        from performer import get_actor_image_path
+        base = "/metadata/People"
+        for server in ("jellyfin", "emby"):
+            for name in ("../../etc", "/abs", "..", "/etc/passwd"):
+                path = get_actor_image_path(name, {"media_server": server, "actor_metadata_path": base})
+                if path is not None:
+                    self.assertTrue(self._norm(path).startswith(base + "/"), (server, name, path))
+                    self.assertNotIn("..", self._norm(path).split("/"))
+
+    def test_leading_space_stripped(self):
+        from performer import get_actor_image_path
+        settings = {"media_server": "jellyfin", "actor_metadata_path": "/metadata/People"}
+        path = get_actor_image_path("  Jane Doe", settings)
+        self.assertEqual(self._norm(path), "/metadata/People/J/Jane Doe/folder.jpg")
+        settings["media_server"] = "emby"
+        path = get_actor_image_path(" Jane Doe", settings)
+        self.assertEqual(self._norm(path), "/metadata/People/Jane Doe/folder.jpg")
+
+    def test_media_server_case_insensitive(self):
+        from performer import get_actor_image_path
+        base = {"actor_metadata_path": "/metadata/People"}
+        self.assertEqual(
+            self._norm(get_actor_image_path("Jane Doe", {**base, "media_server": "Jellyfin"})),
+            "/metadata/People/J/Jane Doe/folder.jpg")
+        self.assertEqual(
+            self._norm(get_actor_image_path("Jane Doe", {**base, "media_server": "EMBY"})),
+            "/metadata/People/Jane Doe/folder.jpg")
+        self.assertIsNone(get_actor_image_path("Jane Doe", {**base, "media_server": "Plex"}))
+
+
 class TestNfoArtworkReferences(unittest.TestCase):
     """Test NFO artwork thumb tags."""
 
