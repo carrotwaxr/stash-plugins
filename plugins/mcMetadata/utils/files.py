@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -95,6 +96,30 @@ def _safe_url(url):
     return urllib.parse.urlunsplit(parts._replace(query=query))
 
 
+_APIKEY_VALUE = re.compile(r"(apikey=)[^&\s'\"]*", re.IGNORECASE)
+
+
+def _scrub(text):
+    """text (e.g. an exception's) with every apikey= value hidden, for logging."""
+    return _APIKEY_VALUE.sub(r"\1***", str(text))
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Don't follow redirects: urllib would copy the session Cookie header to the new
+    URL, possibly another host. A 3xx then raises HTTPError with its code."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirects)
+
+
+def _urlopen(request, timeout):
+    """urllib's urlopen, refusing redirects."""
+    return _OPENER.open(request, timeout=timeout)
+
+
 def download_image(url, dest_filepath, settings):
     """Download an image from a URL and save it to a file.
 
@@ -130,7 +155,7 @@ def download_image(url, dest_filepath, settings):
             cookie = (settings or {}).get("session_cookie")
             if cookie and cookie.get("value"):
                 request.add_header("Cookie", f"{cookie.get('name') or 'session'}={cookie['value']}")
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with _urlopen(request, timeout=30) as response:
                 # Check HTTP status
                 if response.status != 200:
                     log.error(f"Failed to download image: HTTP {response.status} from {safe_url}")
@@ -198,10 +223,17 @@ def download_image(url, dest_filepath, settings):
             return True
 
         except urllib.error.HTTPError as e:
-            log.error(f"HTTP error downloading image: {e.code} {e.reason} from {safe_url}")
+            if 300 <= e.code < 400:
+                log.error(
+                    f"Image download from {safe_url} was redirected (HTTP {e.code}), likely to the "
+                    "login page: not authenticated. Check that Stash passes a session to plugins, "
+                    "or generate an API key in Settings > Security."
+                )
+            else:
+                log.error(f"HTTP error downloading image: {e.code} {_scrub(e.reason)} from {safe_url}")
             return False
         except urllib.error.URLError as e:
-            log.error(f"URL error downloading image: {e.reason} from {safe_url}")
+            log.error(f"URL error downloading image: {_scrub(e.reason)} from {safe_url}")
             if attempt <= MAX_RETRIES:
                 log.info(f"Retrying download (attempt {attempt + 1}/{MAX_RETRIES + 1})...")
                 time.sleep(RETRY_DELAY)
@@ -215,7 +247,7 @@ def download_image(url, dest_filepath, settings):
                 continue
             return False
         except Exception as e:
-            log.error(f"Error downloading image from {safe_url}: {e}")
+            log.error(f"Error downloading image from {safe_url}: {_scrub(e)}")
             return False
         finally:
             # Clean up temp file if it still exists

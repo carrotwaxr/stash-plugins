@@ -208,7 +208,7 @@ class _Base(unittest.TestCase):
              patch.object(logger, "warning", side_effect=lines["warning"].append), \
              patch.object(logger, "debug", side_effect=lines["debug"].append), \
              patch.object(logger, "error", side_effect=lines["error"].append), \
-             patch.object(files_module.urllib.request, "urlopen", side_effect=self._urlopen):
+             patch.object(files_module, "_urlopen", side_effect=self._urlopen):
             result = scene_module.process_scene(stash.find_scene(scene_id), stash, settings, "KEY")
         return result, lines
 
@@ -363,7 +363,7 @@ class TestDryRunParity(_Base):
             scenes.append(scene)
         stash = self.fake(scenes)
         with patch.object(logger, "info"), patch.object(logger, "debug"), \
-             patch.object(files_module.urllib.request, "urlopen", side_effect=self._urlopen):
+             patch.object(files_module, "_urlopen", side_effect=self._urlopen):
             summary = scene_module.process_all_scenes(stash, self.settings(), "KEY")
         self.assertEqual(summary["processed"], 3)
         self.assertEqual(len(stash.moves()), 3)
@@ -404,7 +404,7 @@ class TestDryRunHelper(_Base):
         self.assertEqual(files_module.rename_file(src, dst, {"dry_run": None}), dst)
         self.assertTrue(os.path.exists(src))
         self.assertFalse(os.path.exists(dst))
-        with patch.object(files_module.urllib.request, "urlopen", side_effect=self._urlopen):
+        with patch.object(files_module, "_urlopen", side_effect=self._urlopen):
             files_module.download_image("http://stash.invalid/x", os.path.join(self.tmp, "x.jpg"), {"dry_run": None})
         self.assertEqual(self.urls, [])
         with patch.object(performer_module, "download_image") as dl:
@@ -445,7 +445,7 @@ class TestEntryPoint(_Base):
         out = io.StringIO()
         with patch.object(entry, "stashapi_problem", return_value=None), redirect_stdout(out), \
              patch.object(logger, "info"), patch.object(logger, "debug"), patch.object(logger, "warning"), \
-             patch.object(files_module.urllib.request, "urlopen", side_effect=self._urlopen):
+             patch.object(files_module, "_urlopen", side_effect=self._urlopen):
             entry.run(self._stdin(), stash_factory=lambda connection: stash)
         return out.getvalue()
 
