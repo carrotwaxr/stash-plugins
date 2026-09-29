@@ -14,12 +14,16 @@ Usage:
         STASH_API_KEY=your-api-key
 
     Then run:
-        python -m unittest tests.test_integration -v
+        STASH_PLUGINS_INTEGRATION=1 python -m unittest tests.test_integration -v
 """
 
 import os
 import sys
 import unittest
+
+# Live integration tests: they read STASH_URL, which may point at a production Stash.
+if os.environ.get("STASH_PLUGINS_INTEGRATION") != "1":
+    raise unittest.SkipTest("set STASH_PLUGINS_INTEGRATION=1 to run live integration tests")
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -334,6 +338,6 @@ if __name__ == "__main__":
         print("Set environment variables to run:")
         print("  export STASH_URL=http://your-stash:9999")
         print("  export STASH_API_KEY=your-api-key")
-        print("\nThen run: python -m unittest tests.test_integration -v\n")
+        print("\nThen run: STASH_PLUGINS_INTEGRATION=1 python -m unittest tests.test_integration -v\n")
     else:
         unittest.main(verbosity=2)

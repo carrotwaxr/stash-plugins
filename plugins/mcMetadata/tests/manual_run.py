@@ -6,7 +6,7 @@ This script allows you to test various plugin functions against your Stash serve
 without actually modifying any files. It's useful for development and debugging.
 
 Usage:
-    python tests/manual_test.py --url http://your-stash:9999 --api-key your-key
+    python tests/manual_run.py --url http://your-stash:9999 --api-key your-key
 
 Options:
     --url       Stash server URL (or set STASH_URL env var)

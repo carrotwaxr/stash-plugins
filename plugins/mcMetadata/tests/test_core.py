@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from utils.files import rename_file, replace_file_ext
 from utils.nfo import build_nfo_xml
@@ -410,15 +411,22 @@ class TestReplacers(unittest.TestCase):
 
 
 class TestSettings(unittest.TestCase):
+    def setUp(self):
+        # validate_renamer_path creates the directory, so point it somewhere disposable.
+        # Otherwise every case fails on /data and the "invalid" cases pass for the wrong reason.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.settings = {**MOCK_SETTINGS, "renamer_path": tmp.name + SEP}
+
     def test_valid_config(self):
         self.assertEqual(
-            validate_settings(MOCK_SETTINGS),
+            validate_settings(self.settings),
             True,
             "Validate should return True with valid settings",
         )
 
     def test_invalid_boolean(self):
-        mock_settings = MOCK_SETTINGS.copy()
+        mock_settings = self.settings.copy()
         mock_settings["enable_renamer"] = None
         self.assertEqual(
             validate_settings(mock_settings),
@@ -427,7 +435,7 @@ class TestSettings(unittest.TestCase):
         )
 
     def test_invalid_filename_budget(self):
-        mock_settings = MOCK_SETTINGS.copy()
+        mock_settings = self.settings.copy()
         mock_settings["renamer_filename_budget"] = 39
         self.assertEqual(
             validate_settings(mock_settings),
@@ -436,14 +444,14 @@ class TestSettings(unittest.TestCase):
         )
 
     def test_invalid_media_center(self):
-        mock_settings = MOCK_SETTINGS.copy()
+        mock_settings = self.settings.copy()
         mock_settings["enable_actor_images"] = True
         mock_settings["media_server"] = "wombat"
         with self.assertRaises(ValueError):
             validate_media_server(mock_settings)
 
     def test_invalid_template(self):
-        mock_settings = MOCK_SETTINGS.copy()
+        mock_settings = self.settings.copy()
         mock_settings["renamer_path_template"] = "$StashID - $Title <$Performers>"
         self.assertEqual(
             validate_settings(mock_settings),
@@ -452,7 +460,7 @@ class TestSettings(unittest.TestCase):
         )
 
     def test_invalid_uniqueness(self):
-        mock_settings = MOCK_SETTINGS.copy()
+        mock_settings = self.settings.copy()
         mock_settings["renamer_path_template"] = "$Title $Performers"
         self.assertEqual(
             validate_settings(mock_settings),
@@ -461,7 +469,7 @@ class TestSettings(unittest.TestCase):
         )
 
     def test_missing_required_setting(self):
-        mock_settings = MOCK_SETTINGS.copy()
+        mock_settings = self.settings.copy()
         mock_settings.pop("dry_run")
         self.assertEqual(
             validate_settings(mock_settings),
@@ -470,7 +478,7 @@ class TestSettings(unittest.TestCase):
         )
 
     def test_missing_required_performer_setting(self):
-        mock_settings = MOCK_SETTINGS.copy()
+        mock_settings = self.settings.copy()
         mock_settings["enable_actor_images"] = True
         mock_settings.pop("actor_metadata_path")
         self.assertEqual(

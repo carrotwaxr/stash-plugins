@@ -52,12 +52,12 @@ _cache_metadata: dict[str, dict] = {}
 
 # Disk cache configuration
 CACHE_TTL_SECONDS = 300  # 5 minutes
+CACHE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _get_cache_filepath(endpoint: str) -> str:
     """Get the file path for a cached endpoint's stash_ids."""
     endpoint_hash = hashlib.md5(endpoint.encode()).hexdigest()[:12]
-    cache_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(cache_dir, f".cache_stashids_{endpoint_hash}.json")
+    return os.path.join(CACHE_DIR, f".cache_stashids_{endpoint_hash}.json")
 
 def _read_cache_from_disk(endpoint: str) -> set[str] | None:
     """Read cached stash_ids from disk if fresh enough. Returns None if stale/missing."""

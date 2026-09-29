@@ -12,7 +12,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scene_matcher import (
-    score_scene, format_scene, title_similarity, normalize_title,
+    score_scene, format_scene, title_similarity, normalize_title, result_sort_key,
     levenshtein_ratio, tokenize, token_similarity
 )
 
@@ -136,8 +136,14 @@ class TestTitleSimilarity(unittest.TestCase):
         self.assertEqual(title_similarity("Title", None), 0.0)
 
 
+def score_exact_duration(scene, performer_ids, studio_id, **kwargs):
+    """score_scene with equal durations: the multiplier is 1.0, so the base score shows through."""
+    scene = {**scene, "duration": 1800}
+    return score_scene(scene, performer_ids, studio_id, local_duration=1800, **kwargs)
+
+
 class TestScoreScene(unittest.TestCase):
-    """Tests for the score_scene function."""
+    """Tests for the score_scene function's base score."""
 
     def test_no_matches(self):
         """Scene with no matching performers or studio scores 0."""
@@ -151,7 +157,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-999"}  # No match
         studio_id = "studio-xyz"  # No match
 
-        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match, _ = score_exact_duration(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 0)
         self.assertEqual(matching_performers, 0)
@@ -168,7 +174,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-999"}  # No match
         studio_id = "studio-abc"  # Match
 
-        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match, _ = score_exact_duration(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 3)
         self.assertEqual(matching_performers, 0)
@@ -185,7 +191,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123"}  # One match
         studio_id = None
 
-        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match, _ = score_exact_duration(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 2)
         self.assertEqual(matching_performers, 1)
@@ -203,7 +209,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123", "perf-456"}  # Two matches
         studio_id = None
 
-        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match, _ = score_exact_duration(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 4)  # 2 * 2
         self.assertEqual(matching_performers, 2)
@@ -220,7 +226,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123", "perf-456"}  # Two matches
         studio_id = "studio-abc"  # Match
 
-        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match, _ = score_exact_duration(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 7)  # 3 (studio) + 4 (2 performers)
         self.assertEqual(matching_performers, 2)
@@ -234,7 +240,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123"}
         studio_id = "studio-abc"
 
-        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match, _ = score_exact_duration(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 3)
         self.assertEqual(matching_performers, 0)
@@ -251,7 +257,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123"}
         studio_id = "studio-abc"
 
-        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match, _ = score_exact_duration(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 2)
         self.assertEqual(matching_performers, 1)
@@ -270,7 +276,7 @@ class TestScoreScene(unittest.TestCase):
         performer_ids = {"perf-123"}
         studio_id = None
 
-        score, matching_performers, title_match = score_scene(scene, performer_ids, studio_id)
+        score, matching_performers, title_match, _ = score_exact_duration(scene, performer_ids, studio_id)
 
         self.assertEqual(score, 2)
         self.assertEqual(matching_performers, 1)
@@ -284,7 +290,7 @@ class TestScoreScene(unittest.TestCase):
             "performers": []
         }
 
-        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Scene Title")
+        score, matching_performers, title_match, _ = score_exact_duration(scene, set(), None, local_title="Scene Title")
 
         self.assertEqual(score, 10)
         self.assertEqual(matching_performers, 0)
@@ -299,7 +305,7 @@ class TestScoreScene(unittest.TestCase):
             "performers": []
         }
 
-        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Summer Days")
+        score, matching_performers, title_match, _ = score_exact_duration(scene, set(), None, local_title="Summer Days")
 
         self.assertEqual(score, 5)  # Partial match (50-90%)
         self.assertTrue(title_match)
@@ -312,7 +318,7 @@ class TestScoreScene(unittest.TestCase):
             "performers": []
         }
 
-        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Beach Adventrue")
+        score, matching_performers, title_match, _ = score_exact_duration(scene, set(), None, local_title="Beach Adventrue")
 
         self.assertEqual(score, 5)  # >50% match due to typo
         self.assertTrue(title_match)
@@ -325,7 +331,7 @@ class TestScoreScene(unittest.TestCase):
             "performers": []
         }
 
-        score, matching_performers, title_match = score_scene(scene, set(), None, local_title="Summer Beach Adventure")
+        score, matching_performers, title_match, _ = score_exact_duration(scene, set(), None, local_title="Summer Beach Adventure")
 
         self.assertEqual(score, 10)  # Exact match (word order doesn't matter)
         self.assertTrue(title_match)
@@ -338,10 +344,31 @@ class TestScoreScene(unittest.TestCase):
             "performers": []
         }
 
-        score, matching_performers, title_match = score_scene(scene, set(), "studio-abc", local_title="Scene Title")
+        score, matching_performers, title_match, _ = score_exact_duration(scene, set(), "studio-abc", local_title="Scene Title")
 
         self.assertEqual(score, 13)  # 10 (title) + 3 (studio)
         self.assertTrue(title_match)
+
+
+class TestDurationMultiplier(unittest.TestCase):
+    """The base score is multiplied by 0.5 + 0.5 * duration_score."""
+
+    SCENE = {"studio": {"id": "studio-abc"}, "performers": [], "duration": 1800}
+
+    def test_unknown_duration_is_neutral(self):
+        score, _, _, duration_score = score_scene({**self.SCENE, "duration": None}, set(), "studio-abc")
+        self.assertEqual(duration_score, 0.5)
+        self.assertAlmostEqual(score, 3 * 0.75)
+
+    def test_close_duration_keeps_full_score(self):
+        score, _, _, duration_score = score_scene(self.SCENE, set(), "studio-abc", local_duration=1820)
+        self.assertEqual(duration_score, 1.0)
+        self.assertAlmostEqual(score, 3)
+
+    def test_far_duration_is_penalized_not_excluded(self):
+        score, _, _, duration_score = score_scene(self.SCENE, set(), "studio-abc", local_duration=600)
+        self.assertEqual(duration_score, 0.1)
+        self.assertAlmostEqual(score, 3 * 0.55)
 
 
 class TestFormatScene(unittest.TestCase):
@@ -513,15 +540,6 @@ class TestFormatScene(unittest.TestCase):
         self.assertEqual(result["performers"][0]["as"], "Jane Smith")
 
 
-def sort_key(x):
-    """Sort key matching scene_matcher.py implementation."""
-    in_stash = 1 if x["in_local_stash"] else 0
-    score = -x["score"]
-    date_str = x.get("release_date") or ""
-    date_int = int(date_str[:10].replace("-", "")) if date_str else 0
-    return (in_stash, score, -date_int)
-
-
 class TestResultSorting(unittest.TestCase):
     """Tests for result sorting logic."""
 
@@ -533,7 +551,7 @@ class TestResultSorting(unittest.TestCase):
             {"in_local_stash": False, "score": 5, "release_date": "2024-01-01"},
         ]
 
-        results.sort(key=sort_key)
+        results.sort(key=result_sort_key)
 
         # Not in stash should come first
         self.assertFalse(results[0]["in_local_stash"])
@@ -548,7 +566,7 @@ class TestResultSorting(unittest.TestCase):
             {"in_local_stash": False, "score": 3, "release_date": "2024-01-01"},
         ]
 
-        results.sort(key=sort_key)
+        results.sort(key=result_sort_key)
 
         self.assertEqual(results[0]["score"], 5)
         self.assertEqual(results[1]["score"], 3)
@@ -562,11 +580,22 @@ class TestResultSorting(unittest.TestCase):
             {"in_local_stash": False, "score": 5, "release_date": "2023-12-25"},
         ]
 
-        results.sort(key=sort_key)
+        results.sort(key=result_sort_key)
 
         self.assertEqual(results[0]["release_date"], "2024-01-01")
         self.assertEqual(results[1]["release_date"], "2023-12-25")
         self.assertEqual(results[2]["release_date"], "2023-06-15")
+
+    def test_duration_score_breaks_score_ties(self):
+        """Within the same score, a closer duration sorts first."""
+        results = [
+            {"in_local_stash": False, "score": 5, "duration_score": 0.3, "release_date": "2024-01-01"},
+            {"in_local_stash": False, "score": 5, "duration_score": 1.0, "release_date": "2023-01-01"},
+        ]
+
+        results.sort(key=result_sort_key)
+
+        self.assertEqual(results[0]["duration_score"], 1.0)
 
     def test_null_dates_sort_last(self):
         """Scenes without dates sort after scenes with dates."""
@@ -576,7 +605,7 @@ class TestResultSorting(unittest.TestCase):
             {"in_local_stash": False, "score": 5, "release_date": ""},
         ]
 
-        results.sort(key=sort_key)
+        results.sort(key=result_sort_key)
 
         self.assertEqual(results[0]["release_date"], "2024-01-01")
         # Null and empty both sort after
@@ -592,7 +621,7 @@ class TestEdgeCases(unittest.TestCase):
             "performers": [{"performer": {"id": "perf-123"}}]
         }
 
-        score, matching_performers, title_match = score_scene(scene, set(), "studio-abc")
+        score, matching_performers, title_match, _ = score_exact_duration(scene, set(), "studio-abc")
 
         self.assertEqual(score, 3)  # Just studio
         self.assertEqual(matching_performers, 0)
@@ -605,7 +634,7 @@ class TestEdgeCases(unittest.TestCase):
             "performers": [{"performer": {"id": "perf-123"}}]
         }
 
-        score, matching_performers, title_match = score_scene(scene, {"perf-123"}, None)
+        score, matching_performers, title_match, _ = score_exact_duration(scene, {"perf-123"}, None)
 
         self.assertEqual(score, 2)  # Just performer
         self.assertEqual(matching_performers, 1)

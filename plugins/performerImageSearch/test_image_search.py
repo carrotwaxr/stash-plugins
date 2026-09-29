@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Tests for Performer Image Search scrapers.
-Run with: python test_image_search.py
+These hit the live sites. Run with: python test_image_search.py
+or: python -m pytest -m network test_image_search.py
 
 Tests verify:
 1. Each scraper returns results for known performers
@@ -16,8 +17,15 @@ import re
 # Import the module to test
 import image_search
 
+try:
+    import pytest
+    # Live-site tests: excluded from the default run (see pytest.ini)
+    pytestmark = pytest.mark.network
+except ImportError:  # running directly without pytest installed
+    pass
 
-def test_result_structure(result, source_name):
+
+def check_result_structure(result, source_name):
     """Verify a result has all required fields."""
     required_fields = ["thumbnail", "image", "title", "source", "width", "height"]
     for field in required_fields:
@@ -36,7 +44,7 @@ def test_babepedia():
     print(f"  Found {len(results)} results")
 
     for result in results[:2]:
-        test_result_structure(result, "Babepedia")
+        check_result_structure(result, "Babepedia")
         assert "_thumb" not in result["image"], f"Babepedia: Image URL contains thumbnail pattern: {result['image']}"
         assert result["image"].endswith(".jpg"), f"Babepedia: Expected .jpg image: {result['image']}"
         print(f"  OK: {result['image'][:60]}...")
@@ -58,7 +66,7 @@ def test_pornpics():
     print(f"  Female (Kayden Kross): {len(results)} results")
 
     for result in results:
-        test_result_structure(result, "PornPics")
+        check_result_structure(result, "PornPics")
         if "/models/" not in result["image"]:
             assert "/1280/" in result["image"], f"PornPics: Gallery image should use /1280/: {result['image']}"
             assert "/460/" not in result["image"], f"PornPics: Gallery image contains thumbnail /460/: {result['image']}"
@@ -81,7 +89,7 @@ def test_freeones():
     print(f"  Female (Kayden Kross): {len(results)} results")
 
     for result in results[:2]:
-        test_result_structure(result, "FreeOnes")
+        check_result_structure(result, "FreeOnes")
         assert "freeones.com" in result["image"], f"FreeOnes: Expected freeones.com URL: {result['image']}"
 
     results_male = image_search.search_freeones("Jax Slayher", max_results=5, max_galleries=2)
@@ -111,7 +119,7 @@ def test_elitebabes():
     print(f"  Found {len(results)} results")
 
     for result in results[:2]:
-        test_result_structure(result, "EliteBabes")
+        check_result_structure(result, "EliteBabes")
         assert "_w400" not in result["image"], f"EliteBabes: Image URL contains thumbnail _w400: {result['image']}"
         assert "_w200" not in result["image"], f"EliteBabes: Image URL contains thumbnail _w200: {result['image']}"
         print(f"  OK: {result['image'][:60]}...")
@@ -131,7 +139,7 @@ def test_boobpedia():
     print(f"  Found {len(results)} results")
 
     for result in results[:2]:
-        test_result_structure(result, "Boobpedia")
+        check_result_structure(result, "Boobpedia")
         assert "/thumb/" not in result["image"], f"Boobpedia: Image URL contains /thumb/: {result['image']}"
         print(f"  OK: {result['image'][:60]}...")
 
@@ -147,7 +155,7 @@ def test_javdatabase():
     print(f"  Found {len(results)} results")
 
     for result in results[:3]:
-        test_result_structure(result, "JavDatabase")
+        check_result_structure(result, "JavDatabase")
         if "idolimages" in result["image"]:
             assert "/full/" in result["image"], f"JavDatabase: Idol image should use /full/: {result['image']}"
             assert "/thumb/" not in result["image"], f"JavDatabase: Idol image contains /thumb/: {result['image']}"
@@ -171,7 +179,7 @@ def test_duckduckgo():
     print(f"  Found {len(results)} results")
 
     for result in results[:2]:
-        test_result_structure(result, "DuckDuckGo")
+        check_result_structure(result, "DuckDuckGo")
         assert result["image"].startswith("http"), f"DuckDuckGo: Invalid URL: {result['image']}"
         print(f"  OK: {result['image'][:60]}...")
 

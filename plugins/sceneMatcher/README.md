@@ -39,3 +39,12 @@ The built-in Tagger searches by filename or video fingerprint. These don't alway
 - Scenes from compilations or rips
 
 If you've already tagged the performers or studio, Scene Matcher leverages that information to find the right match.
+
+## Development
+
+```bash
+cd plugins/sceneMatcher
+python -m pytest
+```
+
+The tests run offline.
