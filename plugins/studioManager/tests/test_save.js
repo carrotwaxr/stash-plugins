@@ -159,6 +159,63 @@ test("a failed refetch keeps the failures pending and shows an error", async () 
   x.setParent("1", "2"); // not locked after a failed refetch
 });
 
+const rootIds = (sm) => plain(sm.getState().hierarchyTree.map((n) => n.id));
+
+test("a failed refetch after a full save keeps the saved tree and says so", async () => {
+  const { sm, x, toasts } = setup([["1"], ["2"], ["3"]], { failFetch: true });
+  x.setParent("1", "3");
+  x.setParent("2", "3");
+  await x.savePendingChanges();
+  assert.deepStrictEqual(pendingIds(sm), []);
+  const texts = toastTexts(toasts);
+  assert.ok(texts.includes("2 saved"), texts.join("|"));
+  assert.ok(texts.includes("Saved, but the hierarchy couldn't be reloaded"), texts.join("|"));
+  assert.ok(!texts.some((t) => /pending/.test(t)), "nothing is pending: " + texts.join("|"));
+  assert.deepStrictEqual(rootIds(sm), ["3"], "1 and 2 stay under 3");
+  x.removeParent("1");
+  assert.deepStrictEqual(pendingIds(sm), ["1"], "1 is under 3, so it can be made a root");
+  assert.ok(!toastTexts(toasts).includes("Studio is already a root"));
+});
+
+test("after a partial failure and a failed refetch, x or Cancel keeps the saved changes", async () => {
+  for (const how of ["remove", "cancel"]) {
+    const { sm, x, toasts } = setup(
+      [["1"], ["2"], ["3"]],
+      { fail: (i) => (i.id === "2" ? "nope" : null), failFetch: true },
+    );
+    x.setParent("1", "3");
+    x.setParent("2", "3");
+    await x.savePendingChanges();
+    assert.deepStrictEqual(pendingIds(sm), ["2"]);
+    assert.deepStrictEqual(rootIds(sm), ["3"], how + ": before");
+    if (how === "remove") x.removePendingChange(0); else x.cancelPendingChanges();
+    assert.deepStrictEqual(pendingIds(sm), []);
+    assert.deepStrictEqual(rootIds(sm), ["2", "3"], how + ": 1 stays under 3, 2 goes back to the top");
+    assert.ok(toastTexts(toasts).includes("Couldn't reload the hierarchy; the failed changes are still pending"),
+      toastTexts(toasts).join("|"));
+  }
+});
+
+test("drag validity is checked against the displayed tree", async () => {
+  const { sm, x, toasts } = setup(
+    [["1"], ["2"], ["3"]],
+    { fail: (i) => (i.id === "2" ? "nope" : null), failFetch: true },
+  );
+  x.setParent("1", "3");
+  x.setParent("2", "3");
+  await x.savePendingChanges();
+  // 1 is shown (and saved) under 3, so 3 can't go under 1
+  assert.strictEqual(x.wouldCreateCircularRef("1", "3"), true);
+  x.setParent("3", "1");
+  assert.deepStrictEqual(pendingIds(sm), ["2"], "refused");
+  assert.ok(toastTexts(toasts).includes("Cannot create circular reference"));
+
+  // The baseline shown (the edit snapshot) wins over the studio list
+  const b = setup([["1"], ["2"]]);
+  b.sm.setState({ isEditMode: true, originalParentMap: new Map([["1", "2"], ["2", null]]) });
+  assert.strictEqual(b.x.wouldCreateCircularRef("1", "2"), true, "2 would go under its own child 1");
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {

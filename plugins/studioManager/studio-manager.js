@@ -412,16 +412,45 @@
     return on;
   }
 
+  /** studio id -> parent id (or null) of a studio list. */
+  function parentMapOf(studios) {
+    const map = new Map();
+    for (const studio of studios) map.set(studio.id, studio.parent_studio?.id || null);
+    return map;
+  }
+
   /**
    * Parent map of the server state, with the edit snapshot when one exists.
    */
   function baseParentMap() {
     if (originalParentMap.size > 0) return originalParentMap;
-    const base = new Map();
-    for (const studio of hierarchyStudios) {
-      base.set(studio.id, studio.parent_studio?.id || null);
+    return parentMapOf(hierarchyStudios);
+  }
+
+  /**
+   * Copies of `studios` with parent_studio taken from `parentMap` (a studio the
+   * map doesn't list keeps its own) and child_studios recomputed to match.
+   */
+  function withParents(studios, parentMap) {
+    const byId = new Map(studios.map(s => [s.id, s]));
+    const parentOf = s => (parentMap.has(s.id) ? parentMap.get(s.id) : s.parent_studio?.id || null);
+    const kids = new Map();
+    for (const studio of studios) {
+      const pid = parentOf(studio);
+      if (pid && byId.has(pid)) {
+        if (!kids.has(pid)) kids.set(pid, []);
+        kids.get(pid).push({ id: studio.id, name: studio.name });
+      }
     }
-    return base;
+    return studios.map(studio => {
+      const pid = parentOf(studio);
+      const parent = pid ? byId.get(pid) : null;
+      return {
+        ...studio,
+        parent_studio: pid ? { ...(studio.parent_studio || {}), id: pid, name: parent ? parent.name : studio.parent_studio?.name } : null,
+        child_studios: kids.get(studio.id) || []
+      };
+    });
   }
 
   /**
@@ -430,25 +459,7 @@
    * effective parent map (original parents plus pending changes).
    */
   function derivedStudios() {
-    const effective = effectiveParentMap(baseParentMap(), pendingChanges);
-    const byId = new Map(hierarchyStudios.map(s => [s.id, s]));
-    const kids = new Map();
-    for (const studio of hierarchyStudios) {
-      const pid = effective.get(studio.id);
-      if (pid && byId.has(pid)) {
-        if (!kids.has(pid)) kids.set(pid, []);
-        kids.get(pid).push({ id: studio.id, name: studio.name });
-      }
-    }
-    return hierarchyStudios.map(studio => {
-      const pid = effective.get(studio.id);
-      const parent = pid ? byId.get(pid) : null;
-      return {
-        ...studio,
-        parent_studio: pid ? { ...(studio.parent_studio || {}), id: pid, name: parent ? parent.name : studio.parent_studio?.name } : null,
-        child_studios: kids.get(studio.id) || []
-      };
-    });
+    return withParents(hierarchyStudios, effectiveParentMap(baseParentMap(), pendingChanges));
   }
 
   /**
@@ -498,14 +509,11 @@
   }
 
   /**
-   * Check if adding parentId as parent of studioId would create a cycle
+   * Check if adding parentId as parent of studioId would create a cycle, in the
+   * tree as displayed (the same baseline as derivedStudios)
    */
   function wouldCreateCircularRef(potentialParentId, studioId) {
-    const base = new Map();
-    for (const studio of hierarchyStudios) {
-      base.set(studio.id, studio.parent_studio?.id || null);
-    }
-    return wouldCreateCycle(studioId, potentialParentId, effectiveParentMap(base, pendingChanges));
+    return wouldCreateCycle(studioId, potentialParentId, effectiveParentMap(baseParentMap(), pendingChanges));
   }
 
   /**
@@ -841,8 +849,14 @@
       pendingChanges = pendingChanges.filter(c => failed.includes(c));
       const reloaded = await reloadHierarchy();
       if (!reloaded) {
-        // Keep the view consistent without a refetch: successes become the baseline
+        // No fresh data: the successes become the server state and the baseline
+        hierarchyStudios = withParents(hierarchyStudios, running);
         originalParentMap = running;
+        if (live()) {
+          showToast(pendingChanges.length > 0
+            ? "Couldn't reload the hierarchy; the failed changes are still pending"
+            : "Saved, but the hierarchy couldn't be reloaded", 'error');
+        }
       }
       if (pendingChanges.length === 0) {
         isEditMode = false;
@@ -861,7 +875,7 @@
 
   /**
    * Refetch the studios and re-snapshot the baseline from them. Returns false
-   * (after showing an error) when the fetch fails, leaving state untouched.
+   * when the fetch fails, leaving state untouched (the caller reports it).
    */
   async function reloadHierarchy() {
     const token = mountToken;
@@ -869,13 +883,11 @@
       const studios = await fetchAllStudiosWithHierarchy();
       if (token !== mountToken) return false; // unmounted meanwhile: touch nothing
       hierarchyStudios = studios;
-      originalParentMap = new Map();
-      for (const s of studios) originalParentMap.set(s.id, s.parent_studio?.id || null);
+      originalParentMap = parentMapOf(studios);
       return true;
     } catch (e) {
       if (token !== mountToken) return false;
       console.error('[studioManager] Failed to reload hierarchy:', e);
-      showToast('Failed to reload hierarchy; pending changes were kept', 'error');
       return false;
     }
   }
