@@ -38,6 +38,7 @@
   let totalOnStashdb = 0;
   let totalLocal = 0;
   let sortField = "DATE";
+  const TRENDING_NOTE = "Trending only includes scenes with activity on the stash-box in the last 7 days.";
   let sortDirection = "DESC";
 
   // Favorite entity filter state (persists within session)
@@ -484,7 +485,11 @@
     if (!container) return;
 
     if (missingScenes.length === 0) {
-      container.innerHTML = `
+      // Trending leaves out scenes with no recent activity, so an empty list
+      // says nothing about the rest of the catalogue
+      container.innerHTML = sortField === "TRENDING"
+        ? `<div class="ms-placeholder">No missing scenes are trending. ${TRENDING_NOTE}</div>`
+        : `
         <div class="ms-placeholder ms-success">
           <div class="ms-success-icon">&#10003;</div>
           <div>You have all available scenes!</div>
@@ -825,7 +830,9 @@
         const statusText = isComplete
           ? `Found ${missingScenes.length} missing scenes`
           : `Loaded ${missingScenes.length} missing scenes`;
-        setStatus(statusText, "success");
+        setStatus(sortField === "TRENDING" ? `${statusText}. ${TRENDING_NOTE}` : statusText, "success");
+      } else if (sortField === "TRENDING") {
+        setStatus(`No missing scenes are trending. ${TRENDING_NOTE}`);
       } else {
         setStatus("You have all available scenes!", "success");
       }
@@ -996,6 +1003,7 @@
       removeModal,
       SORT_OPTIONS,
       directionFor,
+      setSortField: (value) => { sortField = value; },
     };
   }
 

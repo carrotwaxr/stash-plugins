@@ -105,6 +105,22 @@ test("modal: error without scenes shows the error and Retry, not 'all available'
   assert.ok(text(els["ms-results"]).includes("Scene a"), text(els["ms-results"]));
 });
 
+test("modal: Trending with nothing missing doesn't claim you have every scene", async () => {
+  const { els, m } = modalSetup({ RunPluginOperation: () => wrap(okPage({ missing_scenes: [] })) });
+  m.setSortField("TRENDING");
+  await m.performSearch(true);
+  const t = text(els["ms-results"]) + " " + text(els["ms-status"]);
+  assert.ok(!t.includes("all available scenes"), t);
+  assert.ok(t.includes("last 7 days"), t);
+});
+
+test("modal: Trending results say they only cover the last 7 days", async () => {
+  const { els, m } = modalSetup({ RunPluginOperation: () => wrap(okPage()) });
+  m.setSortField("TRENDING");
+  await m.performSearch(true);
+  assert.ok(text(els["ms-status"]).includes("last 7 days"), text(els["ms-status"]));
+});
+
 test("modal: partial renders scenes, warning, and Retry from here resends the cursor", async () => {
   const calls = [];
   const { ms, els, m } = modalSetup({
