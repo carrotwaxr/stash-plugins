@@ -8,6 +8,7 @@ Uses only Python standard library - no pip dependencies.
 """
 
 import json
+import re
 import sys
 import urllib.request
 import urllib.parse
@@ -654,9 +655,49 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
 # Whisparr API (v3 - Compatible with Stasharr approach)
 # ============================================================================
 
+class WhisparrError(Exception):
+    """A failed Whisparr request. `url` never contains the API key (it is sent in a header)."""
+
+    def __init__(self, message, status=None, url=None, body=""):
+        super().__init__(message)
+        self.status = status
+        self.url = url
+        self.body = (body or "")[:300]
+
+
+def normalize_whisparr_url(raw):
+    """Turn what a user typed into the Whisparr base URL (scheme + host + optional URL Base)."""
+    url = (raw or "").strip()
+    if not url:
+        return ""
+    if "://" not in url:
+        url = "http://" + url
+    url = url.split("#", 1)[0].split("?", 1)[0]
+    url = re.sub(r"/api(/.*)?$", "", url.rstrip("/"), flags=re.IGNORECASE)
+    return url.rstrip("/")
+
+
+def _whisparr_detail(body):
+    """Pull Whisparr's validation messages out of an error body; else a raw snippet."""
+    snippet = (body or "")[:300]
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return snippet
+    items = parsed if isinstance(parsed, list) else [parsed]
+    texts = []
+    for item in items:
+        if isinstance(item, dict):
+            text = item.get("errorMessage") or item.get("message")
+            if text:
+                texts.append(str(text))
+    return "; ".join(texts) if texts else snippet
+
+
 def whisparr_request(whisparr_url, api_key, endpoint, method="GET", payload=None):
-    """Make a request to the Whisparr API."""
-    url = f"{whisparr_url.rstrip('/')}/api/v3/{endpoint}"
+    """Make a request to the Whisparr API. Raises WhisparrError on any failure."""
+    url = f"{normalize_whisparr_url(whisparr_url)}/api/v3/{endpoint}"
+    # The endpoint may carry a query but the key never goes in the URL
     headers = {
         "X-Api-Key": api_key,
         "Content-Type": "application/json",
@@ -673,96 +714,85 @@ def whisparr_request(whisparr_url, api_key, endpoint, method="GET", payload=None
     try:
         with urllib.request.urlopen(req, timeout=30, context=WHISPARR_SSL_CONTEXT) as response:
             body = response.read().decode("utf-8")
-            log.LogDebug(f"[Whisparr] {method} {endpoint} completed successfully")
-            # DELETE requests return empty body on success
-            if not body or body.strip() == "":
-                return None
-            return json.loads(body)
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8") if e.fp else ""
-        log.LogError(f"Whisparr HTTP error {e.code}: {e.reason} - {body}")
-        raise
+        try:
+            err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        except Exception:
+            err_body = ""
+        detail = _whisparr_detail(err_body)
+        msg = f"Whisparr returned HTTP {e.code} for {method} {url}"
+        if detail:
+            msg += f": {detail}"
+        log.LogError(msg)
+        raise WhisparrError(msg, status=e.code, url=url, body=err_body) from None
     except urllib.error.URLError as e:
         if isinstance(e.reason, ssl.SSLCertVerificationError):
-            log.LogError(
-                f"Whisparr TLS certificate verification failed: {e.reason}. "
-                "If Whisparr uses a self-signed certificate, enable "
-                "'Whisparr: Skip TLS Verification' in the plugin settings."
-            )
+            msg = (f"Can't reach Whisparr at {url}: TLS certificate verification failed ({e.reason}). "
+                   "If Whisparr uses a self-signed certificate, enable "
+                   "'Whisparr: Skip TLS Verification' in the plugin settings.")
         else:
-            log.LogError(f"Whisparr request error: {e}")
-        raise
-    except Exception as e:
-        log.LogError(f"Whisparr request error: {e}")
-        raise
+            msg = f"Can't reach Whisparr at {url}: {e.reason}"
+        log.LogError(msg)
+        raise WhisparrError(msg, url=url) from None
+    except (OSError, ValueError) as e:  # timeouts, resets, bad URLs
+        msg = f"Can't reach Whisparr at {url}: {e}"
+        log.LogError(msg)
+        raise WhisparrError(msg, url=url) from None
+
+    log.LogDebug(f"[Whisparr] {method} {endpoint} completed successfully")
+    # DELETE requests return empty body on success
+    if not body or body.strip() == "":
+        return None
+    try:
+        return json.loads(body)
+    except ValueError:
+        msg = (f"Whisparr at {url} did not return JSON. Check the Whisparr URL "
+               "(it should be the address of Whisparr itself, plus any URL Base).")
+        log.LogError(msg)
+        raise WhisparrError(msg, url=url, body=body) from None
 
 
 def whisparr_get_scene_by_stash_id(whisparr_url, api_key, stash_id):
-    """Check if a scene exists in Whisparr by its StashDB ID.
+    """Find a scene in Whisparr by its StashDB ID.
 
-    Uses the movie?stashId= endpoint (same as Stasharr).
-
-    Args:
-        whisparr_url: Whisparr base URL
-        api_key: Whisparr API key
-        stash_id: StashDB scene ID (UUID)
-
-    Returns:
-        Scene dict if found, None otherwise
+    Returns the scene dict whose stashId equals stash_id, or None if Whisparr has no such
+    scene. Raises WhisparrError if the request fails.
     """
-    try:
-        endpoint = f"movie?stashId={urllib.parse.quote(stash_id)}"
-        result = whisparr_request(whisparr_url, api_key, endpoint)
-        if result and len(result) > 0:
-            return result[0]
-        return None
-    except Exception as e:
-        log.LogWarning(f"Whisparr scene lookup failed for {stash_id}: {e}")
-        return None
+    endpoint = f"movie?stashId={urllib.parse.quote(stash_id)}"
+    result = whisparr_request(whisparr_url, api_key, endpoint)
+    if isinstance(result, list):
+        for scene in result:
+            if isinstance(scene, dict) and scene.get("stashId") == stash_id:
+                return scene
+    return None
 
 
 def whisparr_lookup_scene(whisparr_url, api_key, stash_id):
-    """Lookup a scene in TPDB via Whisparr by its StashDB ID.
+    """Lookup a scene in TPDB via Whisparr by its StashDB ID (lookup/scene?term=stash:<id>).
 
-    Uses the lookup/scene?term=stash: endpoint to search TPDB for the scene.
-    This is used to get scene metadata before adding to Whisparr.
-
-    Args:
-        whisparr_url: Whisparr base URL
-        api_key: Whisparr API key
-        stash_id: StashDB scene ID (UUID)
-
-    Returns:
-        Scene data from TPDB lookup, or None if not found
+    Returns the scene data to add, or None if nothing matches. When results carry a
+    stashId, only the one equal to stash_id is used. Raises WhisparrError on failure.
     """
-    try:
-        endpoint = f"lookup/scene?term=stash:{urllib.parse.quote(stash_id)}"
-        result = whisparr_request(whisparr_url, api_key, endpoint)
-        if result and len(result) > 0:
-            # The lookup returns a wrapper with 'movie' field
-            return result[0].get("movie") if isinstance(result[0], dict) else result[0]
+    endpoint = f"lookup/scene?term=stash:{urllib.parse.quote(stash_id)}"
+    result = whisparr_request(whisparr_url, api_key, endpoint)
+    if not isinstance(result, list):
         return None
-    except Exception as e:
-        log.LogWarning(f"Whisparr TPDB lookup failed for {stash_id}: {e}")
-        return None
+    scenes = []
+    for item in result:
+        # The lookup returns a wrapper with a 'movie' field
+        scene = item.get("movie") if isinstance(item, dict) and "movie" in item else item
+        if isinstance(scene, dict):
+            scenes.append(scene)
+    for scene in scenes:
+        if scene.get("stashId") == stash_id:
+            return scene
+    if any(scene.get("stashId") for scene in scenes):
+        return None  # results identify other scenes; don't add the wrong one
+    return scenes[0] if scenes else None
 
 
 def whisparr_add_scene(whisparr_url, api_key, scene_data, quality_profile_id, root_folder, search_on_add=False):
-    """Add a scene to Whisparr.
-
-    Uses the movie endpoint (POST) to add a scene.
-
-    Args:
-        whisparr_url: Whisparr base URL
-        api_key: Whisparr API key
-        scene_data: Scene data from whisparr_lookup_scene()
-        quality_profile_id: Quality profile ID to use
-        root_folder: Root folder path for downloads
-        search_on_add: Whether to trigger a search after adding
-
-    Returns:
-        Added scene data, or None on failure
-    """
+    """Add a scene to Whisparr (POST movie). Returns the added scene; raises WhisparrError."""
     payload = {
         "foreignId": scene_data.get("foreignId"),
         "title": scene_data.get("title"),
@@ -775,82 +805,93 @@ def whisparr_add_scene(whisparr_url, api_key, scene_data, quality_profile_id, ro
         }
     }
 
-    try:
-        result = whisparr_request(whisparr_url, api_key, "movie", "POST", payload)
-        log.LogInfo(f"Added scene to Whisparr: {scene_data.get('title')}")
-        return result
-    except Exception as e:
-        log.LogError(f"Failed to add scene to Whisparr: {e}")
-        raise
+    result = whisparr_request(whisparr_url, api_key, "movie", "POST", payload)
+    log.LogInfo(f"Added scene to Whisparr: {scene_data.get('title')}")
+    invalidate_whisparr_status(whisparr_url)
+    return result
 
 
 def whisparr_trigger_search(whisparr_url, api_key, movie_id):
-    """Trigger a search for a specific scene in Whisparr.
-
-    Args:
-        whisparr_url: Whisparr base URL
-        api_key: Whisparr API key
-        movie_id: Whisparr movie/scene ID
-
-    Returns:
-        Command response, or None on failure
-    """
-    try:
-        payload = {
-            "name": "MoviesSearch",
-            "movieIds": [movie_id]
-        }
-        result = whisparr_request(whisparr_url, api_key, "command", "POST", payload)
-        log.LogInfo(f"Triggered search for movie {movie_id}")
-        return result
-    except Exception as e:
-        log.LogError(f"Failed to trigger search for movie {movie_id}: {e}")
-        return None
+    """Trigger a search for a specific scene in Whisparr. Raises WhisparrError on failure."""
+    payload = {
+        "name": "MoviesSearch",
+        "movieIds": [movie_id]
+    }
+    result = whisparr_request(whisparr_url, api_key, "command", "POST", payload)
+    log.LogInfo(f"Triggered search for movie {movie_id}")
+    return result
 
 
 def whisparr_get_all_scenes(whisparr_url, api_key):
-    """Get all scenes from Whisparr.
-
-    The /api/v3/movie endpoint returns all movies in a single request.
-    No pagination is needed or supported.
-
-    Returns:
-        List of all scenes in Whisparr
-    """
-    try:
-        scenes = whisparr_request(whisparr_url, api_key, "movie")
-        if not scenes:
-            scenes = []
-        log.LogInfo(f"Found {len(scenes)} scenes in Whisparr")
-        return scenes
-
-    except Exception as e:
-        log.LogWarning(f"Error fetching Whisparr scenes: {e}")
-        return []
+    """Get all scenes from Whisparr (one request, no pagination). Raises WhisparrError."""
+    scenes = whisparr_request(whisparr_url, api_key, "movie")
+    if scenes is None:
+        scenes = []
+    if not isinstance(scenes, list):
+        raise WhisparrError("Whisparr returned an unexpected reply for the movie list.",
+                            url=normalize_whisparr_url(whisparr_url))
+    log.LogInfo(f"Found {len(scenes)} scenes in Whisparr")
+    return scenes
 
 
 def whisparr_get_queue(whisparr_url, api_key):
-    """Get the current download queue from Whisparr.
+    """Get the current download queue from Whisparr. Raises WhisparrError."""
+    result = whisparr_request(whisparr_url, api_key, "queue?pageSize=1000")
+    records = result.get("records") or [] if isinstance(result, dict) else []
+    log.LogInfo(f"Found {len(records)} items in Whisparr queue")
+    return records
 
-    Returns:
-        List of queue items with download status
-    """
+
+WHISPARR_STATUS_TTL_SECONDS = 60
+
+
+def _whisparr_status_path(whisparr_url):
+    digest = hashlib.sha256(normalize_whisparr_url(whisparr_url).encode("utf-8")).hexdigest()[:16]
+    return os.path.join(CACHE_DIR, f"whisparr_status_{digest}.json")
+
+
+def invalidate_whisparr_status(whisparr_url):
+    """Drop the cached status map (after we change something in Whisparr)."""
     try:
-        endpoint = "queue?pageSize=1000"
-        result = whisparr_request(whisparr_url, api_key, endpoint)
-        records = result.get("records", []) if result else []
-        log.LogInfo(f"Found {len(records)} items in Whisparr queue")
-        return records
+        os.remove(_whisparr_status_path(whisparr_url))
+    except OSError:
+        pass
+
+
+def _read_whisparr_status_cache(whisparr_url):
+    try:
+        with open(_whisparr_status_path(whisparr_url)) as f:
+            data = json.load(f)
+        if time.time() - float(data["ts"]) < WHISPARR_STATUS_TTL_SECONDS and isinstance(data["map"], dict):
+            return data["map"]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _write_whisparr_status_cache(whisparr_url, status_map):
+    filepath = _whisparr_status_path(whisparr_url)
+    tmp_path = None
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(filepath), prefix=".whisparr_tmp_", suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump({"ts": time.time(), "map": status_map}, f)
+        os.replace(tmp_path, filepath)
+        tmp_path = None
     except Exception as e:
-        log.LogWarning(f"Error fetching Whisparr queue: {e}")
-        return []
+        log.LogWarning(f"Failed to cache the Whisparr status: {e}")
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def whisparr_get_status_map(whisparr_url, api_key):
-    """Build a map of StashDB IDs to their Whisparr status.
+    """Build a map of StashDB IDs to their Whisparr status (cached for 60s on disk).
 
-    Combines data from both the movie database and download queue to
-    determine the current status of each scene.
+    Combines the movie list and the download queue.
 
     Status values:
         - "downloading": Actively downloading (with progress %)
@@ -860,113 +901,111 @@ def whisparr_get_status_map(whisparr_url, api_key):
         - "downloaded": Has file
 
     Returns:
-        Dict mapping stash_id -> {
-            "status": str,
-            "progress": float (0-100, only for downloading),
-            "eta": str (only for downloading/queued),
-            "error": str (only for stalled),
-            "whisparr_id": int
-        }
+        Dict mapping stash_id -> {"status", "progress", "eta", "error", "whisparr_id"}
+        (progress/eta/error only where they apply).
+
+    Raises:
+        WhisparrError if Whisparr can't be queried (errors are never cached).
     """
+    cached = _read_whisparr_status_cache(whisparr_url)
+    if cached is not None:
+        return cached
+
     status_map = {}
 
+    log.LogDebug("[Whisparr] Fetching all scenes...")
+    scenes = whisparr_get_all_scenes(whisparr_url, api_key)
+    log.LogDebug(f"[Whisparr] Got {len(scenes)} scenes")
+
+    # Build a map of whisparr movie ID -> stash_id for queue lookups
+    whisparr_id_to_stash_id = {}
+
+    for scene in scenes:
+        # Whisparr stores the StashDB ID in stashId field directly (UUID format)
+        stash_id = scene.get("stashId") or ""
+
+        if not stash_id:
+            continue
+
+        whisparr_id = scene.get("id")
+        has_file = scene.get("hasFile", False)
+
+        whisparr_id_to_stash_id[whisparr_id] = stash_id
+
+        # Initial status based on hasFile; "waiting" may be updated by the queue check
+        status_map[stash_id] = {
+            "status": "downloaded" if has_file else "waiting",
+            "whisparr_id": whisparr_id
+        }
+
+    log.LogDebug("[Whisparr] Fetching queue...")
+    queue = whisparr_get_queue(whisparr_url, api_key)
+    log.LogDebug(f"[Whisparr] Got {len(queue)} queue items")
+
+    for item in queue:
+        movie_id = item.get("movieId")
+        stash_id = whisparr_id_to_stash_id.get(movie_id)
+
+        if not stash_id:
+            continue
+
+        # Any of these can be null in Whisparr's JSON
+        queue_status = (item.get("status") or "").lower()
+        tracked_state = (item.get("trackedDownloadState") or "").lower()
+        error_message = item.get("errorMessage") or ""
+
+        size = item.get("size") or 0
+        size_left = item.get("sizeleft") or 0
+        progress = 0
+        if size > 0:
+            progress = round(((size - size_left) / size) * 100, 1)
+
+        eta = item.get("timeleft")
+
+        if queue_status == "warning" or "stalled" in error_message.lower():
+            status_map[stash_id] = {
+                "status": "stalled",
+                "progress": progress,
+                "eta": eta,
+                "error": error_message,
+                "whisparr_id": movie_id
+            }
+        elif queue_status == "downloading" or tracked_state == "downloading":
+            status_map[stash_id] = {
+                "status": "downloading",
+                "progress": progress,
+                "eta": eta,
+                "whisparr_id": movie_id
+            }
+        elif queue_status == "queued":
+            status_map[stash_id] = {
+                "status": "queued",
+                "eta": eta,
+                "whisparr_id": movie_id
+            }
+        else:
+            # Some other queue state - mark as queued with progress info
+            status_map[stash_id] = {
+                "status": "queued",
+                "progress": progress,
+                "eta": eta,
+                "whisparr_id": movie_id
+            }
+
+    log.LogInfo(f"Built status map for {len(status_map)} Whisparr scenes")
+    _write_whisparr_status_cache(whisparr_url, status_map)
+    return status_map
+
+
+def _whisparr_status_for_response(whisparr_url, api_key):
+    """(status_map, error_string) for attaching to a response; error is None on success."""
     try:
-        # Get all scenes in Whisparr
-        log.LogDebug(f"[Whisparr] Fetching all scenes from {whisparr_url}...")
-        scenes = whisparr_get_all_scenes(whisparr_url, api_key)
-        log.LogDebug(f"[Whisparr] Got {len(scenes)} scenes")
-
-        # Build a map of whisparr movie ID -> stash_id for queue lookups
-        whisparr_id_to_stash_id = {}
-
-        for scene in scenes:
-            # Whisparr stores the StashDB ID in stashId field directly (UUID format)
-            stash_id = scene.get("stashId", "")
-
-            if not stash_id:
-                continue
-
-            whisparr_id = scene.get("id")
-            has_file = scene.get("hasFile", False)
-
-            whisparr_id_to_stash_id[whisparr_id] = stash_id
-
-            # Initial status based on hasFile
-            if has_file:
-                status_map[stash_id] = {
-                    "status": "downloaded",
-                    "whisparr_id": whisparr_id
-                }
-            else:
-                # In Whisparr but no file - will check queue next
-                status_map[stash_id] = {
-                    "status": "waiting",  # Default, may be updated by queue check
-                    "whisparr_id": whisparr_id
-                }
-
-        # Get queue and update statuses for items being downloaded
-        log.LogDebug("[Whisparr] Fetching queue...")
-        queue = whisparr_get_queue(whisparr_url, api_key)
-        log.LogDebug(f"[Whisparr] Got {len(queue)} queue items")
-
-        for item in queue:
-            movie_id = item.get("movieId")
-            stash_id = whisparr_id_to_stash_id.get(movie_id)
-
-            if not stash_id:
-                continue
-
-            # Determine status from queue item
-            queue_status = item.get("status", "").lower()
-            tracked_state = item.get("trackedDownloadState", "").lower()
-            error_message = item.get("errorMessage", "")
-
-            # Calculate progress
-            size = item.get("size", 0)
-            size_left = item.get("sizeleft", 0)
-            progress = 0
-            if size > 0:
-                progress = round(((size - size_left) / size) * 100, 1)
-
-            eta = item.get("timeleft")
-
-            # Determine the status
-            if queue_status == "warning" or "stalled" in error_message.lower():
-                status_map[stash_id] = {
-                    "status": "stalled",
-                    "progress": progress,
-                    "eta": eta,
-                    "error": error_message,
-                    "whisparr_id": movie_id
-                }
-            elif queue_status == "downloading" or tracked_state == "downloading":
-                status_map[stash_id] = {
-                    "status": "downloading",
-                    "progress": progress,
-                    "eta": eta,
-                    "whisparr_id": movie_id
-                }
-            elif queue_status == "queued":
-                status_map[stash_id] = {
-                    "status": "queued",
-                    "eta": eta,
-                    "whisparr_id": movie_id
-                }
-            else:
-                # Some other queue state - mark as queued with progress info
-                status_map[stash_id] = {
-                    "status": "queued",
-                    "progress": progress,
-                    "eta": eta,
-                    "whisparr_id": movie_id
-                }
-
-        log.LogInfo(f"Built status map for {len(status_map)} Whisparr scenes")
-        return status_map
-
+        return whisparr_get_status_map(whisparr_url, api_key), None
+    except WhisparrError as e:
+        return {}, str(e)
     except Exception as e:
-        log.LogWarning(f"Error building Whisparr status map: {e}")
-        return status_map
+        log.LogError(f"Unexpected error fetching the Whisparr status: {e}")
+        return {}, f"Could not fetch the Whisparr status: {e}"
 
 
 # ============================================================================
@@ -1534,12 +1573,10 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
     whisparr_url = plugin_settings.get("whisparrUrl", "")
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
 
+    whisparr_error = None
     if whisparr_url and whisparr_api_key:
         whisparr_configured = True
-        try:
-            whisparr_status_map = whisparr_get_status_map(whisparr_url, whisparr_api_key)
-        except Exception as e:
-            log.LogWarning(f"Could not fetch Whisparr status: {e}")
+        whisparr_status_map, whisparr_error = _whisparr_status_for_response(whisparr_url, whisparr_api_key)
 
     for scene in result["scenes"]:
         scene_stash_id = scene.get("id")
@@ -1584,6 +1621,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "is_complete": is_complete,
         "missing_scenes": formatted_scenes,
         "whisparr_configured": whisparr_configured,
+        **({"whisparr_error": whisparr_error} if whisparr_error else {}),
         "filters_active": filters_active,
         "active_filters": active_filters,
         "active_filter_tag_ids": list(favorite_tag_ids) if favorite_tag_ids else [],
@@ -1853,12 +1891,10 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
     whisparr_url = plugin_settings.get("whisparrUrl", "")
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
 
+    whisparr_error = None
     if whisparr_url and whisparr_api_key:
         whisparr_configured = True
-        try:
-            whisparr_status_map = whisparr_get_status_map(whisparr_url, whisparr_api_key)
-        except Exception as e:
-            log.LogWarning(f"Could not fetch Whisparr status: {e}")
+        whisparr_status_map, whisparr_error = _whisparr_status_for_response(whisparr_url, whisparr_api_key)
 
     for scene in collected:
         scene_stash_id = scene.get("id")
@@ -1879,6 +1915,7 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         "is_complete": is_complete,
         "missing_scenes": formatted_scenes,
         "whisparr_configured": whisparr_configured,
+        **({"whisparr_error": whisparr_error} if whisparr_error else {}),
         "filters_active": filters_active,
         "active_filter_tag_ids": list(tag_ids) if tag_ids else [],
         "excluded_tags_applied": len(excluded_tag_ids) > 0,
@@ -1977,7 +2014,7 @@ def add_to_whisparr(stash_id, title, plugin_settings):
         )
 
         if not added_scene:
-            return {"error": f"Failed to add scene '{title}' to Whisparr."}
+            return {"success": False, "error": f"Whisparr accepted the request but returned nothing for '{title}'."}
 
         search_msg = " and triggered search" if search_on_add else ""
         return {
@@ -1986,6 +2023,9 @@ def add_to_whisparr(stash_id, title, plugin_settings):
             "scene": added_scene
         }
 
+    except WhisparrError as e:
+        log.LogError(f"Error adding scene to Whisparr: {e}")
+        return {"success": False, "error": str(e), "whisparr_error": str(e)}
     except Exception as e:
         log.LogError(f"Error adding scene to Whisparr: {e}")
         return {"error": str(e)}
@@ -2003,21 +2043,19 @@ def whisparr_delete_scene(whisparr_url, api_key, movie_id, delete_files=False):
     Returns:
         True on success, raises on failure
     """
+    endpoint = f"movie/{movie_id}?deleteFiles={'true' if delete_files else 'false'}"
     try:
-        endpoint = f"movie/{movie_id}?deleteFiles={'true' if delete_files else 'false'}"
         whisparr_request(whisparr_url, api_key, endpoint, method="DELETE")
-        log.LogInfo(f"Deleted scene {movie_id} from Whisparr")
-        return True
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
+    except WhisparrError as e:
+        if e.status == 404:
             # Scene already deleted - that's fine
             log.LogInfo(f"Scene {movie_id} already removed from Whisparr (404)")
+            invalidate_whisparr_status(whisparr_url)
             return True
-        log.LogError(f"Failed to delete scene {movie_id} from Whisparr: {e}")
         raise
-    except Exception as e:
-        log.LogError(f"Failed to delete scene {movie_id} from Whisparr: {e}")
-        raise
+    log.LogInfo(f"Deleted scene {movie_id} from Whisparr")
+    invalidate_whisparr_status(whisparr_url)
+    return True
 
 
 def whisparr_unmonitor_scene(whisparr_url, api_key, movie_id):
@@ -2031,19 +2069,17 @@ def whisparr_unmonitor_scene(whisparr_url, api_key, movie_id):
     Returns:
         Updated scene data, raises on failure
     """
-    try:
-        # First get the current scene data
-        endpoint = f"movie/{movie_id}"
-        scene = whisparr_request(whisparr_url, api_key, endpoint)
+    endpoint = f"movie/{movie_id}"
+    scene = whisparr_request(whisparr_url, api_key, endpoint)
+    if not isinstance(scene, dict):
+        raise WhisparrError(f"Whisparr has no scene with id {movie_id} to unmonitor.",
+                            url=f"{normalize_whisparr_url(whisparr_url)}/api/v3/{endpoint}")
 
-        # Update monitored status
-        scene["monitored"] = False
-        result = whisparr_request(whisparr_url, api_key, endpoint, method="PUT", payload=scene)
-        log.LogInfo(f"Unmonitored scene {movie_id} in Whisparr")
-        return result
-    except Exception as e:
-        log.LogError(f"Failed to unmonitor scene {movie_id} in Whisparr: {e}")
-        raise
+    scene["monitored"] = False
+    result = whisparr_request(whisparr_url, api_key, endpoint, method="PUT", payload=scene)
+    log.LogInfo(f"Unmonitored scene {movie_id} in Whisparr")
+    invalidate_whisparr_status(whisparr_url)
+    return result
 
 
 # ============================================================================
@@ -2129,7 +2165,11 @@ def handle_scene_update_hook(scene_input, plugin_settings):
         return {"success": True, "message": "Scene not tagged with target endpoint"}
 
     # Check if scene exists in Whisparr
-    whisparr_scene = whisparr_get_scene_by_stash_id(whisparr_url, whisparr_api_key, stash_id)
+    try:
+        whisparr_scene = whisparr_get_scene_by_stash_id(whisparr_url, whisparr_api_key, stash_id)
+    except WhisparrError as e:
+        log.LogError(f"Whisparr cleanup skipped for scene {scene_id}: {e}")
+        return {"success": False, "message": str(e), "error": str(e), "whisparr_error": str(e)}
 
     if not whisparr_scene:
         log.LogDebug(f"Scene with StashDB ID {stash_id} not in Whisparr")
@@ -2150,7 +2190,7 @@ def handle_scene_update_hook(scene_input, plugin_settings):
             return {"success": True, "message": f"Removed '{scene_title}' from Whisparr"}
     except Exception as e:
         log.LogError(f"Failed to cleanup Whisparr for scene {scene_id}: {e}")
-        return {"success": False, "message": str(e)}
+        return {"success": False, "message": str(e), "error": str(e)}
 
 
 def task_scan_for_new_scenes(plugin_settings):
@@ -2244,7 +2284,11 @@ def task_cleanup_whisparr(plugin_settings):
     log.LogInfo("Starting Whisparr cleanup task...")
 
     # Get all scenes from Whisparr
-    whisparr_scenes = whisparr_get_all_scenes(whisparr_url, whisparr_api_key)
+    try:
+        whisparr_scenes = whisparr_get_all_scenes(whisparr_url, whisparr_api_key)
+    except WhisparrError as e:
+        log.LogError(f"Whisparr cleanup failed: {e}")
+        return {"success": False, "message": str(e), "error": str(e), "whisparr_error": str(e)}
     log.LogInfo(f"Found {len(whisparr_scenes)} scenes in Whisparr")
 
     # Get all local scenes with StashDB IDs
