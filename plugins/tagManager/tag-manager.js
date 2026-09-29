@@ -1307,6 +1307,21 @@
   }
 
   /**
+   * The destination's parent ids after absorbing `source`: dest ∪ source parents
+   * ∪ `addParentId` (optional), minus both merge sides. No direct cycles: a tag
+   * that is already the destination's child can't also become its parent.
+   * Deeper cycles are rejected by Stash's own hierarchy validation. Pure.
+   */
+  function mergeParentIds(source, destination, addParentId) {
+    const destChildIds = new Set(relationIdsForMerge(destination.children, source, destination));
+    return [...new Set([
+      ...relationIdsForMerge(destination.parents, source, destination),
+      ...relationIdsForMerge(source.parents, source, destination),
+      ...relationIdsForMerge(addParentId ? [{ id: addParentId }] : [], source, destination),
+    ])].filter(id => !destChildIds.has(id));
+  }
+
+  /**
    * F5: the destination's values after absorbing `source`. Stash's plain merge
    * moves scenes etc., the source name/aliases and stash_ids, but NOT parents,
    * children or description. With TagsMergeInput.values these override the
@@ -1314,12 +1329,13 @@
    *   aliases    = dest ∪ source name ∪ source aliases ∪ sanitizedAliases, minus
    *                the destination name, deduped case-insensitively
    *   stash_ids  = dest ∪ source, with this endpoint replaced by the new link
-   *   parent_ids = dest ∪ source parents, minus both sides and dest's children
+   *   parent_ids = dest ∪ source parents ∪ `addParentId` (the dialog's parent
+   *                choice, optional), minus both sides and dest's children
    *   child_ids  = dest ∪ source children, minus both sides and the new parents
    *   description only when `description` is given (no rename: never `name`).
    * Pure.
    */
-  function buildMergeValues({ source, destination, stashdbTag, endpoint, sanitizedAliases, description }) {
+  function buildMergeValues({ source, destination, stashdbTag, endpoint, sanitizedAliases, description, addParentId }) {
     const aliases = [];
     const seenAliases = new Set([String(destination.name || '').toLowerCase()]);
     const candidates = [
@@ -1344,14 +1360,8 @@
     }
     stashIds.push({ endpoint, stash_id: stashdbTag.id });
 
-    // No direct cycles: a tag that is already the destination's child can't
-    // also become its parent (and vice versa). Deeper cycles are rejected by
-    // Stash's own hierarchy validation.
-    const destChildIds = new Set(relationIdsForMerge(destination.children, source, destination));
-    const parentIds = [...new Set([
-      ...relationIdsForMerge(destination.parents, source, destination),
-      ...relationIdsForMerge(source.parents, source, destination),
-    ])].filter(id => !destChildIds.has(id));
+    // No direct cycles: a new parent can't also stay a child.
+    const parentIds = mergeParentIds(source, destination, addParentId);
     const parentSet = new Set(parentIds);
     const childIds = [...new Set([
       ...relationIdsForMerge(destination.children, source, destination),
@@ -1372,18 +1382,22 @@
   /**
    * F5: ask before an irreversible merge, with what moves. Expects the source's
    * `parents`/`children` (fresh from fetchTagsForMerge); relations to either
-   * merge side aren't counted.
+   * merge side aren't counted. `addedParent` ({ name, isNew }) is a parent the
+   * merge adds to the destination (the dialog's parent choice), if any.
    * @returns {Promise<boolean>}
    */
-  async function confirmTagMerge(sourceTag, destinationTag) {
+  async function confirmTagMerge(sourceTag, destinationTag, { addedParent = null } = {}) {
     const sceneCount = await getTagSceneCount(sourceTag.id);
     const childCount = relationIdsForMerge(sourceTag.children, sourceTag, destinationTag).length;
     const parentCount = relationIdsForMerge(sourceTag.parents, sourceTag, destinationTag).length;
     const count = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const parentNote = addedParent
+      ? `, and "${addedParent.name}" is added as a parent${addedParent.isNew ? ' (a new tag)' : ''}`
+      : '';
     return confirm(
       `Merge "${sourceTag.name}" into "${destinationTag.name}"?\n\n` +
       `${count(sceneCount, 'scene')}, ${count(childCount, 'child tag')} and ${count(parentCount, 'parent tag')} ` +
-      `move to "${destinationTag.name}". "${sourceTag.name}" will be deleted. This can't be undone.`
+      `move to "${destinationTag.name}"${parentNote}. "${sourceTag.name}" will be deleted. This can't be undone.`
     );
   }
 
@@ -1398,6 +1412,21 @@
   }
 
   /**
+   * Create the category tag for a '__create__' parent choice and add it to
+   * localTags. Throws if the create fails.
+   * @returns {Promise<object>} the new local tag
+   */
+  async function createCategoryParentTag(categoryName) {
+    const newParent = await createTag({ name: categoryName });
+    if (!newParent?.id) throw new Error('the server returned no tag');
+    const created = localTagFromCreated(newParent, { name: categoryName });
+    localTags.push(created);
+    localTagsChanged();
+    console.debug(`[tagManager] Created parent tag: ${created.name}`);
+    return created;
+  }
+
+  /**
    * Handle merging a source tag into a destination tag, then apply StashDB link.
    * Used by both pre-validation and API error merge handlers.
    *
@@ -1407,6 +1436,12 @@
    * that update fails the merge has already happened, so the source is dropped
    * locally and the error says what to fix.
    *
+   * The dialog's parent choice is applied the way Apply does it: unless
+   * parents are left alone, a chosen parent for the stash-box tag's category is
+   * added to the destination's parents. A '__create__' parent is created only
+   * after the user confirms; if that fails, nothing is merged. A remembered
+   * mapping is saved only once the merge (and on v0.30 the update) succeeded.
+   *
    * @param {object} params - Merge parameters
    * @param {object} params.sourceTag - The tag being merged (will be deleted)
    * @param {string} params.destinationId - ID of the tag to merge into
@@ -1415,11 +1450,17 @@
    * @param {string[]} params.sanitizedAliases - Aliases to include in the merge
    * @param {HTMLElement} params.modal - The modal element (for reading description choice)
    * @param {HTMLElement} params.container - The container element (for re-rendering)
-   * @returns {Promise<{success: boolean, error?: string, cancelled?: boolean, merged?: boolean}>}
+   * @param {?string} [params.parentId] - the dialog's parent: a tag id, '__create__', or null
+   * @param {boolean} [params.rememberMapping] - save category -> parent for `endpoint`
+   * @returns {Promise<{success: boolean, error?: string, cancelled?: boolean, merged?: boolean,
+   *   createdParent?: object}>}
    *   `cancelled`: the user declined, nothing was sent. `merged`: the source is
-   *   gone on the server even though the result is a failure.
+   *   gone on the server even though the result is a failure. `createdParent`:
+   *   the '__create__' parent, set whenever it was created (even on failure).
    */
-  async function performTagMerge({ sourceTag, destinationId, stashdbTag, endpoint, sanitizedAliases, modal, container }) {
+  async function performTagMerge({
+    sourceTag, destinationId, stashdbTag, endpoint, sanitizedAliases, modal, container, parentId = null, rememberMapping = false,
+  }) {
     const destinationTag = localTags.find(t => t.id === destinationId);
     if (!destinationTag) {
       return { success: false, error: 'Could not find destination tag.' };
@@ -1439,8 +1480,33 @@
     const source = fresh.source;
     const destination = fresh.destination;
 
-    if (!(await confirmTagMerge(source, destination))) {
+    // The dialog's parent choice, as Apply resolves it (#126: none when leaving
+    // parents alone). Only a parent the merge really adds is announced.
+    const categoryName = stashdbTag.category?.name || null;
+    const parentChoice = shouldResolveParents(settings) && categoryName && parentId ? String(parentId) : null;
+    let addedParent = null;
+    if (parentChoice === '__create__') {
+      addedParent = { name: categoryName, isNew: true };
+    } else if (parentChoice &&
+        mergeParentIds(source, destination, parentChoice).length > mergeParentIds(source, destination).length) {
+      addedParent = { name: localTags.find(t => t.id === parentChoice)?.name || parentChoice, isNew: false };
+    }
+
+    if (!(await confirmTagMerge(source, destination, { addedParent }))) {
       return { success: false, cancelled: true };
+    }
+
+    // Create a '__create__' parent only now that the user has confirmed.
+    let parentTagId = parentChoice === '__create__' ? null : parentChoice;
+    let createdParent = null;
+    if (parentChoice === '__create__') {
+      try {
+        createdParent = await createCategoryParentTag(categoryName);
+      } catch (e) {
+        console.error('[tagManager] Failed to create parent tag:', e);
+        return { success: false, error: `Failed to create parent tag "${categoryName}": ${e.message} (nothing was merged)` };
+      }
+      parentTagId = createdParent.id;
     }
 
     // Apply description if user chose StashDB description
@@ -1452,6 +1518,7 @@
       endpoint,
       sanitizedAliases,
       description: descChoice === 'stashdb' && stashdbTag.description ? stashdbTag.description : undefined,
+      addParentId: parentTagId,
     });
 
     try {
@@ -1461,7 +1528,10 @@
           await mergeTags([sourceTag.id], destinationId, values);
         } catch (e) {
           console.error('[tagManager] Merge error:', e.message);
-          return { success: false, error: `${e.message} (nothing was changed)` };
+          const unchanged = createdParent
+            ? `nothing was merged; the new parent tag "${createdParent.name}" was kept`
+            : 'nothing was changed';
+          return { success: false, error: `${e.message} (${unchanged})`, createdParent };
         }
       } else {
         // Stash v0.30: two steps. The merge moves scenes, aliases and stash_ids
@@ -1482,6 +1552,7 @@
           return {
             success: false,
             merged: true,
+            createdParent,
             error: `Merged '${source.name}' into '${destination.name}', but updating '${destination.name}' failed: ${e.message}. ` +
               `The merge can't be undone; fix the conflict (e.g. rename the clashing alias) and edit '${destination.name}' in Stash.`,
           };
@@ -1501,16 +1572,22 @@
         }
       }
 
+      // Save the mapping only once the merge (and on v0.30 the update) succeeded
+      if (rememberMapping && parentTagId) {
+        setCategoryMapping(endpoint, categoryName, parentTagId);
+        await saveCategoryMappings();
+      }
+
       modal.remove();
 
       showStatus(`Merged "${sourceTag.name}" into "${destinationTag.name}" and linked to StashDB`, 'success');
       renderPage(container);
       await refreshLocalTags(); // #124: pull server truth after the merge
 
-      return { success: true };
+      return { success: true, createdParent };
     } catch (e) {
       console.error('[tagManager] Merge error:', e.message);
-      return { success: false, error: e.message };
+      return { success: false, error: e.message, createdParent };
     }
   }
 
@@ -3744,12 +3821,7 @@
     if (shouldResolveParents(settings) && categoryName && parentId) {
       if (parentId === '__create__') {
         try {
-          const newParent = await createTag({ name: categoryName });
-          if (!newParent?.id) throw new Error('the server returned no tag');
-          createdParent = localTagFromCreated(newParent, { name: categoryName });
-          localTags.push(createdParent);
-          localTagsChanged();
-          console.debug(`[tagManager] Created parent tag: ${createdParent.name}`);
+          createdParent = await createCategoryParentTag(categoryName);
         } catch (e) {
           console.error('[tagManager] Failed to create parent tag:', e);
           return { ok: false, stage: 'parent', error: `Failed to create parent tag: ${e.message}`, sanitizedAliases };
@@ -4288,8 +4360,10 @@
             endpoint,
             sanitizedAliases,
             modal,
-            container
+            container,
+            ...currentParentChoice(),
           });
+          if (result.createdParent) createdParentId = result.createdParent.id;
 
           if (result.cancelled) {
             mergeBtn.disabled = false;
@@ -4357,8 +4431,10 @@
               endpoint,
               sanitizedAliases,
               modal,
-              container
+              container,
+              ...currentParentChoice(),
             });
+            if (result.createdParent) createdParentId = result.createdParent.id;
 
             if (result.cancelled) {
               mergeApiBtn.disabled = false;
@@ -4416,6 +4492,16 @@
     const applyBtn = modal.querySelector('.tm-apply-btn');
     let applying = false;
     let createdParentId = null;
+
+    // The Parent row's current choice, as Apply and both Merge buttons send it.
+    // A '__create__' parent an earlier attempt already created is reused.
+    function currentParentChoice() {
+      return {
+        parentId: selectedParentId === '__create__' && createdParentId ? createdParentId : selectedParentId,
+        rememberMapping: !!modal.querySelector('#tm-remember-mapping')?.checked,
+      };
+    }
+
     applyBtn.addEventListener('click', async () => {
       if (applying) return;
       applying = true;
@@ -4432,7 +4518,6 @@
 
         // Use the selected stash-box endpoint
         const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
-        const parentId = selectedParentId === '__create__' && createdParentId ? createdParentId : selectedParentId;
 
         const result = await applyDiff({
           tag,
@@ -4441,8 +4526,7 @@
           nameChoice,
           descChoice,
           aliases: editableAliases,
-          parentId,
-          rememberMapping: !!modal.querySelector('#tm-remember-mapping')?.checked,
+          ...currentParentChoice(),
         });
         if (result.createdParent) createdParentId = result.createdParent.id;
 

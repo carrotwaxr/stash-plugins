@@ -113,7 +113,7 @@ The dialog automatically selects sensible defaults:
 
 ### Merging Tags
 
-When you merge one tag into another, Tag Manager first asks you to confirm. The confirmation shows how many scenes, child tags and parent tags will move, and says the source tag is deleted. Parents and children of the merged tag carry over to the destination.
+When you merge one tag into another, Tag Manager first asks you to confirm. The confirmation shows how many scenes, child tags and parent tags will move, and says the source tag is deleted. Parents and children of the merged tag carry over to the destination. The parent picked in the dialog's Parent Tag row is added too: a `Create "<category>"` parent is only created after you confirm, and a remembered mapping is only saved once the merge succeeds.
 
 - **Stash 0.31 and later**: the merge and the updates to the destination tag (aliases, stash IDs, description, parents and children) happen in one transaction. If anything fails, nothing changes.
 - **Stash 0.30**: Tag Manager merges first, then updates the destination. If the update fails, the merge has already happened. The error explains what to fix by hand.
