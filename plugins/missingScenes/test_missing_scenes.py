@@ -590,23 +590,23 @@ class TestCacheBuildingFunction(unittest.TestCase):
         mock_graphql.side_effect = [
             {
                 "findScenes": {
-                    "count": 150,  # More than 100, requires 2 pages
-                    "scenes": [{"stash_ids": [{"endpoint": endpoint, "stash_id": f"id-{i}"}]} for i in range(100)]
+                    "count": 1500,  # More than 1000, requires 2 pages
+                    "scenes": [{"stash_ids": [{"endpoint": endpoint, "stash_id": f"id-{i}"}]} for i in range(1000)]
                 }
             },
             {
                 "findScenes": {
-                    "count": 150,
-                    "scenes": [{"stash_ids": [{"endpoint": endpoint, "stash_id": f"id-{i}"}]} for i in range(100, 150)]
+                    "count": 1500,
+                    "scenes": [{"stash_ids": [{"endpoint": endpoint, "stash_id": f"id-{i}"}]} for i in range(1000, 1500)]
                 }
             }
         ]
 
         result = missing_scenes.get_or_build_cache(endpoint)
 
-        self.assertEqual(len(result), 150)
+        self.assertEqual(len(result), 1500)
         self.assertIn("id-0", result)
-        self.assertIn("id-149", result)
+        self.assertIn("id-1499", result)
 
     @patch.object(missing_scenes, 'stash_graphql')
     def test_cache_returns_existing(self, mock_graphql):

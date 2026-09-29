@@ -17,9 +17,11 @@ import base64
 import os
 import time
 import hashlib
+import tempfile
 
 # Import Stash-compatible logging
 import log
+import plugin_data
 
 # Import resilient StashDB API utilities
 import stashbox_api
@@ -52,15 +54,26 @@ _cache_metadata: dict[str, dict] = {}
 
 # Disk cache configuration
 CACHE_TTL_SECONDS = 300  # 5 minutes
-CACHE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Lives in Stash's config dir (plugin_data/missingScenes); main() re-points it after
+# plugin_data.configure(). Cache functions read this at call time.
+CACHE_DIR = plugin_data.current_dir()
+
+
+def _md5_hex(text: str) -> str:
+    """md5 as a cache key only (not security); flag it so FIPS builds allow it."""
+    try:
+        return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
+    except TypeError:  # Python < 3.9
+        return hashlib.md5(text.encode()).hexdigest()
+
 
 def _get_cache_filepath(endpoint: str) -> str:
     """Get the file path for a cached endpoint's stash_ids."""
-    endpoint_hash = hashlib.md5(endpoint.encode()).hexdigest()[:12]
-    return os.path.join(CACHE_DIR, f".cache_stashids_{endpoint_hash}.json")
+    return os.path.join(CACHE_DIR, f".cache_stashids_{_md5_hex(endpoint)[:12]}.json")
+
 
 def _read_cache_from_disk(endpoint: str) -> set[str] | None:
-    """Read cached stash_ids from disk if fresh enough. Returns None if stale/missing."""
+    """Read cached stash_ids from disk if fresh enough. Returns None if stale/missing/corrupt."""
     filepath = _get_cache_filepath(endpoint)
     try:
         if not os.path.exists(filepath):
@@ -71,29 +84,50 @@ def _read_cache_from_disk(endpoint: str) -> set[str] | None:
             return None
         with open(filepath, 'r') as f:
             data = json.load(f)
-        stash_ids = set(data.get("stash_ids", []))
+        ids = data.get("stash_ids") if isinstance(data, dict) else None
+        if not isinstance(ids, list):
+            log.LogWarning(f"Ignoring malformed cache file for {endpoint}; rebuilding")
+            return None
+        stash_ids = set(ids)
         log.LogInfo(f"Loaded {len(stash_ids)} stash_ids from disk cache for {endpoint}")
         return stash_ids
     except Exception as e:
-        log.LogDebug(f"Failed to read cache from disk: {e}")
+        log.LogWarning(f"Failed to read the cache file ({e}); rebuilding")
         return None
 
+
 def _write_cache_to_disk(endpoint: str, stash_ids: set[str]) -> None:
-    """Write stash_ids to disk cache."""
+    """Write stash_ids to disk cache (unique temp file, then atomic replace)."""
     filepath = _get_cache_filepath(endpoint)
-    tmp_path = filepath + ".tmp"
+    tmp_path = None
     try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(filepath), prefix=".cache_tmp_", suffix=".json")
         data = {"stash_ids": sorted(stash_ids), "endpoint": endpoint, "count": len(stash_ids)}
-        with open(tmp_path, 'w') as f:
+        with os.fdopen(fd, 'w') as f:
             json.dump(data, f)
         os.replace(tmp_path, filepath)
+        tmp_path = None
         log.LogDebug(f"Wrote {len(stash_ids)} stash_ids to disk cache")
     except Exception as e:
         log.LogWarning(f"Failed to write cache to disk: {e}")
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def invalidate_cache(endpoint: str) -> None:
+    """Drop the in-memory and on-disk stash_id cache for an endpoint."""
+    _local_stash_id_cache.pop(endpoint, None)
+    _cache_metadata.pop(endpoint, None)
+    try:
+        os.remove(_get_cache_filepath(endpoint))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log.LogWarning(f"Could not remove the cache file: {e}")
 
 
 def _get_cache_info(endpoint: str) -> dict:
@@ -1053,8 +1087,7 @@ def get_or_build_cache(endpoint: str) -> set[str]:
 
     stash_ids = set()
     page = 1
-    per_page = 100
-    build_start = time.time()
+    per_page = 1000
 
     while True:
         result = stash_graphql("""
@@ -1079,7 +1112,9 @@ def get_or_build_cache(endpoint: str) -> set[str]:
             }
         })
 
-        find_scenes = result.get("findScenes", {})
+        if not result:
+            raise RuntimeError("Could not read scenes from Stash to build the local index (no response)")
+        find_scenes = result.get("findScenes") or {}
         total_count = find_scenes.get("count", 0)
         scenes = find_scenes.get("scenes", [])
 
@@ -1107,16 +1142,6 @@ def get_or_build_cache(endpoint: str) -> set[str]:
 
     log.LogInfo(f"Cache built: {len(stash_ids)} scenes with stash_ids for {endpoint} ({build_time_ms}ms)")
     return stash_ids
-
-
-def _get_cache_info(endpoint: str) -> dict:
-    """Get cache metadata for API responses."""
-    meta = _cache_metadata.get(endpoint, {})
-    return {
-        "source": meta.get("source", "unknown"),
-        "count": meta.get("count", 0),
-        "build_time_ms": meta.get("build_time_ms", 0),
-    }
 
 
 def count_local_scenes_for_entity(endpoint: str, entity_type: str, entity_id: str) -> int:
@@ -2510,6 +2535,11 @@ def main():
         print(json.dumps(output))
         return
 
+    # Keep state in Stash's config dir (never raises)
+    global CACHE_DIR
+    plugin_data.configure(input_data.get("server_connection") or {})
+    CACHE_DIR = plugin_data.current_dir()
+
     # Get plugin settings
     plugin_settings = {}
     try:
@@ -2673,6 +2703,18 @@ def main():
                         "available_endpoints": available,
                         "default_endpoint": default_endpoint,
                     }
+
+        elif operation == "refresh_index":
+            endpoint = args.get("endpoint")
+            if not endpoint:
+                boxes = get_stashbox_config()
+                endpoint = boxes[0]["endpoint"] if boxes else None
+            if not endpoint:
+                output = {"error": "No stash-box endpoint configured"}
+            else:
+                invalidate_cache(endpoint)
+                ids = get_or_build_cache(endpoint)
+                output = {"success": True, "endpoint": endpoint, "count": len(ids)}
 
         elif operation == "get_all_endpoints":
             configured_boxes = get_stashbox_config()

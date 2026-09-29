@@ -25,3 +25,4 @@ plugins/tagManager/simulate.py
 **/.cache_stashids_*
 plugins/tagManager/data/
 plugins/sceneMatcher/data/
+plugins/missingScenes/data/
