@@ -63,6 +63,9 @@ def create_ssl_context(verify=True):
 # Stash-box endpoints (StashDB, FansDB, ThePornDB...) are public hosts; always verify.
 SSL_CONTEXT = create_ssl_context()
 
+# Fewer scenes than this from the AND query means the OR query is worth adding
+MIN_COMBINED_RESULTS_THRESHOLD = 10
+
 # Default configuration - can be overridden via plugin settings
 DEFAULT_CONFIG = {
     # Retry settings
@@ -76,7 +79,7 @@ DEFAULT_CONFIG = {
     "rate_limit_pause": 60.0,  # seconds to pause on 429
 
     # Pagination limits (reduced from original 50 to be more courteous)
-    "max_pages_performer": 25,  # Max pages for performer scene queries
+    "max_pages_performer": 10,  # Max pages for performer and combined scene queries
     "max_pages_studio": 25,  # Max pages for studio scene queries
     "per_page": 100,  # Results per page
 
@@ -133,7 +136,7 @@ def get_config(plugin_settings, key):
     """Get a config value, preferring plugin settings over defaults.
 
     Validates and coerces types to ensure safe values:
-    - Integer settings: clamped to minimum of 1
+    - Integer settings: clamped to minimum of 1 (max_retries: minimum of 0)
     - Float settings: clamped to minimum of 0.0
     """
     # Check plugin settings first (with stashbox_ prefix)
@@ -150,7 +153,7 @@ def get_config(plugin_settings, key):
 
     if key in integer_keys:
         try:
-            return max(1, int(value))
+            return max(0 if key == "max_retries" else 1, int(value))
         except (TypeError, ValueError):
             return DEFAULT_CONFIG.get(key, 1)
 
@@ -427,6 +430,81 @@ def paginated_query(url, api_key, query, build_variables_fn, extract_fn,
     return all_items, total, error
 
 
+class ScenesList(list):
+    """A list of scenes that also says whether paging stopped short of the server's count.
+
+    total: the stash-box count for the (last) query; truncated: fewer scenes came
+    back than that count, because of the page cap.
+    """
+    total = None
+    truncated = False
+
+
+def _scenes_list(items, total):
+    out = ScenesList(items)
+    out.total = total
+    out.truncated = bool(total) and len(items) < total
+    return out
+
+
+def _paged_scene_query(url, api_key, query, build_variables, extract, plugin_settings,
+                       operation_name, max_pages):
+    items, total, error = paginated_query(
+        url, api_key, query, build_variables, extract,
+        plugin_settings=plugin_settings, operation_name=operation_name, max_pages=max_pages)
+    return items, total, error
+
+
+def _extract_scenes(data):
+    query_data = data.get("queryScenes", {})
+    return query_data.get("scenes", []), query_data.get("count", 0)
+
+
+def _performer_modifier_queries(url, api_key, query, performer_ids, studio_id,
+                                plugin_settings, operation_name, max_pages):
+    """Run a performer (optionally + studio) query: INCLUDES_ALL first with 2+ performers,
+    then add INCLUDES when that finds fewer than MIN_COMBINED_RESULTS_THRESHOLD scenes.
+
+    Returns (scenes, error) with scenes a ScenesList; raises if the first page of the
+    first query fails.
+    """
+    def make_builder(modifier):
+        def build_variables(page, per_page):
+            inp = {"performers": {"value": list(performer_ids), "modifier": modifier}}
+            if studio_id:
+                inp["studios"] = {"value": [studio_id], "modifier": "INCLUDES"}
+            inp.update({"page": page, "per_page": per_page, "sort": "DATE", "direction": "DESC"})
+            return {"input": inp}
+        return build_variables
+
+    modifiers = ["INCLUDES_ALL", "INCLUDES"] if len(performer_ids) > 1 else ["INCLUDES"]
+    merged = {}
+    error = None
+    last = ([], 0)
+    for n, modifier in enumerate(modifiers):
+        if n > 0 and len(merged) >= MIN_COMBINED_RESULTS_THRESHOLD:
+            break
+        try:
+            items, total, error = _paged_scene_query(
+                url, api_key, query, make_builder(modifier), _extract_scenes,
+                plugin_settings, f"{operation_name} ({modifier})", max_pages)
+        except StashBoxAPIError as e:
+            if n == 0:
+                raise
+            log.LogWarning(f"{operation_name}: {modifier} query failed: {e}; keeping earlier results")
+            error = e
+            break
+        for sc_ in items:
+            merged.setdefault(sc_["id"], sc_)
+        last = (items, total)
+        if error:
+            break
+    out = _scenes_list(list(merged.values()), last[1])
+    # Truncation is judged on the last query that ran, as that is the broadest one
+    out.truncated = bool(last[1]) and len(last[0]) < last[1]
+    return out, error
+
+
 # ============================================================================
 # Standard StashDB Queries
 # ============================================================================
@@ -628,17 +706,11 @@ def query_scenes_by_studio(url, api_key, studio_id, plugin_settings=None):
             }
         }
 
-    def extract(data):
-        query_data = data.get("queryScenes", {})
-        return query_data.get("scenes", []), query_data.get("count", 0)
-
     max_pages = get_config(plugin_settings, "max_pages_studio")
-    scenes, _total, error = paginated_query(
-        url, api_key, query, build_variables, extract,
-        plugin_settings=plugin_settings,
-        operation_name="scenes for studio",
-        max_pages=max_pages
-    )
+    items, total, error = _paged_scene_query(
+        url, api_key, query, build_variables, _extract_scenes,
+        plugin_settings, "scenes for studio", max_pages)
+    scenes = _scenes_list(items, total)
 
     log.LogInfo(f"StashDB: Found {len(scenes)} scenes for studio")
     return scenes, error
@@ -667,12 +739,8 @@ def search_scenes_by_text(url, api_key, search_term, limit=25, plugin_settings=N
     return scenes
 
 
-def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_settings=None, max_pages=10):
-    """Query StashDB with combined performer AND studio filter. Returns (scenes, error); raises if page 1 fails."""
-    if not performer_ids or not studio_id:
-        return [], None
-
-    query = f"""
+def _scene_query_text():
+    return f"""
     query QueryScenes($input: SceneQueryInput!) {{
         queryScenes(input: $input) {{
             count
@@ -683,79 +751,38 @@ def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_setting
     }}
     """
 
-    def build_variables(page, per_page):
-        return {
-            "input": {
-                "performers": {
-                    "value": list(performer_ids),
-                    "modifier": "INCLUDES"
-                },
-                "studios": {
-                    "value": [studio_id],
-                    "modifier": "INCLUDES"
-                },
-                "page": page,
-                "per_page": per_page,
-                "sort": "DATE",
-                "direction": "DESC"
-            }
-        }
 
-    def extract(data):
-        query_data = data.get("queryScenes", {})
-        return query_data.get("scenes", []), query_data.get("count", 0)
+def query_scenes_combined(url, api_key, performer_ids, studio_id, plugin_settings=None, max_pages=None):
+    """Query StashDB for scenes by performers (AND first, then OR when sparse) and studio.
 
-    scenes, _total, error = paginated_query(
-        url, api_key, query, build_variables, extract,
-        plugin_settings=plugin_settings,
-        operation_name="combined performer+studio query",
-        max_pages=max_pages
-    )
+    Returns (scenes, error); raises if page 1 fails. max_pages defaults to the
+    stashbox_max_pages_performer setting.
+    """
+    if not performer_ids or not studio_id:
+        return [], None
+    if max_pages is None:
+        max_pages = get_config(plugin_settings, "max_pages_performer")
 
+    scenes, error = _performer_modifier_queries(
+        url, api_key, _scene_query_text(), performer_ids, studio_id,
+        plugin_settings, "combined performer+studio query", max_pages)
     log.LogInfo(f"StashDB combined (performer+studio): found {len(scenes)} scenes")
     return scenes, error
 
 
-def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None, max_pages=10):
-    """Query StashDB for scenes featuring any of the given performers. Returns (scenes, error); raises if page 1 fails."""
+def query_scenes_by_performers(url, api_key, performer_ids, plugin_settings=None, max_pages=None):
+    """Query StashDB for scenes featuring the given performers (AND first, then OR when sparse).
+
+    Returns (scenes, error); raises if page 1 fails. max_pages defaults to the
+    stashbox_max_pages_performer setting.
+    """
     if not performer_ids:
         return [], None
+    if max_pages is None:
+        max_pages = get_config(plugin_settings, "max_pages_performer")
 
-    query = f"""
-    query QueryScenes($input: SceneQueryInput!) {{
-        queryScenes(input: $input) {{
-            count
-            scenes {{
-                {SCENE_FIELDS}
-            }}
-        }}
-    }}
-    """
-
-    def build_variables(page, per_page):
-        return {
-            "input": {
-                "performers": {
-                    "value": list(performer_ids),
-                    "modifier": "INCLUDES"
-                },
-                "page": page,
-                "per_page": per_page,
-                "sort": "DATE",
-                "direction": "DESC"
-            }
-        }
-
-    def extract(data):
-        query_data = data.get("queryScenes", {})
-        return query_data.get("scenes", []), query_data.get("count", 0)
-
-    scenes, _total, error = paginated_query(
-        url, api_key, query, build_variables, extract,
-        plugin_settings=plugin_settings,
-        operation_name=f"scenes for {len(performer_ids)} performers",
-        max_pages=max_pages
-    )
-
+    scenes, error = _performer_modifier_queries(
+        url, api_key, _scene_query_text(), performer_ids, None,
+        plugin_settings, f"scenes for {len(performer_ids)} performers", max_pages)
     log.LogInfo(f"StashDB: Found {len(scenes)} scenes for {len(performer_ids)} performers")
     return scenes, error

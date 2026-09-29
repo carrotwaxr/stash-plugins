@@ -29,7 +29,10 @@ SSL_CONTEXT = stashbox_api.create_ssl_context(verify=False)
 
 # Threshold for falling back to individual performer/studio queries
 # If combined query returns fewer than this many results, also try separate queries
-MIN_COMBINED_RESULTS_THRESHOLD = 10
+MIN_COMBINED_RESULTS_THRESHOLD = stashbox_api.MIN_COMBINED_RESULTS_THRESHOLD
+DEFAULT_MAX_RESULTS = 50
+MIN_MAX_RESULTS = 10
+MAX_MAX_RESULTS = 500
 
 
 # ============================================================================
@@ -393,7 +396,7 @@ def query_stashdb_by_text(stashdb_url, api_key, search_term, limit=25, plugin_se
     )
 
 
-def query_stashdb_scenes_combined(stashdb_url, api_key, performer_ids, studio_id, plugin_settings=None, max_pages=10):
+def query_stashdb_scenes_combined(stashdb_url, api_key, performer_ids, studio_id, plugin_settings=None):
     """
     Query StashDB with combined performer AND studio filter.
     Returns (scenes, error); raises StashBoxAPIError when the first page fails.
@@ -401,12 +404,11 @@ def query_stashdb_scenes_combined(stashdb_url, api_key, performer_ids, studio_id
     """
     return stashbox_api.query_scenes_combined(
         stashdb_url, api_key, performer_ids, studio_id,
-        plugin_settings=plugin_settings,
-        max_pages=max_pages
+        plugin_settings=plugin_settings
     )
 
 
-def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, plugin_settings=None, max_pages=10):
+def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, plugin_settings=None):
     """
     Query StashDB for scenes featuring any of the given performers.
     Returns (scenes, error); raises StashBoxAPIError when the first page fails.
@@ -414,12 +416,11 @@ def query_stashdb_scenes_by_performers(stashdb_url, api_key, performer_ids, plug
     """
     return stashbox_api.query_scenes_by_performers(
         stashdb_url, api_key, performer_ids,
-        plugin_settings=plugin_settings,
-        max_pages=max_pages
+        plugin_settings=plugin_settings
     )
 
 
-def query_stashdb_scenes_by_studio(stashdb_url, api_key, studio_id, plugin_settings=None, max_pages=10):
+def query_stashdb_scenes_by_studio(stashdb_url, api_key, studio_id, plugin_settings=None):
     """
     Query StashDB for scenes from a studio.
     Returns (scenes, error); raises StashBoxAPIError when the first page fails.
@@ -924,6 +925,18 @@ def find_matches_fast(scene_id, plugin_settings, endpoint=None):
     return response
 
 
+def get_max_results(plugin_settings):
+    """The maxResults setting, clamped to 10-500; anything not a number gives 50."""
+    value = (plugin_settings or {}).get("maxResults")
+    if isinstance(value, bool):
+        return DEFAULT_MAX_RESULTS
+    try:
+        value = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_MAX_RESULTS
+    return max(MIN_MAX_RESULTS, min(MAX_MAX_RESULTS, value))
+
+
 def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=None):
     """
     Phase 2: Thorough performer/studio searches.
@@ -965,6 +978,8 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
     exclude_set = set(exclude_ids or [])
 
     all_scenes = {}
+    raw_ids = set()  # everything the queries returned, before phase-1 ids are dropped
+    capped_totals = []  # stash-box totals of queries that the page cap stopped short
     errors = []
     succeeded = 0
 
@@ -980,7 +995,10 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
         succeeded += 1
         if error:
             errors.append(error)
+        if getattr(scenes, "truncated", False) and getattr(scenes, "total", None):
+            capped_totals.append(scenes.total)
         for s in scenes:
+            raw_ids.add(s["id"])
             if s["id"] not in exclude_set:
                 all_scenes[s["id"]] = s
 
@@ -994,7 +1012,7 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
 
     # Strategy 2: Individual queries (if combined didn't find enough or we don't have both)
     # An auth failure would repeat on every query, so stop there.
-    if len(all_scenes) < MIN_COMBINED_RESULTS_THRESHOLD and not auth_failed():
+    if len(raw_ids) < MIN_COMBINED_RESULTS_THRESHOLD and not auth_failed():
         # Query by performers
         if performer_stash_ids:
             log.LogDebug(f"Querying by {len(performer_stash_ids)} performers")
@@ -1016,7 +1034,14 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
     # Get local scene stash_ids
     local_ids = local_stash_ids(context["endpoint"])
 
-    results = format_results(all_scenes, context, local_ids)
+    results = format_results(all_scenes, context, local_ids)  # sorted best first
+    candidates = len(results)
+    max_results = get_max_results(plugin_settings)
+    results = results[:max_results]
+    cut = len(results) < candidates
+    if capped_totals:
+        # Page cap stopped paging: the server's count is the real number of candidates
+        candidates = max(candidates, max(capped_totals))
 
     log.LogInfo(f"Phase 2: returning {len(results)} additional scenes from performer/studio queries")
 
@@ -1034,6 +1059,9 @@ def find_matches_thorough(scene_id, plugin_settings, exclude_ids=None, endpoint=
         "total_results": len(results),
         "results": results
     }
+    if cut or capped_totals:
+        response["truncated"] = True
+        response["total_candidates"] = candidates
     if errors:
         response["partial"] = True
         response["warnings"] = [f"{stashdb_name}: {e}" for e in errors]
