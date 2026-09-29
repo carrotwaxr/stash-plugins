@@ -24,6 +24,8 @@
   let matchResults = {}; // Cache of tag_id -> matches
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
   let categoryMappings = {}; // Cache of category_name -> local_tag_id
+  let tagBlacklistRaw = ''; // Raw blacklist text as saved (for the editor)
+  let blacklistPanelOpen = false;
   let tagBlacklist = []; // Parsed blacklist patterns [{type: 'literal'|'regex', pattern: string, regex?: RegExp}]
   let activeTab = 'match'; // 'match' or 'browse'
   let browseCategory = null; // Selected category in browse view
@@ -604,30 +606,92 @@
   }
 
   /**
-   * Parse blacklist string into pattern objects
+   * Parse blacklist text into pattern objects. Same rules as blacklist.py
+   * (both run tests/blacklist_cases.json): separators are newline, comma and
+   * semicolon; /body/flags is a regex; a "/" entry with no valid closing "/"
+   * is the legacy form (rest of the line is the body).
    */
   function parseBlacklist(blacklistStr) {
     if (!blacklistStr) return [];
+    const text = String(blacklistStr);
+    const isSep = (c) => c === '\n' || c === ',' || c === ';';
+    const isSpace = (c) => /\s/.test(c);
+    const out = [];
+    const n = text.length;
+    let i = 0;
 
-    return blacklistStr.split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0)
-      .map(pattern => {
-        if (pattern.startsWith('/')) {
-          // Regex pattern - extract pattern without leading /
-          const regexStr = pattern.slice(1);
-          try {
-            return { type: 'regex', pattern: regexStr, regex: new RegExp(regexStr, 'i') };
-          } catch (e) {
-            console.warn(`[tagManager] Invalid regex in blacklist: ${pattern}`, e);
-            return null;
-          }
-        } else {
-          // Literal pattern - case-insensitive
-          return { type: 'literal', pattern: pattern.toLowerCase() };
+    const addRegex = (body, flags, raw) => {
+      if (!body) return;
+      let jsFlags = 'i';
+      for (const f of flags) {
+        if (f === 'm' || f === 's') {
+          if (!jsFlags.includes(f)) jsFlags += f;
+        } else if (f !== 'i') {
+          console.warn(`[tagManager] Unknown regex flag '${f}' in blacklist: ${raw}`);
         }
-      })
-      .filter(p => p !== null);
+      }
+      try {
+        out.push({ type: 'regex', pattern: body, regex: new RegExp(body, jsFlags) });
+      } catch (e) {
+        console.warn(`[tagManager] Invalid regex in blacklist: ${raw}`, e);
+      }
+    };
+
+    while (i < n) {
+      const ch = text[i];
+      if (isSpace(ch) || isSep(ch)) { i++; continue; }
+
+      let eol = text.indexOf('\n', i);
+      if (eol === -1) eol = n;
+
+      if (ch === '/') {
+        let j = i + 1;
+        let close = -1;
+        while (j < eol) {
+          if (text[j] === '\\' && j + 1 < eol) { j += 2; continue; }
+          if (text[j] === '/') { close = j; break; }
+          j++;
+        }
+        if (close !== -1) {
+          let k = close + 1;
+          while (k < n && text[k] >= 'a' && text[k] <= 'z') k++;
+          if (k === n || isSpace(text[k]) || isSep(text[k])) {
+            addRegex(text.slice(i + 1, close), text.slice(close + 1, k), text.slice(i, k));
+            i = k;
+            continue;
+          }
+        }
+        // Legacy form: rest of the line is the body (right-trimmed)
+        const raw = text.slice(i, eol).replace(/\s+$/, '');
+        addRegex(raw.slice(1), '', raw);
+        i = eol;
+        continue;
+      }
+
+      let end = i;
+      while (end < n && !isSep(text[end])) end++;
+      const raw = text.slice(i, end).trim();
+      out.push({ type: 'literal', pattern: raw.toLowerCase() });
+      i = end;
+    }
+    return out;
+  }
+
+  /**
+   * Matches with blacklisted tags dropped; each entry keeps its index into
+   * the original array so callers can address matchResults[tagId][index].
+   */
+  function visibleMatches(matches) {
+    const out = [];
+    (matches || []).forEach((match, index) => {
+      if (!isBlacklisted(match.tag?.name)) out.push({ match, index });
+    });
+    return out;
+  }
+
+  /** First non-blacklisted match and its original index, or null. */
+  function bestVisibleMatch(matches) {
+    return visibleMatches(matches)[0] || null;
   }
 
   /**
@@ -664,12 +728,34 @@
       const data = await graphqlRequest(query);
       const pluginConfig = data?.configuration?.plugins?.[PLUGIN_ID] || {};
 
-      if (pluginConfig.tagBlacklist) {
-        tagBlacklist = parseBlacklist(pluginConfig.tagBlacklist);
-        console.debug("[tagManager] Loaded blacklist:", tagBlacklist.length, "patterns");
-      }
+      tagBlacklistRaw = pluginConfig.tagBlacklist || '';
+      tagBlacklist = parseBlacklist(tagBlacklistRaw);
+      console.debug("[tagManager] Loaded blacklist:", tagBlacklist.length, "patterns");
     } catch (e) {
       console.error("[tagManager] Failed to load blacklist:", e);
+    }
+  }
+
+  /**
+   * Save the blacklist text through the config write queue, verify it
+   * round-tripped, then reload tagBlacklist.
+   */
+  async function saveBlacklist(text) {
+    const written = { tagBlacklist: text };
+    try {
+      await savePluginConfigPatch(written);
+      const readback = await getPluginConfig();
+      if (!valuesPersisted(written, readback)) {
+        throw new Error("blacklist did not round-trip");
+      }
+      await loadBlacklist();
+      return true;
+    } catch (e) {
+      console.error("[tagManager] Failed to save blacklist:", e);
+      if (typeof showToast === "function") {
+        showToast("Failed to save the blacklist — it may not persist.", "error");
+      }
+      return false;
     }
   }
 
@@ -2373,7 +2459,20 @@
               <button class="btn btn-primary" id="tm-search-all-btn" ${isLoading || isCacheLoading ? 'disabled' : ''}>
                 ${isLoading ? 'Searching...' : 'Find Matches for Page'}
               </button>
+              <button class="btn btn-secondary" id="tm-blacklist-toggle">
+                Blacklist${tagBlacklist.length ? ` (${tagBlacklist.length})` : ''} ${blacklistPanelOpen ? '\u25B2' : '\u25BC'}
+              </button>
             </div>
+            ${blacklistPanelOpen ? `
+              <div class="tm-blacklist-editor">
+                <textarea id="tm-blacklist-text" class="form-control" rows="6"
+                  placeholder="One pattern per line. Plain text matches the whole tag name; /regex/i is a regular expression.">${escapeHtml(tagBlacklistRaw)}</textarea>
+                <div class="tm-blacklist-actions">
+                  <button class="btn btn-primary btn-sm" id="tm-blacklist-save">Save</button>
+                  <span class="tm-blacklist-hint">Blacklisted StashDB tags are hidden from matches and search results.</span>
+                </div>
+              </div>
+            ` : ''}
 
             <div class="tag-manager-list" id="tm-tag-list">
               ${pageTags.length === 0
@@ -2405,8 +2504,9 @@
    */
   function renderTagRow(tag) {
     const matches = matchResults[tag.id];
-    const hasMatches = matches && matches.length > 0;
-    const bestMatch = hasMatches ? matches[0] : null;
+    const best = bestVisibleMatch(matches);
+    const hasMatches = !!best;
+    const bestMatch = best ? best.match : null;
 
     let matchContent = '';
     if (isLoading) {
@@ -2426,8 +2526,9 @@
         </div>
       `;
     } else if (matches !== undefined) {
+      const hidden = (matches?.length || 0);
       matchContent = `
-        <span class="tm-no-match">No matches found</span>
+        <span class="tm-no-match">${hidden > 0 ? 'No matches (hidden by blacklist)' : 'No matches found'}</span>
         <button class="btn btn-secondary btn-sm tm-manual-search" data-tag-id="${tag.id}">Search</button>
       `;
     } else {
@@ -2660,6 +2761,26 @@
       }
     });
 
+    // Blacklist editor
+    container.querySelector('#tm-blacklist-toggle')?.addEventListener('click', () => {
+      blacklistPanelOpen = !blacklistPanelOpen;
+      renderPage(container);
+    });
+    container.querySelector('#tm-blacklist-save')?.addEventListener('click', async (e) => {
+      const btn = e.target;
+      const text = container.querySelector('#tm-blacklist-text')?.value || '';
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      const ok = await saveBlacklist(text);
+      if (ok) {
+        renderPage(container);
+        showStatus('Blacklist saved', 'success');
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Save';
+      }
+    });
+
     // Search all on page
     container.querySelector('#tm-search-all-btn')?.addEventListener('click', () => {
       searchAllOnPage(container);
@@ -2677,7 +2798,8 @@
     container.querySelectorAll('.tm-accept').forEach(btn => {
       btn.addEventListener('click', (e) => {
         const tagId = e.target.dataset.tagId;
-        showDiffDialog(tagId, container);
+        const best = bestVisibleMatch(matchResults[tagId]);
+        if (best) showDiffDialog(tagId, container, best.index);
       });
     });
 
@@ -2722,7 +2844,6 @@
       try {
         const result = await callBackend('search', {
           tag_name: tag.name,
-          stashdb_tags: stashdbTags,
         });
         matchResults[tag.id] = result.matches || [];
       } catch (e) {
@@ -2749,7 +2870,6 @@
     try {
       const result = await callBackend('search', {
         tag_name: tag.name,
-        stashdb_tags: stashdbTags,
       });
       matchResults[tagId] = result.matches || [];
       renderPage(container);
@@ -3557,32 +3677,13 @@
    */
   function showMatchesModal(tagId, container) {
     const tag = localTags.find(t => t.id === tagId);
-    let matches = matchResults[tagId];
     if (!tag) return;
 
-    // Filter out blacklisted matches
-    const originalCount = matches?.length || 0;
-    const filteredMatches = matches?.filter(m => !isBlacklisted(m.tag.name)) || [];
-    const hiddenCount = originalCount - filteredMatches.length;
-    matches = filteredMatches;
-
-    const modal = document.createElement('div');
-    modal.className = 'tm-modal-backdrop';
-    modal.innerHTML = `
-      <div class="tm-modal tm-modal-wide">
-        <div class="tm-modal-header">
-          <h3>Matches for: ${escapeHtml(tag.name)}</h3>
-          ${hiddenCount > 0 ? `<div class="tm-blacklist-notice">${hiddenCount} tag${hiddenCount > 1 ? 's' : ''} hidden by blacklist</div>` : ''}
-          <button class="tm-close-btn">&times;</button>
-        </div>
-        <div class="tm-modal-body">
-          <div class="tm-search-row">
-            <input type="text" id="tm-manual-search" class="form-control" placeholder="Search StashDB..." value="${escapeHtml(tag.name)}">
-            <button class="btn btn-primary" id="tm-manual-search-btn">Search</button>
-          </div>
-          <div class="tm-matches-list" id="tm-matches-list">
-            ${matches?.length
-              ? matches.map((m, i) => `
+    // Blacklisted matches are dropped; data-index keeps the ORIGINAL index
+    // into matchResults[tagId] (showDiffDialog reads the unfiltered array).
+    const visible = visibleMatches(matchResults[tagId]);
+    const hiddenCount = (matchResults[tagId]?.length || 0) - visible.length;
+    const renderMatchItems = (list) => list.map(({ match: m, index: i }) => `
                 <div class="tm-match-item" data-index="${i}">
                   <div class="tm-match-info">
                     <span class="tm-match-name">${escapeHtml(m.tag.name)}</span>
@@ -3593,7 +3694,26 @@
                   <div class="tm-match-aliases">Aliases: ${escapeHtml(m.tag.aliases?.join(', ') || 'none')}</div>
                   <button class="btn btn-success btn-sm tm-select-match">Select</button>
                 </div>
-              `).join('')
+              `).join('');
+    const hiddenNotice = (n) => n > 0 ? `${n} tag${n > 1 ? 's' : ''} hidden by blacklist` : '';
+
+    const modal = document.createElement('div');
+    modal.className = 'tm-modal-backdrop';
+    modal.innerHTML = `
+      <div class="tm-modal tm-modal-wide">
+        <div class="tm-modal-header">
+          <h3>Matches for: ${escapeHtml(tag.name)}</h3>
+          <div class="tm-blacklist-notice" id="tm-blacklist-notice" ${hiddenCount > 0 ? '' : 'style="display:none"'}>${hiddenNotice(hiddenCount)}</div>
+          <button class="tm-close-btn">&times;</button>
+        </div>
+        <div class="tm-modal-body">
+          <div class="tm-search-row">
+            <input type="text" id="tm-manual-search" class="form-control" placeholder="Search StashDB..." value="${escapeHtml(tag.name)}">
+            <button class="btn btn-primary" id="tm-manual-search-btn">Search</button>
+          </div>
+          <div class="tm-matches-list" id="tm-matches-list">
+            ${visible.length
+              ? renderMatchItems(visible)
               : '<div class="tm-no-matches">No matches found. Try searching manually above.</div>'
             }
           </div>
@@ -3627,27 +3747,22 @@
       try {
         const result = await callBackend('search', {
           tag_name: term,
-          stashdb_tags: stashdbTags,
         });
         matchResults[tagId] = result.matches || [];
 
         // Re-render matches list
         const listEl = modal.querySelector('#tm-matches-list');
-        const newMatches = matchResults[tagId];
-        listEl.innerHTML = newMatches?.length
-          ? newMatches.map((m, i) => `
-            <div class="tm-match-item" data-index="${i}">
-              <div class="tm-match-info">
-                <span class="tm-match-name">${escapeHtml(m.tag.name)}</span>
-                <span class="tm-match-type-badge tm-match-${m.match_type}">${m.match_type} (${m.score}%)</span>
-                ${m.tag.category ? `<span class="tm-match-category">${escapeHtml(m.tag.category.name)}</span>` : ''}
-              </div>
-              <div class="tm-match-desc">${escapeHtml(m.tag.description || '')}</div>
-              <div class="tm-match-aliases">Aliases: ${escapeHtml(m.tag.aliases?.join(', ') || 'none')}</div>
-              <button class="btn btn-success btn-sm tm-select-match">Select</button>
-            </div>
-          `).join('')
+        const newVisible = visibleMatches(matchResults[tagId]);
+        listEl.innerHTML = newVisible.length
+          ? renderMatchItems(newVisible)
           : '<div class="tm-no-matches">No matches found.</div>';
+
+        const noticeEl = modal.querySelector('#tm-blacklist-notice');
+        if (noticeEl) {
+          const hidden = (matchResults[tagId]?.length || 0) - newVisible.length;
+          noticeEl.textContent = hiddenNotice(hidden);
+          noticeEl.style.display = hidden > 0 ? '' : 'none';
+        }
 
         // Re-attach select handlers
         attachSelectHandlers();
@@ -5139,6 +5254,9 @@
     window.__TAG_MANAGER_TEST__.exports = {
       parseBlacklist,
       isBlacklisted,
+      visibleMatches,
+      bestVisibleMatch,
+      saveBlacklist,
       callBackend,
       formatBackendError,
       loadTagsFromCache,
