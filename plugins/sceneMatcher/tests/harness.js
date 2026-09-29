@@ -6,7 +6,7 @@
  *   const sm = loadSceneMatcher({ pathname: "/scenes", search: "?disp=3" });
  *   await sm.settle();
  *
- * Options: fetchResponses (by GraphQL operation name, or URL suffix; a value may be a
+ * Options: noPluginApi (leave PluginApi undefined), fetchResponses (a handler may return a promise, or { __hang: true } to never answer) (by GraphQL operation name, or URL suffix; a value may be a
  * function(body) returning JSON), base, pathname, search, readyState, bodyHtml.
  *
  * Returns { exports, getState, setState, fetchCalls, mutationObservers, listeners,
@@ -72,7 +72,7 @@ function createElement(tagName) {
 }
 
 function loadSceneMatcher({
-  fetchResponses = {}, base = "/", pathname = "/", search = "", readyState = "complete",
+  fetchResponses = {}, base = "/", pathname = "/", search = "", readyState = "complete", noPluginApi = false,
 } = {}) {
   // ---- fetch stub: answers by GraphQL operation name, or by URL suffix ----
   const fetchCalls = [];
@@ -103,7 +103,22 @@ function loadSceneMatcher({
       handler = key !== undefined ? fetchResponses[key] : undefined;
     }
     if (handler === undefined) return respond({ data: {} });
-    return respond(typeof handler === "function" ? handler(body) : handler);
+    const json = typeof handler === "function" ? handler(body) : handler;
+    // A handler may return a promise (resolved later by the test) or { __hang: true }
+    // (never answers; rejects with AbortError when the request's signal aborts).
+    if (json && typeof json.then === "function") return json.then(respond);
+    if (json && json.__hang) {
+      return new Promise((_, reject) => {
+        const sig = opts.signal;
+        if (!sig) return;
+        sig.addEventListener("abort", () => {
+          const e = new Error("The operation was aborted");
+          e.name = "AbortError";
+          reject(e);
+        });
+      });
+    }
+    return respond(json);
   }
 
   // ---- controllable timers (never real, so node exits promptly) ----
@@ -166,7 +181,7 @@ function loadSceneMatcher({
 
   // ---- PluginApi ----
   const pluginEvents = [];
-  const PluginApi = {
+  const PluginApi = noPluginApi ? undefined : {
     Event: { addEventListener: (type, fn) => { pluginEvents.push({ type, fn }); } },
   };
 
@@ -178,7 +193,7 @@ function loadSceneMatcher({
   };
 
   const context = vm.createContext({
-    window, document, PluginApi, fetch, MutationObserver,
+    window, document, PluginApi, fetch, MutationObserver, AbortController,
     setTimeout: setTimeoutStub,
     clearTimeout: clearTimeoutStub,
     console: consoleStub,

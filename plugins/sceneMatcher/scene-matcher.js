@@ -14,6 +14,9 @@
   let canSearchDeep = false;
   let phase1SearchAttrs = null;
   let currentEndpoint = null; // endpoint the open modal was searched against
+  let requestToken = 0; // bumped by every Match click; late responses from older searches are dropped
+  let searchInfo = null; // notices from the search responses: warnings, partial, truncated, error
+  const REQUEST_TIMEOUT_MS = 120000;
 
   // Cache for local stash_ids (persists across modal opens in the same session)
   let cachedLocalStashIds = null;
@@ -32,19 +35,32 @@
    * Make a GraphQL request using fetch
    */
   async function graphqlRequest(query, variables = {}) {
-    const response = await fetch(getGraphQLUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query, variables }),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let result;
+    try {
+      const response = await fetch(getGraphQLUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query, variables }),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      throw new Error(`GraphQL request failed: ${response.status}`);
+      if (!response.ok) {
+        throw new Error(`GraphQL request failed: ${response.status}`);
+      }
+
+      result = await response.json();
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        throw new Error(`The request timed out after ${REQUEST_TIMEOUT_MS / 1000} seconds`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-
-    const result = await response.json();
 
     if (result.errors && result.errors.length > 0) {
       throw new Error(result.errors[0].message);
@@ -83,8 +99,9 @@
       throw new Error("Invalid response from plugin");
     }
 
-    // Check for error
-    if (output.error) {
+    // Structured stash-box results (they carry `phase`) are returned as-is so the UI can show
+    // the error, its auth hint, warnings and partial results. Anything else with an error throws.
+    if (output.error && !("phase" in output)) {
       throw new Error(output.error);
     }
 
@@ -406,6 +423,45 @@
   }
 
   /**
+   * Notices above the results: warnings, partial failure, truncation, and a phase error.
+   * Every server-provided string is escaped.
+   */
+  function renderNotices(container) {
+    if (!searchInfo) return;
+    const lines = [];
+    for (const w of searchInfo.warnings) lines.push(escapeHtml(String(w)));
+    if (searchInfo.partial) lines.push("Some pages failed to load, so these results may be incomplete.");
+    if (searchInfo.truncated) {
+      lines.push(`Showing the top ${escapeHtml(String(searchInfo.shown))} of ${escapeHtml(String(searchInfo.total))} candidates.`);
+    }
+    if (searchInfo.error) {
+      lines.push(escapeHtml(String(searchInfo.error)));
+      if (searchInfo.authError) lines.push(AUTH_HINT);
+    }
+    if (!lines.length) return;
+    const notice = document.createElement("div");
+    notice.className = "sm-notice" + (searchInfo.error ? " sm-error" : "");
+    notice.style.cssText = "margin: 0 0 12px; padding: 8px 12px; border-radius: 4px; background: rgba(255,193,7,0.12); border: 1px solid rgba(255,193,7,0.4); font-size: 13px;";
+    notice.innerHTML = lines.map((l) => `<div>${l}</div>`).join("");
+    container.appendChild(notice);
+  }
+
+  /**
+   * Fold a search response's notices into searchInfo.
+   */
+  function absorbNotices(result) {
+    if (!searchInfo) searchInfo = { warnings: [], partial: false, truncated: false, shown: 0, total: 0, error: null, authError: false };
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    for (const w of warnings) if (!searchInfo.warnings.includes(w)) searchInfo.warnings.push(w);
+    if (result.partial) searchInfo.partial = true;
+    if (result.truncated) {
+      searchInfo.truncated = true;
+      searchInfo.shown = (result.results || []).length;
+      searchInfo.total = result.total_candidates != null ? result.total_candidates : searchInfo.shown;
+    }
+  }
+
+  /**
    * Render the results grid
    */
   function renderResults() {
@@ -413,6 +469,8 @@
     if (!container) return;
 
     container.innerHTML = "";
+
+    renderNotices(container);
 
     // Show deep search button if available and not already loading
     if (canSearchDeep && !isLoadingDeep) {
@@ -671,6 +729,8 @@
   /**
    * Show loading state
    */
+  const AUTH_HINT = "Check the API key for this stash-box under Settings > Metadata Providers.";
+
   function showLoading() {
     const container = document.getElementById("sm-results");
     if (container) {
@@ -686,15 +746,22 @@
   /**
    * Show error state
    */
-  function showError(message) {
+  function showError(message, { onRetry = null, authError = false } = {}) {
     const container = document.getElementById("sm-results");
-    if (container) {
-      container.innerHTML = `
-        <div class="sm-placeholder sm-error">
-          <div class="sm-error-icon">!</div>
-          <div>${escapeHtml(message)}</div>
-        </div>
-      `;
+    if (!container) return;
+    container.innerHTML = `
+      <div class="sm-placeholder sm-error">
+        <div class="sm-error-icon">!</div>
+        <div>${escapeHtml(message)}</div>
+        ${authError ? `<div style="font-size: 14px; margin-top: 8px;">${AUTH_HINT}</div>` : ""}
+      </div>
+    `;
+    if (onRetry) {
+      const btn = document.createElement("button");
+      btn.className = "sm-btn sm-btn-retry";
+      btn.textContent = "Retry";
+      btn.onclick = onRetry;
+      container.appendChild(btn);
     }
   }
 
@@ -749,6 +816,7 @@
   async function handleDeepSearchClick() {
     if (isLoadingDeep || !currentSceneId) return;
 
+    const token = requestToken;
     isLoadingDeep = true;
     canSearchDeep = false; // Hide the button
     renderResults();
@@ -757,13 +825,24 @@
     try {
       const excludeIds = matchResults.map((r) => r.stash_id);
       const phase2Result = await findMatchesThorough(currentSceneId, excludeIds, currentEndpoint);
+      if (token !== requestToken) return; // a newer search owns the modal
 
+      absorbNotices(phase2Result);
       const phase2Results = phase2Result.results || [];
 
       if (phase2Results.length > 0) {
         // Merge and re-render
         matchResults = mergeResults(matchResults, phase2Results);
         console.log(`[SceneMatcher] Deep search added ${phase2Results.length} results, total: ${matchResults.length}`);
+      }
+
+      if (phase2Result.error) {
+        searchInfo.error = phase2Result.error;
+        searchInfo.authError = !!phase2Result.auth_error;
+        canSearchDeep = true; // the button doubles as retry
+        setStatus("Deep search failed: " + phase2Result.error, "error");
+        updateResultCount(matchResults.length, false);
+        return;
       }
 
       // Update final status
@@ -774,22 +853,27 @@
         setStatus("No matches found", "");
       }
     } catch (error) {
+      if (token !== requestToken) return;
       console.warn("[SceneMatcher] Deep search failed:", error);
       setStatus("Deep search failed: " + (error.message || "Unknown error"), "error");
       // Re-enable the button so user can retry
       canSearchDeep = true;
     } finally {
-      isLoadingDeep = false;
-      renderResults();
+      if (token === requestToken) {
+        isLoadingDeep = false;
+        renderResults();
+      }
     }
   }
 
   /**
-   * Handle the match button click - Phase 1 only, Phase 2 is user-initiated
+   * Handle the match button click - Phase 1 only, Phase 2 is user-initiated.
+   * Each click takes a new request token; responses from older clicks are ignored.
    */
   async function handleMatchClick(sceneId, sceneElement, endpoint) {
-    if (isLoading) return;
+    const token = ++requestToken;
     if (endpoint === undefined) endpoint = await effectiveEndpoint();
+    if (token !== requestToken) return;
     currentEndpoint = endpoint || null;
 
     currentSceneId = sceneId;
@@ -797,16 +881,34 @@
     matchResults = [];
     canSearchDeep = false;
     phase1SearchAttrs = null;
+    isLoadingDeep = false;
+    searchInfo = null;
 
     isLoading = true;
     createModal();
     showLoading();
     setStatus("Searching...", "loading");
+    const retry = () => handleMatchClick(sceneId, sceneElement, endpoint);
 
     try {
       // Phase 1: Fast text searches
       console.log("[SceneMatcher] Starting Phase 1 (fast text search)...");
       const phase1Result = await findMatchesFast(sceneId, currentEndpoint);
+      if (token !== requestToken) return;
+
+      if (phase1Result.error) {
+        const partialResults = phase1Result.results || [];
+        if (partialResults.length === 0) {
+          showError(phase1Result.error, { onRetry: retry, authError: !!phase1Result.auth_error });
+          setStatus(phase1Result.error, "error");
+          return;
+        }
+        absorbNotices(phase1Result);
+        searchInfo.error = phase1Result.error;
+        searchInfo.authError = !!phase1Result.auth_error;
+      } else {
+        absorbNotices(phase1Result);
+      }
 
       matchResults = phase1Result.results || [];
       stashdbUrl = phase1Result.stashdb_url || "https://stashdb.org";
@@ -835,11 +937,12 @@
         setStatus("No matches found", "");
       }
     } catch (error) {
+      if (token !== requestToken) return;
       console.error("[SceneMatcher] Search failed:", error);
-      showError(error.message || "Failed to search for matching scenes");
+      showError(error.message || "Failed to search for matching scenes", { onRetry: retry });
       setStatus(error.message || "Search failed", "error");
     } finally {
-      isLoading = false;
+      if (token === requestToken) isLoading = false;
     }
   }
 
@@ -1104,24 +1207,25 @@
   }
 
   /**
-   * Wait for Tagger elements to appear, then add buttons.
-   * Uses polling to handle React rendering timing.
+   * Wait for Tagger elements to appear, then sync buttons.
+   * Uses polling to handle React rendering timing; a newer call cancels an older poll.
    */
+  let pollToken = 0;
   function waitForTaggerElements(maxAttempts = 20, interval = 250) {
+    const mine = ++pollToken;
     let attempts = 0;
 
     function check() {
+      if (mine !== pollToken || !isTaggerPage()) return;
       attempts++;
       const sceneItems = document.querySelectorAll(".search-item, .tagger-scene");
 
       if (sceneItems.length > 0) {
-        // Found scene items, add buttons
         syncMatchButtons();
         return;
       }
 
       if (attempts < maxAttempts) {
-        // Keep polling
         setTimeout(check, interval);
       }
     }
@@ -1130,44 +1234,33 @@
   }
 
   /**
-   * Wait for page to be ready and add buttons
+   * Called on navigation and at startup: on a Tagger page, wait for its rows and sync.
    */
   function waitForPage() {
-    // Only run on tagger pages
     if (!isTaggerPage()) {
       return;
     }
-
-    // Poll for Tagger elements (handles React rendering delay)
     waitForTaggerElements();
-
-    // Also observe for dynamic content loading (new scenes added, etc.)
-    const observer = new MutationObserver(() => {
-      if (isTaggerPage()) {
-        // Small delay to let React finish rendering
-        setTimeout(syncMatchButtons, 100);
-      }
-    });
-
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
-
-    // Also listen to popstate for SPA navigation
-    window.addEventListener("popstate", () => {
-      setTimeout(() => {
-        if (isTaggerPage()) {
-          waitForTaggerElements();
-        }
-      }, 100);
-    });
   }
 
+  // Debounced sync for DOM mutations (React re-renders in bursts).
+  let syncTimer = null;
+  function scheduleSync() {
+    if (syncTimer !== null) clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      syncTimer = null;
+      if (isTaggerPage()) syncMatchButtons();
+    }, 150);
+  }
+
+  let initialized = false;
+
   /**
-   * Initialize the plugin
+   * Initialize the plugin: one MutationObserver for the page lifetime, no popstate listener.
    */
   function init() {
+    if (initialized) return;
+    initialized = true;
     console.log("[SceneMatcher] Initializing...");
 
     // Wait for DOM to be ready
@@ -1177,16 +1270,26 @@
       waitForPage();
     }
 
-    // Also listen for URL changes (SPA navigation)
+    // SPA navigation: Stash's own location event when available, else the observer below.
+    const hasLocationEvent =
+      typeof PluginApi !== "undefined" && PluginApi && PluginApi.Event &&
+      typeof PluginApi.Event.addEventListener === "function";
+    if (hasLocationEvent) {
+      PluginApi.Event.addEventListener("stash:location", () => {
+        setTimeout(waitForPage, 100);
+      });
+    }
+
     let lastUrl = window.location.href;
-    const urlObserver = new MutationObserver(() => {
-      if (window.location.href !== lastUrl) {
+    const observer = new MutationObserver(() => {
+      if (!hasLocationEvent && window.location.href !== lastUrl) {
         lastUrl = window.location.href;
         setTimeout(waitForPage, 200);
       }
+      // Off the Tagger, mutations are ignored: no timers, no queries.
+      if (isTaggerPage()) scheduleSync();
     });
-
-    urlObserver.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
   // Start the plugin
