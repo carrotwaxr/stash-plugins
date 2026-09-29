@@ -50,6 +50,7 @@ def map_settings(plugin_config):
         "renamer_ignore_files_in_path": plugin_config.get("renamerIgnoreFilesInPath", False),
         "renamer_enable_mark_organized": plugin_config.get("renamerMarkOrganized", True),
         "renamer_multi_file_mode": plugin_config.get("renamerMultiFileMode", "all"),
+        "renamer_move_sidecars": plugin_config.get("renamerMoveSidecars", True),
         # NFO
         "nfo_skip_existing": plugin_config.get("nfoSkipExisting", False),
         "nfo_exclude_fields": [

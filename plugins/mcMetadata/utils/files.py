@@ -195,21 +195,47 @@ def download_image(url, dest_filepath, settings):
     return False
 
 
-def rename_file(filepath, dest_filepath, settings):
-    dir = os.path.dirname(dest_filepath)
+VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".webm", ".flv", ".ts", ".m2ts")
+
+
+def find_sidecars(video_path):
+    """Files in the video's folder named like it: `<stem>.<anything>` or `<stem>-<anything>`.
+
+    Excludes the video itself and other videos.
+    """
+    folder = os.path.dirname(video_path)
+    video_name = os.path.basename(video_path)
+    stem = os.path.splitext(video_name)[0]
     try:
-        if not os.path.exists(dir) and settings["dry_run"] is False:
-            os.makedirs(dir)  # pragma: no cover
-        try:
-            if settings["dry_run"] is False:
-                shutil.move(filepath, dest_filepath)  # pragma: no cover
-                log.debug(f"Renamed {filepath} to {dest_filepath}")  # pragma: no cover
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if name == video_name or not name.startswith(stem) or len(name) == len(stem):
+            continue
+        if name[len(stem)] not in ".-" or name.lower().endswith(VIDEO_EXTENSIONS):
+            continue
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            found.append(path)
+    return found
+
+
+def rename_file(filepath, dest_filepath, settings):
+    """Move a file, never overwriting. Returns the destination, or False."""
+    if os.path.exists(dest_filepath):
+        log.warning(f"Not moving {filepath}: destination already exists at {dest_filepath}")
+        return False
+    try:
+        if settings["dry_run"] is not False:
             return dest_filepath
-        except Exception as err:  # pragma: no cover
-            log.error(f"Error renaming file {filepath} to {dest_filepath}: {str(err)}")
-            return False
-    except Exception as d_err:
-        log.error(f"Error creating directory {dir}: {str(d_err)}")
+        os.makedirs(os.path.dirname(dest_filepath), exist_ok=True)
+        shutil.move(filepath, dest_filepath)
+        log.debug(f"Renamed {filepath} to {dest_filepath}")
+        return dest_filepath
+    except Exception as err:
+        log.error(f"Error renaming file {filepath} to {dest_filepath}: {str(err)}")
         return False
 
 

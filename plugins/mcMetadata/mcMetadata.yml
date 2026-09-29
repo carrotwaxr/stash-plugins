@@ -73,6 +73,10 @@ settings:
     displayName: Multi-File Mode
     description: "How to handle scenes with multiple files: all (process all), primary_only (first file only), skip (skip multi-file scenes). Default is 'all'."
     type: STRING
+  renamerMoveSidecars:
+    displayName: Move Sidecar Files
+    description: Moves subtitles, funscripts, NFOs, posters and other files named like the video along with it; never overwrites. When OFF, only the NFO and poster move. Default is ON.
+    type: BOOLEAN
   nfoSkipExisting:
     displayName: Skip Existing NFO Files
     description: Don't overwrite NFO files that already exist. Default is OFF.

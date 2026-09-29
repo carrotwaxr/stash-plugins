@@ -2,7 +2,7 @@ import os
 from collections import Counter
 import utils.logger as log
 from performer import process_performer
-from utils.files import download_image, rename_file, replace_file_ext
+from utils.files import download_image, find_sidecars, rename_file, replace_file_ext
 from utils.nfo import build_nfo_xml
 from utils.paths import is_inside
 from utils.replacer import get_new_path
@@ -314,9 +314,12 @@ def __rename_videos(scene, stash, settings):
         if settings["dry_run"]:
             log.info(f"[DRY RUN] Would move file {idx + 1}: {video_path}")
             log.info(f"[DRY RUN]                    To: {expected_path}")
+            __relocate_sidecars(video_path, expected_path, __collect_sidecars(video_path, settings), settings)
             if idx == 0:
                 primary_path = video_path
             continue
+
+        sidecars = __collect_sidecars(video_path, settings)
 
         # Use GraphQL moveFiles mutation
         dest_folder = os.path.dirname(expected_path)
@@ -334,6 +337,9 @@ def __rename_videos(scene, stash, settings):
             files_moved = True
             if idx == 0:
                 primary_path = expected_path
+            # Runs before the organized update: that update fires the Scene.Update.Post
+            # hook, which must find the NFO and poster already at their new paths.
+            __relocate_sidecars(video_path, expected_path, sidecars, settings)
 
         except Exception as err:
             log.error(f"Error moving file {idx + 1} for Scene {scene['id']}: {err}")
@@ -341,31 +347,36 @@ def __rename_videos(scene, stash, settings):
                 primary_path = video_path
             continue
 
-    # Relocate metadata files for primary video. This runs before marking the scene
-    # organized: that update fires the Scene.Update.Post hook, which must find the
-    # NFO and poster already at their new paths.
-    if primary_path and primary_path != original_primary_path:
-        potential_nfo_path = replace_file_ext(original_primary_path, "nfo")
-        if os.path.exists(potential_nfo_path):
-            log.debug(f"Relocating existing NFO file: {potential_nfo_path}")
-            rename_file(
-                potential_nfo_path, replace_file_ext(primary_path, "nfo"), settings
-            )
-
-        potential_poster_path = replace_file_ext(original_primary_path, "jpg", "-poster")
-        if os.path.exists(potential_poster_path):
-            log.debug(f"Relocating existing Poster image: {potential_poster_path}")
-            rename_file(
-                potential_poster_path,
-                replace_file_ext(primary_path, "jpg", "-poster"),
-                settings,
-            )
-
     # Mark as organized if enabled and files were actually moved
     if files_moved and settings.get("renamer_enable_mark_organized", False) and not settings["dry_run"]:
         __mark_organized(scene["id"], stash, settings)
 
     return primary_path or files[0]["path"]
+
+
+def __collect_sidecars(video_path, settings):
+    """Files to move with a video: all sidecars, or just its NFO and poster when the setting is off."""
+    sidecars = find_sidecars(video_path)
+    if settings.get("renamer_move_sidecars", True):
+        return sidecars
+    stem = os.path.splitext(os.path.basename(video_path))[0]
+    keep = (stem + ".nfo", stem + "-poster.jpg")
+    return [p for p in sidecars if os.path.basename(p) in keep]
+
+
+def __relocate_sidecars(video_path, new_video_path, sidecars, settings):
+    """Move each sidecar next to the moved video, keeping the part of its name after the stem."""
+    old_stem = os.path.splitext(os.path.basename(video_path))[0]
+    new_stem = os.path.splitext(os.path.basename(new_video_path))[0]
+    new_folder = os.path.dirname(new_video_path)
+    for sidecar in sidecars:
+        rest = os.path.basename(sidecar)[len(old_stem):]
+        dest = os.path.join(new_folder, new_stem + rest)
+        if settings["dry_run"]:
+            log.info(f"[DRY RUN] Would move sidecar: {sidecar} -> {dest}")
+            continue
+        log.debug(f"Relocating sidecar: {sidecar}")
+        rename_file(sidecar, dest, settings)
 
 
 def __mark_organized(scene_id, stash, settings):
