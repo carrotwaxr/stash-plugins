@@ -164,7 +164,7 @@ const test = (name, fn) => tests.push([name, fn]);
 const EXPORTS = [
   "graphqlRequest", "runPluginOperation", "findMatchesFast", "findMatchesThorough", "formatDate",
   "renderResults", "createSceneCard", "handleSelectMatch", "mergeResults", "handleDeepSearchClick",
-  "handleMatchClick", "getSceneIdFromElement", "sceneHasStashId", "createMatchButton", "addMatchButtons",
+  "handleMatchClick", "getSceneIdFromElement", "createMatchButton", "addMatchButtons", "syncMatchButtons", "effectiveEndpoint", "gateScenes",
   "isTaggerPage", "waitForPage", "init",
 ];
 

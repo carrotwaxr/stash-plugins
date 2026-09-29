@@ -13,6 +13,7 @@
   let stashdbUrl = "";
   let canSearchDeep = false;
   let phase1SearchAttrs = null;
+  let currentEndpoint = null; // endpoint the open modal was searched against
 
   // Cache for local stash_ids (persists across modal opens in the same session)
   let cachedLocalStashIds = null;
@@ -93,11 +94,12 @@
   /**
    * Find matching scenes - Phase 1 (fast text searches)
    */
-  async function findMatchesFast(sceneId) {
+  async function findMatchesFast(sceneId, endpoint) {
     const args = {
       operation: "find_matches_fast",
       scene_id: sceneId,
     };
+    if (endpoint) args.endpoint = endpoint;
 
     // Pass cached stash_ids if we have them for this endpoint
     if (cachedLocalStashIds && cacheEndpoint) {
@@ -121,12 +123,13 @@
   /**
    * Find matching scenes - Phase 2 (thorough performer/studio searches)
    */
-  async function findMatchesThorough(sceneId, excludeIds) {
+  async function findMatchesThorough(sceneId, excludeIds, endpoint) {
     const args = {
       operation: "find_matches_thorough",
       scene_id: sceneId,
       exclude_ids: excludeIds || [],
     };
+    if (endpoint) args.endpoint = endpoint;
 
     // Pass cached stash_ids if we have them for this endpoint
     if (cachedLocalStashIds && cacheEndpoint) {
@@ -753,7 +756,7 @@
 
     try {
       const excludeIds = matchResults.map((r) => r.stash_id);
-      const phase2Result = await findMatchesThorough(currentSceneId, excludeIds);
+      const phase2Result = await findMatchesThorough(currentSceneId, excludeIds, currentEndpoint);
 
       const phase2Results = phase2Result.results || [];
 
@@ -784,8 +787,10 @@
   /**
    * Handle the match button click - Phase 1 only, Phase 2 is user-initiated
    */
-  async function handleMatchClick(sceneId, sceneElement) {
+  async function handleMatchClick(sceneId, sceneElement, endpoint) {
     if (isLoading) return;
+    if (endpoint === undefined) endpoint = await effectiveEndpoint();
+    currentEndpoint = endpoint || null;
 
     currentSceneId = sceneId;
     currentSceneElement = sceneElement;
@@ -801,7 +806,7 @@
     try {
       // Phase 1: Fast text searches
       console.log("[SceneMatcher] Starting Phase 1 (fast text search)...");
-      const phase1Result = await findMatchesFast(sceneId);
+      const phase1Result = await findMatchesFast(sceneId, currentEndpoint);
 
       matchResults = phase1Result.results || [];
       stashdbUrl = phase1Result.stashdb_url || "https://stashdb.org";
@@ -839,108 +844,228 @@
   }
 
   /**
-   * Extract scene ID from a tagger scene element
+   * Extract scene ID from a tagger row: only from its scene link.
    */
   function getSceneIdFromElement(element) {
-    // Look for scene link in the element
     const sceneLink = element.querySelector('a[href*="/scenes/"]');
-    if (sceneLink) {
-      const match = sceneLink.href.match(/\/scenes\/(\d+)/);
-      if (match) {
-        return match[1];
-      }
-    }
+    if (!sceneLink) return null;
+    const href = sceneLink.getAttribute("href") || sceneLink.href || "";
+    const match = href.match(/\/scenes\/(\d+)/);
+    return match ? match[1] : null;
+  }
 
-    // Also check for data attributes
-    if (element.dataset.sceneId) {
-      return element.dataset.sceneId;
-    }
+  const normalizeEndpoint = (url) => (url || "").trim().replace(/\/+$/, "").toLowerCase();
 
-    return null;
+  // Stash configuration (stash-boxes, saved Tagger choice, plugin setting): fetched once.
+  let configPromise = null;
+  function getConfig() {
+    if (!configPromise) {
+      const query = `query SceneMatcherConfig {
+        configuration { general { stashBoxes { endpoint name } } ui plugins }
+      }`;
+      configPromise = graphqlRequest(query)
+        .then((data) => {
+          const cfg = (data && data.configuration) || {};
+          const ui = cfg.ui || {};
+          const plugins = cfg.plugins || {};
+          return {
+            boxes: (cfg.general && cfg.general.stashBoxes) || [],
+            uiEndpoint: (ui.taggerConfig && ui.taggerConfig.selectedEndpoint) || null,
+            settingEndpoint: (plugins[PLUGIN_ID] && plugins[PLUGIN_ID].stashBoxEndpoint) || null,
+          };
+        })
+        .catch((e) => {
+          console.warn("[SceneMatcher] Could not load Stash configuration:", e);
+          configPromise = null; // retry next time
+          return { boxes: [], uiEndpoint: null, settingEndpoint: null };
+        });
+    }
+    return configPromise;
+  }
+
+  function getScraperSelect() {
+    return document.querySelector("select#scraper");
   }
 
   /**
-   * Check if a scene already has a StashDB ID
+   * The stash-box endpoint the Tagger targets right now, or null if none is known
+   * (the backend then uses the first box). React sets the select's value without firing
+   * `change`, so it is read fresh on every call. Returns { scraper: true } semantics via
+   * isScraperSource() for non-stash-box sources.
    */
-  function sceneHasStashId(element) {
-    // Look for StashID pill/badge in the element
-    const stashIdPill = element.querySelector('[class*="StashIDPill"], [class*="stash-id"]');
-    if (stashIdPill) {
-      return true;
-    }
+  function isScraperSource() {
+    const select = getScraperSelect();
+    return !!(select && String(select.value || "").startsWith("scraper:"));
+  }
 
-    // Also check for sub-content with stash_id links
-    const subContent = element.querySelector(".sub-content");
-    if (subContent && subContent.querySelector("a[href*='stashdb.org/scenes']")) {
-      return true;
+  async function effectiveEndpoint() {
+    const select = getScraperSelect();
+    if (select) {
+      const value = String(select.value || "");
+      if (value.startsWith("stashbox:")) return value.slice("stashbox:".length) || null;
+      if (value.startsWith("scraper:")) return null;
     }
+    const cfg = await getConfig();
+    return cfg.uiEndpoint || cfg.settingEndpoint || null;
+  }
 
-    return false;
+  async function resolveEndpoint(endpoint) {
+    if (endpoint) return endpoint;
+    const cfg = await getConfig();
+    return cfg.boxes.length ? cfg.boxes[0].endpoint : null;
+  }
+
+  async function boxNameFor(endpoint) {
+    const cfg = await getConfig();
+    const norm = normalizeEndpoint(endpoint);
+    const box = cfg.boxes.find((b) => normalizeEndpoint(b.endpoint) === norm);
+    return box && box.name ? box.name : null;
+  }
+
+  // Gate cache: `${normalized endpoint}|${scene id}` -> { sig, unlinked }
+  const gateCache = new Map();
+
+  /**
+   * Of the given scene ids, return those with no stash_id for `endpoint` (null = first
+   * configured box). One batched findScenes query for ids not already cached; a cached
+   * result is reused while the row's pill signature (sigs[id]) is unchanged.
+   */
+  async function gateScenes(ids, endpoint, sigs = {}) {
+    const resolved = await resolveEndpoint(endpoint);
+    const norm = normalizeEndpoint(resolved);
+    const key = (id) => `${norm}|${id}`;
+    const sigOf = (id) => sigs[id] || "";
+
+    const missing = ids.filter((id) => {
+      const hit = gateCache.get(key(id));
+      return !hit || hit.sig !== sigOf(id);
+    });
+
+    if (missing.length) {
+      const query = `query SceneMatcherGate($ids: [ID!]) {
+        findScenes(ids: $ids, filter: {per_page: -1}) { scenes { id stash_ids { endpoint } } }
+      }`;
+      const data = await graphqlRequest(query, { ids: missing });
+      const scenes = (data && data.findScenes && data.findScenes.scenes) || [];
+      const byId = new Map(scenes.map((sc) => [String(sc.id), sc]));
+      for (const id of missing) {
+        const sc = byId.get(String(id));
+        const linked = !!sc && (sc.stash_ids || []).some((x) => normalizeEndpoint(x.endpoint) === norm);
+        gateCache.set(key(id), { sig: sigOf(id), unlinked: !linked });
+      }
+    }
+    return ids.filter((id) => gateCache.get(key(id)).unlinked);
   }
 
   /**
    * Create the match button
    */
-  function createMatchButton(sceneId, sceneElement) {
+  function createMatchButton(sceneId, sceneElement, endpoint, boxName) {
+    const label = boxName ? `Match on ${boxName}` : "Match";
     const btn = document.createElement("button");
     btn.className = "sm-match-button btn btn-secondary";
     btn.type = "button";
-    btn.title = "Find matches by performer/studio on StashDB";
+    btn.dataset.endpoint = normalizeEndpoint(endpoint);
+    btn.title = `Find matches by performer/studio${boxName ? ` on ${boxName}` : ""}`;
     btn.innerHTML = `
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 1em; height: 1em; margin-right: 0.5em;">
         <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
       </svg>
-      Match
+      ${label.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)}
     `;
     btn.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      handleMatchClick(sceneId, sceneElement);
+      // Re-read the selection at click time; fall back to what the button was built for.
+      effectiveEndpoint().then((ep) => handleMatchClick(sceneId, sceneElement, ep || endpoint || null));
     };
     return btn;
   }
 
+  /** Signature of the row's own stash-id pills (which endpoints it is linked to). */
+  function rowSignature(row) {
+    return Array.from(row.querySelectorAll(".stash-id-pill"))
+      .map((p) => p.getAttribute("data-endpoint") || "")
+      .join("|");
+  }
+
+  let syncRunning = false;
+  let syncAgain = false;
+
   /**
-   * Add match buttons to scene tagger items
+   * Make the Match buttons reflect the Tagger's selected endpoint: a button on each row whose
+   * scene is not linked to it, none on linked rows, none at all for a scraper source.
+   * Idempotent and safe to call often; overlapping calls coalesce into one re-run.
    */
-  function addMatchButtons() {
-    // Find all scene items in the tagger
-    const sceneItems = document.querySelectorAll(".search-item, .tagger-scene");
-
-    for (const item of sceneItems) {
-      // Skip if button already added
-      if (item.querySelector(".sm-match-button")) {
-        continue;
-      }
-
-      // Skip if scene already has a StashDB ID
-      if (sceneHasStashId(item)) {
-        continue;
-      }
-
-      // Get scene ID
-      const sceneId = getSceneIdFromElement(item);
-      if (!sceneId) {
-        continue;
-      }
-
-      // Find the query form / input group area
-      const inputGroup = item.querySelector(".input-group, .input-group-append");
-      if (!inputGroup) {
-        continue;
-      }
-
-      // Add our button after the existing buttons
-      const appendContainer = inputGroup.querySelector(".input-group-append");
-      if (appendContainer) {
-        const btn = createMatchButton(sceneId, item);
-        appendContainer.appendChild(btn);
-      } else {
-        // Create append container if it doesn't exist
-        const btn = createMatchButton(sceneId, item);
-        inputGroup.appendChild(btn);
-      }
+  async function syncMatchButtons() {
+    if (syncRunning) { syncAgain = true; return; }
+    syncRunning = true;
+    try {
+      do {
+        syncAgain = false;
+        await syncOnce();
+      } while (syncAgain);
+    } catch (e) {
+      console.warn("[SceneMatcher] Could not update Match buttons:", e);
+    } finally {
+      syncRunning = false;
     }
+  }
+
+  async function syncOnce() {
+    const select = getScraperSelect();
+    if (select && !select.__smBound) {
+      select.__smBound = true;
+      select.addEventListener("change", () => { syncMatchButtons(); });
+    }
+
+    const rows = Array.from(document.querySelectorAll(".search-item, .tagger-scene"));
+    if (isScraperSource()) {
+      for (const row of rows) {
+        const btn = row.querySelector(".sm-match-button");
+        if (btn) btn.remove();
+      }
+      return;
+    }
+
+    const endpoint = await effectiveEndpoint();
+    const resolved = await resolveEndpoint(endpoint);
+    const boxName = resolved ? await boxNameFor(resolved) : null;
+
+    const entries = [];
+    for (const row of rows) {
+      const id = getSceneIdFromElement(row);
+      if (id) entries.push({ row, id, sig: rowSignature(row) });
+    }
+    const sigs = {};
+    entries.forEach((e) => { sigs[e.id] = e.sig; });
+    const ids = [...new Set(entries.map((e) => e.id))];
+    const unlinked = new Set(ids.length ? await gateScenes(ids, resolved, sigs) : []);
+
+    // The selection may have changed while we waited; a re-run is already queued if so.
+    if (isScraperSource()) { syncAgain = true; return; }
+
+    for (const { row, id } of entries) {
+      const existing = row.querySelector(".sm-match-button");
+      if (!unlinked.has(id)) {
+        if (existing) existing.remove();
+        continue;
+      }
+      if (existing) {
+        if (existing.dataset.endpoint === normalizeEndpoint(resolved)) continue;
+        existing.remove();
+      }
+      const inputGroup = row.querySelector(".input-group, .input-group-append");
+      if (!inputGroup) continue;
+      const btn = createMatchButton(id, row, endpoint || resolved, boxName);
+      const appendContainer = inputGroup.querySelector(".input-group-append");
+      (appendContainer || inputGroup).appendChild(btn);
+    }
+  }
+
+  // Kept for callers that predate syncMatchButtons.
+  function addMatchButtons() {
+    return syncMatchButtons();
   }
 
   /**
@@ -991,7 +1116,7 @@
 
       if (sceneItems.length > 0) {
         // Found scene items, add buttons
-        addMatchButtons();
+        syncMatchButtons();
         return;
       }
 
@@ -1020,7 +1145,7 @@
     const observer = new MutationObserver(() => {
       if (isTaggerPage()) {
         // Small delay to let React finish rendering
-        setTimeout(addMatchButtons, 100);
+        setTimeout(syncMatchButtons, 100);
       }
     });
 
@@ -1073,7 +1198,8 @@
       graphqlRequest, runPluginOperation, findMatchesFast, findMatchesThorough,
       formatDuration, formatDate, escapeHtml, renderResults, createSceneCard,
       handleSelectMatch, mergeResults, handleDeepSearchClick, handleMatchClick,
-      getSceneIdFromElement, sceneHasStashId, createMatchButton, addMatchButtons,
+      getSceneIdFromElement, createMatchButton, addMatchButtons, syncMatchButtons,
+      effectiveEndpoint, gateScenes,
       isTaggerPage, waitForPage, waitForTaggerElements, init,
       createModal, removeModal, updateStats, setStatus, showLoading, showError,
     };
