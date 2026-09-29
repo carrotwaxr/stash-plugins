@@ -14,6 +14,9 @@
  * confirm(): the plugin's global confirm() records each message in `confirmCalls`
  * and answers with `window.confirm(msg)` (default: always true). Pass
  * `loadTagManager({ confirm: () => false })` or set `tm.window.confirm` mid-test.
+ *
+ * DOM: createElement() stubs find nothing (querySelector -> null). To run a real
+ * dialog handler, swap in createQueryableElement() (see below) for that test.
  */
 const fs = require("fs");
 const path = require("path");
@@ -57,6 +60,32 @@ function createElement(tagName) {
       if (on) classes.add(c); else classes.delete(c);
       return on;
     },
+  };
+  return el;
+}
+
+/**
+ * An element stub on which every querySelector(sel) finds something: `query(sel)`
+ * when it returns a value other than undefined, else one memoized queryable child
+ * per selector (in `el.found`). querySelectorAll(sel) returns `queryAll(sel, el)`
+ * when given and not undefined, else []. `remove()` sets `el.removed`. Lets a
+ * test drive real dialog handlers, e.g.
+ *   tm.document.createElement = (t) => createQueryableElement(t, { query, queryAll });
+ */
+function createQueryableElement(tagName, { query, queryAll } = {}) {
+  const el = createElement(tagName);
+  el.found = new Map();
+  el.removed = false;
+  el.remove = () => { el.removed = true; };
+  el.querySelector = (sel) => {
+    const custom = query ? query(sel) : undefined;
+    if (custom !== undefined) return custom;
+    if (!el.found.has(sel)) el.found.set(sel, createQueryableElement("div", { query, queryAll }));
+    return el.found.get(sel);
+  };
+  el.querySelectorAll = (sel) => {
+    const custom = queryAll ? queryAll(sel, el) : undefined;
+    return custom !== undefined ? custom : [];
   };
   return el;
 }
@@ -198,4 +227,4 @@ function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true 
   };
 }
 
-module.exports = { loadTagManager, createElement };
+module.exports = { loadTagManager, createElement, createQueryableElement };

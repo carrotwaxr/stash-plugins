@@ -1728,10 +1728,47 @@
 
   /**
    * Handle importing selected StashDB tags, with optional category parent assignment.
+   * F11: isImporting and the import button are reset in `finally` on every exit
+   * path (done, cancelled or thrown); a throw is shown to the user.
    */
   async function handleImportSelected(container) {
     if (selectedForImport.size === 0) return;
     if (isImporting) return;
+    isImporting = true;
+
+    const statusEl = container.querySelector('.tm-selection-info');
+    const btnEl = container.querySelector('#tm-import-selected');
+    let message;
+    let failed = false;
+    try {
+      message = await importSelectedTags(statusEl, btnEl);
+    } catch (e) {
+      console.error('[tagManager] Import failed:', e);
+      message = `Import failed: ${e.message || e}`;
+      failed = true;
+    } finally {
+      isImporting = false;
+      if (btnEl) btnEl.disabled = selectedForImport.size === 0;
+    }
+    if (message === null) return; // cancelled in the category preview
+
+    if (statusEl) statusEl.textContent = message;
+    if (failed) showToast(message, 'error');
+
+    setTimeout(() => {
+      renderPage(container);
+      refreshLocalTags(); // #124: reconcile with server truth after import
+    }, 1500);
+  }
+
+  /**
+   * The import itself; handleImportSelected owns the isImporting flag.
+   * @returns {Promise<?string>} the summary line, or null if the user cancelled
+   */
+  async function importSelectedTags(statusEl, btnEl) {
+    const endpoint = selectedStashBox?.endpoint;
+    if (!endpoint) throw new Error('no stash-box endpoint is selected');
+    if (!stashdbTags) throw new Error('the stash-box tags are not loaded; reload them and try again');
 
     let parentMap = null;
     let remember = false;
@@ -1745,7 +1782,7 @@
 
       if (hasCategories) {
         const result = await showCategoryPreviewModal(categoryResolutions);
-        if (result === 'cancel') return;
+        if (result === 'cancel') return null;
         if (result !== null) {
           parentMap = result.parentMap;
           remember = result.remember;
@@ -1753,11 +1790,6 @@
         }
       }
     }
-
-    isImporting = true;
-
-    const statusEl = container.querySelector('.tm-selection-info');
-    const btnEl = container.querySelector('#tm-import-selected');
 
     if (statusEl) statusEl.textContent = 'Importing...';
     if (btnEl) btnEl.disabled = true;
@@ -1822,13 +1854,13 @@
         if (existingTag) {
           const existingStashIds = existingTag.stash_ids || [];
           const filteredStashIds = existingStashIds.filter(
-            sid => sid.endpoint !== selectedStashBox.endpoint
+            sid => sid.endpoint !== endpoint
           );
 
           await updateTag({
             id: existingTag.id,
             stash_ids: [...filteredStashIds, {
-              endpoint: selectedStashBox.endpoint,
+              endpoint: endpoint,
               stash_id: stashdbId
             }]
           });
@@ -1836,7 +1868,7 @@
           const idx = localTags.findIndex(t => t.id === existingTag.id);
           if (idx >= 0) {
             localTags[idx].stash_ids = [...filteredStashIds, {
-              endpoint: selectedStashBox.endpoint,
+              endpoint: endpoint,
               stash_id: stashdbId
             }];
           }
@@ -1872,7 +1904,7 @@
             description: stashdbTag.description || '',
             aliases: stashdbTag.aliases || [],
             stash_ids: [{
-              endpoint: selectedStashBox.endpoint,
+              endpoint: endpoint,
               stash_id: stashdbId
             }]
           };
@@ -1936,14 +1968,14 @@
     let conflictsResolved = 0;
     let skipped = 0;
     if (importConflicts.length > 0) {
-      const outcome = await renderConflictResolutionModal(importConflicts);
+      const outcome = await renderConflictResolutionModal(importConflicts, endpoint);
       created += outcome.created;
       linked += outcome.linked;
       conflictsResolved = outcome.resolved;
       skipped = outcome.skipped;
     }
 
-    const message = summarizeImportResult({
+    return summarizeImportResult({
       created,
       linked,
       parented,
@@ -1952,30 +1984,367 @@
       skipped,
       errors,
     });
+  }
 
-    if (statusEl) statusEl.textContent = message;
+  /**
+   * F6: the conflict modal's model, without the DOM. One row per deferred import:
+   * { i, stashdbTag, parentId, conflicts, done, result, error }. `outcome` holds
+   * the counts that fold into the import summary. `busy` lets one row action run
+   * at a time (two merge-intos on one tag would overwrite each other's aliases).
+   * @param {Array<{stashdbTag: object, parentId: ?string, conflicts: Array}>} importConflicts
+   * @param {string} endpoint - the stash-box endpoint the import links to
+   */
+  function createConflictSession(importConflicts, endpoint) {
+    const rows = new Map();
+    importConflicts.forEach((entry, i) => rows.set(i, {
+      i,
+      stashdbTag: entry.stashdbTag,
+      parentId: entry.parentId || null,
+      conflicts: entry.conflicts || [],
+      done: false,
+      result: '',
+      error: '',
+    }));
+    const session = { endpoint, rows, outcome: { created: 0, linked: 0, skipped: 0, resolved: 0 }, busy: false };
+    recheckConflictRows(session);
+    return session;
+  }
 
-    setTimeout(() => {
-      isImporting = false;
-      renderPage(container);
-      refreshLocalTags(); // #124: reconcile with server truth after import
-    }, 1500);
+  /**
+   * F6: recompute every pending row's conflicts from the current localTags, so no
+   * row shows or acts on a clash that another row's action has changed. A row
+   * whose conflicts are all gone is offered a plain Import.
+   */
+  function recheckConflictRows(session) {
+    for (const row of session.rows.values()) {
+      if (!row.done) row.conflicts = detectImportConflicts(row.stashdbTag);
+    }
+  }
+
+  function pendingConflictRows(session) {
+    return [...session.rows.values()].filter(r => !r.done);
+  }
+
+  /** Distinct local tags among a row's conflicts, in first-seen order. */
+  function distinctConflictTags(conflicts) {
+    const seen = new Map();
+    for (const c of conflicts) {
+      if (!seen.has(c.conflictingTag.id)) seen.set(c.conflictingTag.id, c.conflictingTag);
+    }
+    return [...seen.values()];
+  }
+
+  /** The incoming name itself is taken, so no new tag can be created with it. */
+  function rowHasNameConflict(row) {
+    const nameLower = row.stashdbTag.name.toLowerCase();
+    return row.conflicts.some(c => c.conflictingValue.toLowerCase() === nameLower);
+  }
+
+  function quoteList(values) {
+    return values.map(v => `"${v}"`).join(', ');
+  }
+
+  /** 'aliases "Bar", "Baz" (already used by "Barbara", "Bazza")' */
+  function droppedAliasesText(conflicts, removed) {
+    const lower = new Set(removed.map(a => a.toLowerCase()));
+    const owners = [...new Set(conflicts
+      .filter(c => lower.has(c.conflictingValue.toLowerCase()))
+      .map(c => c.conflictingTag.name))];
+    return `${removed.length === 1 ? 'alias' : 'aliases'} ${quoteList(removed)} (already used by ${quoteList(owners)})`;
+  }
+
+  /**
+   * A localTags entry for a tag just created: what the server returned (createTag
+   * selects the full tag), falling back to what was sent.
+   */
+  function localTagFromCreated(created, input = {}) {
+    return {
+      id: created.id,
+      name: created.name ?? input.name,
+      description: created.description ?? input.description ?? '',
+      aliases: created.aliases ?? input.aliases ?? [],
+      stash_ids: created.stash_ids ?? input.stash_ids ?? [],
+      parents: created.parents ?? (input.parent_ids || []).map(id => ({ id })),
+    };
+  }
+
+  function conflictCreateInput(session, row, aliases) {
+    const input = {
+      name: row.stashdbTag.name,
+      description: row.stashdbTag.description || '',
+      aliases,
+      stash_ids: [{ endpoint: session.endpoint, stash_id: row.stashdbTag.id }],
+    };
+    if (row.parentId) input.parent_ids = [row.parentId];
+    return input;
+  }
+
+  function conflictStaleTarget(row) {
+    return { ok: false, message: `"${row.stashdbTag.name}" no longer clashes with that tag; choose again.` };
+  }
+
+  function conflictNameTaken(row) {
+    return {
+      ok: false,
+      message: `The name "${row.stashdbTag.name}" is already taken, so it can't be a new tag. Merge it into the existing tag or skip it.`,
+    };
+  }
+
+  /** "Merge into existing": link the incoming stash-box tag to a clashing local tag. */
+  async function conflictMergeInto(session, row, tagId) {
+    const existing = localTags.find(t => t.id === tagId);
+    if (!existing || !row.conflicts.some(c => c.conflictingTag.id === tagId)) return conflictStaleTarget(row);
+    const { endpoint } = session;
+    const stashdbId = row.stashdbTag.id;
+    const current = (existing.stash_ids || []).find(s => s.endpoint === endpoint);
+    if (current && current.stash_id !== stashdbId) {
+      const box = getEndpointDisplayName(stashBoxes.find(sb => sb.endpoint === endpoint) || { endpoint });
+      if (!confirm(
+        `"${existing.name}" is already linked to ${box} ID ${current.stash_id}.\n\n` +
+        `Replace that link with ${stashdbId} ("${row.stashdbTag.name}")?`
+      )) {
+        return { ok: false, cancelled: true, message: '' };
+      }
+    }
+    const input = buildMergeIntoExistingInput(existing, row.stashdbTag, row.conflicts, endpoint, stashdbId, row.parentId);
+    const added = input.aliases.slice((existing.aliases || []).length);
+    let updated;
+    try {
+      updated = await updateTag(input);
+    } catch (e) {
+      console.error('[tagManager] merge-into-existing failed:', e);
+      return { ok: false, message: `Merge into "${existing.name}" failed: ${e.message || e}` };
+    }
+    const idx = localTags.findIndex(t => t.id === tagId);
+    if (idx >= 0) {
+      localTags[idx].aliases = input.aliases;
+      localTags[idx].stash_ids = (updated && updated.stash_ids) || input.stash_ids;
+      if (input.parent_ids) localTags[idx].parents = input.parent_ids.map(id => ({ id }));
+    }
+    session.outcome.linked++; session.outcome.resolved++;
+    const addedText = added.length ? ` (added ${added.length === 1 ? 'alias' : 'aliases'} ${quoteList(added)})` : '';
+    return { ok: true, localTagsChanged: true, message: `Merged into "${existing.name}"${addedText}` };
+  }
+
+  /**
+   * "Strip alias & import" (strip) or, once a row has no conflicts left, a plain
+   * Import (all original aliases).
+   */
+  async function conflictImport(session, row, { strip }) {
+    if (strip && rowHasNameConflict(row)) return conflictNameTaken(row);
+    if (!strip && row.conflicts.length) {
+      return { ok: false, message: `"${row.stashdbTag.name}" clashes with a local tag again; choose again.` };
+    }
+    const { aliases, removed } = sanitizeAliasesForImport(row.stashdbTag, row.conflicts);
+    const input = conflictCreateInput(session, row, aliases);
+    let created;
+    try {
+      created = await createTag(input);
+    } catch (e) {
+      console.error('[tagManager] conflict import failed:', e);
+      return { ok: false, message: `Import failed: ${e.message || e}` };
+    }
+    if (!created?.id) return { ok: false, message: 'Import failed: the server returned no tag.' };
+    localTags.push(localTagFromCreated(created, input));
+    session.outcome.created++; session.outcome.resolved++;
+    let message = 'Imported';
+    if (removed.length) message = `Imported without the ${droppedAliasesText(row.conflicts, removed)}`;
+    else if (!strip) message = 'Imported (no conflicts left)';
+    return { ok: true, localTagsChanged: true, message };
+  }
+
+  /**
+   * "Merge existing into this": create the incoming tag, then merge the clashing
+   * local tag into it. F6: if the merge fails, the new tag is destroyed again so
+   * nothing is left behind and a retry doesn't collide on the name.
+   */
+  async function conflictReverse(session, row, tagId) {
+    const existing = localTags.find(t => t.id === tagId);
+    if (!existing || !row.conflicts.some(c => c.conflictingTag.id === tagId)) return conflictStaleTarget(row);
+    if (rowHasNameConflict(row)) return conflictNameTaken(row);
+    const name = row.stashdbTag.name;
+    const sceneCount = await getTagSceneCount(tagId);
+    if (!confirm(`Merge "${existing.name}" into "${name}"?\n\nThis deletes "${existing.name}" and reassigns its ${sceneCount} scene${sceneCount === 1 ? '' : 's'} to the imported tag. This cannot be undone.`)) {
+      return { ok: false, cancelled: true, message: '' };
+    }
+    // Create the incoming tag clean (strip the conflicting aliases so the create
+    // succeeds while the existing tag still owns them), then absorb the existing
+    // tag — tagsMerge carries its aliases/scenes onto the new tag.
+    const { aliases, removed } = sanitizeAliasesForImport(row.stashdbTag, row.conflicts);
+    const input = conflictCreateInput(session, row, aliases);
+    let created;
+    try {
+      created = await createTag(input);
+    } catch (e) {
+      console.error('[tagManager] reverse-merge create failed:', e);
+      return { ok: false, message: `Could not create "${name}": ${e.message || e}. Nothing was changed.` };
+    }
+    if (!created?.id) return { ok: false, message: `Could not create "${name}": the server returned no tag. Nothing was changed.` };
+
+    let merged;
+    try {
+      merged = await mergeTags([tagId], created.id);
+    } catch (e) {
+      console.error('[tagManager] reverse-merge failed; removing the new tag:', e);
+      const why = e.message || e;
+      try {
+        await destroyTag(created.id);
+      } catch (destroyErr) {
+        console.error('[tagManager] could not remove the new tag after a failed merge:', destroyErr);
+        localTags.push(localTagFromCreated(created, input)); // it exists on the server
+        return {
+          ok: false,
+          localTagsChanged: true,
+          message: `Merging "${existing.name}" into "${name}" failed: ${why}. Removing the new tag "${name}" (id ${created.id}) also failed: ${destroyErr.message || destroyErr}. Delete it in Stash, or merge into it here.`,
+        };
+      }
+      return { ok: false, message: `Merging "${existing.name}" into "${name}" failed: ${why}. The new tag was removed again; nothing changed.` };
+    }
+
+    dropMergedSourceLocally(tagId);
+    const createdLocal = localTagFromCreated(created, input);
+    localTags.push({
+      ...createdLocal,
+      name: (merged && merged.name) || createdLocal.name,
+      aliases: (merged && merged.aliases) || createdLocal.aliases,
+      stash_ids: (merged && merged.stash_ids) || createdLocal.stash_ids,
+    });
+    session.outcome.created++; session.outcome.resolved++;
+    // Aliases that clashed with OTHER tags were stripped and are not brought back by the merge.
+    const otherConflicts = row.conflicts.filter(c => c.conflictingTag.id !== tagId);
+    const lost = removed.filter(a => otherConflicts.some(c => c.conflictingValue.toLowerCase() === a.toLowerCase()));
+    const lostText = lost.length ? `, without the ${droppedAliasesText(otherConflicts, lost)}` : '';
+    return { ok: true, localTagsChanged: true, message: `Created "${name}" and merged "${existing.name}" into it${lostText}` };
+  }
+
+  /**
+   * F6: run one conflict-row action and re-check the remaining rows afterwards.
+   * @param {object} session - from createConflictSession
+   * @param {number} i - row index
+   * @param {'merge-into'|'strip'|'reverse'|'import'|'skip'} action
+   * @param {string} [tagId] - the local tag for merge-into / reverse
+   * @returns {Promise<{ok: boolean, message: string, localTagsChanged?: boolean, cancelled?: boolean, busy?: boolean}>}
+   *   ok: the row is resolved and shows `message` as its result. Otherwise the row
+   *   stays actionable and shows `message` as its error (not when cancelled).
+   */
+  async function resolveConflictRow(session, i, action, tagId) {
+    const row = session.rows.get(i);
+    if (!row || row.done) return { ok: false, message: 'This row is already resolved.' };
+    if (session.busy) return { ok: false, busy: true, message: 'Another action is still running.' };
+    session.busy = true;
+    row.error = '';
+    let result;
+    try {
+      row.conflicts = detectImportConflicts(row.stashdbTag); // act on the current clashes
+      if (action === 'merge-into') result = await conflictMergeInto(session, row, tagId);
+      else if (action === 'strip') result = await conflictImport(session, row, { strip: true });
+      else if (action === 'import') result = await conflictImport(session, row, { strip: false });
+      else if (action === 'reverse') result = await conflictReverse(session, row, tagId);
+      else if (action === 'skip') {
+        session.outcome.skipped++;
+        result = { ok: true, message: 'Skipped' };
+      } else result = { ok: false, message: `Unknown action "${action}".` };
+    } catch (e) {
+      console.error(`[tagManager] conflict action "${action}" failed:`, e);
+      result = { ok: false, message: `Failed: ${e.message || e}` };
+    } finally {
+      session.busy = false;
+    }
+    if (result.ok) {
+      row.done = true;
+      row.result = result.message;
+    } else if (!result.cancelled) {
+      row.error = result.message;
+    }
+    recheckConflictRows(session);
+    return result;
+  }
+
+  /** One conflict row: its result once resolved, else its clashes and actions. */
+  function conflictRowHtml(row) {
+    const { i, stashdbTag, conflicts } = row;
+    const nameHtml = `<strong>${escapeHtml(stashdbTag.name)}</strong>`;
+    if (row.done) {
+      return `
+          <div class="tm-conflict-row tm-conflict-done" data-i="${i}">
+            <div class="tm-conflict-desc">
+              ${nameHtml}
+              <span class="tm-conflict-result">${escapeHtml(row.result)}</span>
+            </div>
+          </div>
+        `;
+    }
+    const errorHtml = row.error ? `<div class="tm-conflict-error">${escapeHtml(row.error)}</div>` : '';
+    const skipBtn = `<button class="btn btn-secondary btn-sm tm-conflict-skip" data-i="${i}">Skip</button>`;
+    if (conflicts.length === 0) {
+      return `
+          <div class="tm-conflict-row" data-i="${i}">
+            <div class="tm-conflict-desc">
+              ${nameHtml}
+              <span class="tm-conflict-detail">no conflicts left (an earlier action resolved them)</span>
+            </div>
+            ${errorHtml}
+            <div class="tm-conflict-actions">
+              <button class="btn btn-primary btn-sm tm-conflict-import" data-i="${i}">Import</button>
+              ${skipBtn}
+            </div>
+          </div>
+        `;
+    }
+    const hasNameConflict = rowHasNameConflict(row);
+    const values = [...new Set(conflicts.map(c => c.conflictingValue))];
+    const tags = distinctConflictTags(conflicts);
+    const mergeBtns = tags.map(t =>
+      `<button class="btn btn-primary btn-sm tm-conflict-merge-into" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge into "${escapeHtml(t.name)}"</button>`
+    ).join('');
+    // A name collision means the incoming name is taken, so we can't create a
+    // new tag with it — strip-alias and reverse-merge are unavailable.
+    const stripBtn = hasNameConflict ? '' :
+      `<button class="btn btn-secondary btn-sm tm-conflict-strip" data-i="${i}">Strip alias &amp; import</button>`;
+    const reverseBtns = hasNameConflict ? '' : tags.map(t =>
+      `<button class="btn btn-danger btn-sm tm-conflict-reverse" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge "${escapeHtml(t.name)}" into this</button>`
+    ).join('');
+    const openBtns = tags.map(t =>
+      `<a href="/tags/${escapeHtml(t.id)}" target="_blank" class="btn btn-secondary btn-sm">Open "${escapeHtml(t.name)}"</a>`
+    ).join('');
+    return `
+          <div class="tm-conflict-row" data-i="${i}">
+            <div class="tm-conflict-desc">
+              ${nameHtml}
+              <span class="tm-conflict-detail">${hasNameConflict ? 'name' : 'alias'} ${values.map(v => `&ldquo;${escapeHtml(v)}&rdquo;`).join(', ')} already used by ${tags.map(t => `&ldquo;${escapeHtml(t.name)}&rdquo;`).join(', ')}</span>
+            </div>
+            ${errorHtml}
+            <div class="tm-conflict-actions">
+              ${mergeBtns}
+              ${stripBtn}
+              ${reverseBtns}
+              ${openBtns}
+              ${skipBtn}
+            </div>
+          </div>
+        `;
   }
 
   /**
    * #125: End-of-import resolution modal for alias/name conflicts. Renders one
-   * row per deferred import with per-row actions. Resolves to aggregate counts
+   * row per deferred import with per-row actions (see resolveConflictRow).
+   * Resolved rows stay listed with their result; the footer button reads "Done"
+   * once nothing is pending. Resolves to aggregate counts
    * { created, linked, skipped, resolved } that fold into the import summary.
    * Unresolved rows at close count as skipped.
    * @param {Array<{stashdbTag: object, parentId: ?string, conflicts: Array}>} importConflicts
+   * @param {string} [endpoint] - defaults to the selected stash-box's endpoint
    * @returns {Promise<{created: number, linked: number, skipped: number, resolved: number}>}
    */
-  function renderConflictResolutionModal(importConflicts) {
+  function renderConflictResolutionModal(importConflicts, endpoint = selectedStashBox?.endpoint) {
     return new Promise((resolve) => {
-      const outcome = { created: 0, linked: 0, skipped: 0, resolved: 0 };
-      const remaining = new Map();
-      importConflicts.forEach((entry, i) => remaining.set(i, entry));
-      const endpoint = selectedStashBox.endpoint;
+      if (!endpoint) {
+        // Nothing can be linked without an endpoint: leave every row unresolved.
+        console.error('[tagManager] No stash-box endpoint selected; skipping conflict resolution.');
+        resolve({ created: 0, linked: 0, skipped: importConflicts.length, resolved: 0 });
+        return;
+      }
+      const session = createConflictSession(importConflicts, endpoint);
 
       const backdrop = document.createElement('div');
       backdrop.className = 'tm-modal-backdrop';
@@ -1996,202 +2365,54 @@
       `;
       document.body.appendChild(backdrop);
       const listEl = backdrop.querySelector('.tm-conflict-list');
+      const footerBtn = backdrop.querySelector('#tm-conflict-skip-all');
 
       let settled = false;
+      let closeRequested = false;
       function finish() {
         if (settled) return;
+        if (session.busy) { closeRequested = true; return; } // close once the running action ends
         settled = true;
-        for (const _i of remaining.keys()) outcome.skipped++; // unresolved → skipped
-        remaining.clear();
+        session.outcome.skipped += pendingConflictRows(session).length; // unresolved → skipped
         backdrop.remove();
-        resolve(outcome);
-      }
-
-      function distinctConflictTags(conflicts) {
-        const seen = new Map();
-        for (const c of conflicts) {
-          if (!seen.has(c.conflictingTag.id)) seen.set(c.conflictingTag.id, c.conflictingTag);
-        }
-        return [...seen.values()];
-      }
-
-      function rowHtml(i, entry) {
-        const { stashdbTag, conflicts } = entry;
-        const nameLower = stashdbTag.name.toLowerCase();
-        const hasNameConflict = conflicts.some(c => c.conflictingValue.toLowerCase() === nameLower);
-        const values = [...new Set(conflicts.map(c => c.conflictingValue))];
-        const tags = distinctConflictTags(conflicts);
-        const mergeBtns = tags.map(t =>
-          `<button class="btn btn-primary btn-sm tm-conflict-merge-into" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge into "${escapeHtml(t.name)}"</button>`
-        ).join('');
-        // A name collision means the incoming name is taken, so we can't create a
-        // new tag with it — strip-alias and reverse-merge are unavailable.
-        const stripBtn = hasNameConflict ? '' :
-          `<button class="btn btn-secondary btn-sm tm-conflict-strip" data-i="${i}">Strip alias &amp; import</button>`;
-        const reverseBtns = hasNameConflict ? '' : tags.map(t =>
-          `<button class="btn btn-danger btn-sm tm-conflict-reverse" data-i="${i}" data-tag="${escapeHtml(t.id)}">Merge "${escapeHtml(t.name)}" into this</button>`
-        ).join('');
-        const openBtns = tags.map(t =>
-          `<a href="/tags/${escapeHtml(t.id)}" target="_blank" class="btn btn-secondary btn-sm">Open "${escapeHtml(t.name)}"</a>`
-        ).join('');
-        return `
-          <div class="tm-conflict-row" data-i="${i}">
-            <div class="tm-conflict-desc">
-              <strong>${escapeHtml(stashdbTag.name)}</strong>
-              <span class="tm-conflict-detail">${hasNameConflict ? 'name' : 'alias'} ${values.map(v => `&ldquo;${escapeHtml(v)}&rdquo;`).join(', ')} already used by ${tags.map(t => `&ldquo;${escapeHtml(t.name)}&rdquo;`).join(', ')}</span>
-            </div>
-            <div class="tm-conflict-actions">
-              ${mergeBtns}
-              ${stripBtn}
-              ${reverseBtns}
-              ${openBtns}
-              <button class="btn btn-secondary btn-sm tm-conflict-skip" data-i="${i}">Skip</button>
-            </div>
-          </div>
-        `;
+        resolve(session.outcome);
       }
 
       function render() {
-        if (remaining.size === 0) { finish(); return; }
-        listEl.innerHTML = [...remaining].map(([i, e]) => rowHtml(i, e)).join('');
+        listEl.innerHTML = [...session.rows.values()].map(conflictRowHtml).join('');
+        if (footerBtn) footerBtn.textContent = pendingConflictRows(session).length ? 'Skip all remaining' : 'Done';
         attachHandlers();
       }
 
-      function removeRow(i) {
-        remaining.delete(i);
-        render();
-      }
-
-      function setRowBusy(i) {
-        const row = listEl.querySelector(`.tm-conflict-row[data-i="${i}"]`);
-        if (row) row.classList.add('tm-conflict-busy');
-      }
-      function clearRowBusy(i) {
-        const row = listEl.querySelector(`.tm-conflict-row[data-i="${i}"]`);
-        if (row) row.classList.remove('tm-conflict-busy');
-      }
-
-      async function doMergeInto(i, tagId) {
-        const entry = remaining.get(i);
-        if (!entry) return;
-        const existing = localTags.find(t => t.id === tagId);
-        if (!existing) return;
-        setRowBusy(i);
+      async function act(i, action, tagId) {
+        if (settled || session.busy) return;
+        const rowEl = listEl.querySelector(`.tm-conflict-row[data-i="${i}"]`);
+        if (rowEl) rowEl.classList.add('tm-conflict-busy');
+        listEl.classList.add('tm-conflict-busy');
         try {
-          const input = buildMergeIntoExistingInput(existing, entry.stashdbTag, entry.conflicts, endpoint, entry.stashdbTag.id, entry.parentId);
-          const updated = await updateTag(input);
-          const idx = localTags.findIndex(t => t.id === tagId);
-          if (idx >= 0) {
-            localTags[idx].aliases = input.aliases;
-            localTags[idx].stash_ids = (updated && updated.stash_ids) || input.stash_ids;
-            if (input.parent_ids) localTags[idx].parents = input.parent_ids.map(id => ({ id }));
-          }
-          outcome.linked++; outcome.resolved++;
-          removeRow(i);
-        } catch (e) {
-          console.error('[tagManager] merge-into-existing failed:', e);
-          alert('Merge failed: ' + (e.message || e));
-          clearRowBusy(i);
+          await resolveConflictRow(session, i, action, tagId);
+        } finally {
+          listEl.classList.remove('tm-conflict-busy');
         }
-      }
-
-      async function doStrip(i) {
-        const entry = remaining.get(i);
-        if (!entry) return;
-        setRowBusy(i);
-        const { stashdbTag, parentId, conflicts } = entry;
-        const { aliases } = sanitizeAliasesForImport(stashdbTag, conflicts);
-        try {
-          const input = {
-            name: stashdbTag.name,
-            description: stashdbTag.description || '',
-            aliases,
-            stash_ids: [{ endpoint, stash_id: stashdbTag.id }],
-          };
-          if (parentId) input.parent_ids = [parentId];
-          const newTag = await createTag(input);
-          if (newTag) {
-            localTags.push({ id: newTag.id, name: newTag.name, aliases, stash_ids: input.stash_ids, parents: parentId ? [{ id: parentId }] : [] });
-            outcome.created++; outcome.resolved++;
-          }
-          removeRow(i);
-        } catch (e) {
-          console.error('[tagManager] strip-alias import failed:', e);
-          alert('Import failed: ' + (e.message || e));
-          clearRowBusy(i);
-        }
-      }
-
-      async function doReverse(i, tagId) {
-        const entry = remaining.get(i);
-        if (!entry) return;
-        const existing = localTags.find(t => t.id === tagId);
-        if (!existing) return;
-        // Guard the row across the async scene-count fetch + confirm so a second
-        // click can't start a concurrent handler; restore it if the user cancels.
-        setRowBusy(i);
-        const sceneCount = await getTagSceneCount(tagId);
-        if (!confirm(`Merge "${existing.name}" into "${entry.stashdbTag.name}"?\n\nThis deletes "${existing.name}" and reassigns its ${sceneCount} scene${sceneCount === 1 ? '' : 's'} to the imported tag. This cannot be undone.`)) {
-          clearRowBusy(i);
-          return;
-        }
-        const { stashdbTag, parentId, conflicts } = entry;
-        // Create the incoming tag clean (strip the conflicting aliases so the create
-        // succeeds while the existing tag still owns them), then absorb the existing
-        // tag — tagsMerge carries its aliases/scenes onto the new tag.
-        const { aliases } = sanitizeAliasesForImport(stashdbTag, conflicts);
-        try {
-          const input = {
-            name: stashdbTag.name,
-            description: stashdbTag.description || '',
-            aliases,
-            stash_ids: [{ endpoint, stash_id: stashdbTag.id }],
-          };
-          if (parentId) input.parent_ids = [parentId];
-          const newTag = await createTag(input);
-          if (!newTag) throw new Error('tagCreate returned no tag');
-          const merged = await mergeTags([tagId], newTag.id);
-          const removedIdx = localTags.findIndex(t => t.id === tagId);
-          if (removedIdx >= 0) localTags.splice(removedIdx, 1);
-          localTags.push({
-            id: newTag.id,
-            name: (merged && merged.name) || newTag.name,
-            aliases: (merged && merged.aliases) || aliases,
-            stash_ids: (merged && merged.stash_ids) || input.stash_ids,
-            parents: parentId ? [{ id: parentId }] : [],
-          });
-          outcome.created++; outcome.resolved++;
-          removeRow(i);
-        } catch (e) {
-          console.error('[tagManager] reverse-merge failed:', e);
-          alert('Reverse merge failed: ' + (e.message || e));
-          clearRowBusy(i);
-        }
-      }
-
-      function doSkip(i) {
-        if (!remaining.has(i)) return;
-        outcome.skipped++;
-        remaining.delete(i);
-        render();
+        if (closeRequested) finish();
+        else if (!settled) render();
       }
 
       function attachHandlers() {
-        listEl.querySelectorAll('.tm-conflict-merge-into').forEach(b =>
-          b.addEventListener('click', () => doMergeInto(Number(b.dataset.i), b.dataset.tag)));
-        listEl.querySelectorAll('.tm-conflict-strip').forEach(b =>
-          b.addEventListener('click', () => doStrip(Number(b.dataset.i))));
-        listEl.querySelectorAll('.tm-conflict-reverse').forEach(b =>
-          b.addEventListener('click', () => doReverse(Number(b.dataset.i), b.dataset.tag)));
-        listEl.querySelectorAll('.tm-conflict-skip').forEach(b =>
-          b.addEventListener('click', () => doSkip(Number(b.dataset.i))));
+        const on = (selector, action) => listEl.querySelectorAll(selector).forEach(b =>
+          b.addEventListener('click', () => act(Number(b.dataset.i), action, b.dataset.tag)));
+        on('.tm-conflict-merge-into', 'merge-into');
+        on('.tm-conflict-strip', 'strip');
+        on('.tm-conflict-reverse', 'reverse');
+        on('.tm-conflict-import', 'import');
+        on('.tm-conflict-skip', 'skip');
         // "Open" links intentionally do not resolve the row — the user may return
         // to it; if they close the modal with it unresolved it counts as skipped.
       }
 
       backdrop.querySelector('.tm-close-btn').addEventListener('click', finish);
       backdrop.addEventListener('click', (e) => { if (e.target === backdrop) finish(); });
-      backdrop.querySelector('#tm-conflict-skip-all').addEventListener('click', finish);
+      if (footerBtn) footerBtn.addEventListener('click', finish);
 
       render();
     });
@@ -2254,47 +2475,57 @@
       return;
     }
 
+    // F11: the flag and the button are reset in `finally`, whatever happens.
     isImporting = true;
-    const statusEl = container.querySelector('.tm-selection-info');
-    if (statusEl) statusEl.textContent = 'Updating linked tags...';
+    const btnEl = container.querySelector('#tm-update-linked');
+    if (btnEl) btnEl.disabled = true;
+    try {
+      const statusEl = container.querySelector('.tm-selection-info');
+      if (statusEl) statusEl.textContent = 'Updating linked tags...';
 
-    let updated = 0;
-    let errors = 0;
+      let updated = 0;
+      let errors = 0;
 
-    for (const { localTag, stashdbTag, needsDescription, newAliases } of tagsToUpdate) {
-      try {
-        const input = { id: localTag.id };
-        if (needsDescription) {
-          input.description = stashdbTag.description;
+      for (const { localTag, stashdbTag, needsDescription, newAliases } of tagsToUpdate) {
+        try {
+          const input = { id: localTag.id };
+          if (needsDescription) {
+            input.description = stashdbTag.description;
+          }
+          if (newAliases.length > 0) {
+            input.aliases = [...(localTag.aliases || []), ...newAliases];
+          }
+
+          await updateTag(input);
+
+          // Update local cache
+          const idx = localTags.findIndex(t => t.id === localTag.id);
+          if (idx >= 0) {
+            if (needsDescription) localTags[idx].description = stashdbTag.description;
+            if (newAliases.length > 0) localTags[idx].aliases = input.aliases;
+          }
+          updated++;
+        } catch (e) {
+          console.error(`[tagManager] Failed to update "${localTag.name}":`, e);
+          errors++;
         }
-        if (newAliases.length > 0) {
-          input.aliases = [...(localTag.aliases || []), ...newAliases];
-        }
-
-        await updateTag(input);
-
-        // Update local cache
-        const idx = localTags.findIndex(t => t.id === localTag.id);
-        if (idx >= 0) {
-          if (needsDescription) localTags[idx].description = stashdbTag.description;
-          if (newAliases.length > 0) localTags[idx].aliases = input.aliases;
-        }
-        updated++;
-      } catch (e) {
-        console.error(`[tagManager] Failed to update "${localTag.name}":`, e);
-        errors++;
       }
+
+      const parts = [];
+      if (updated > 0) parts.push(`Updated ${updated} tag${updated !== 1 ? 's' : ''}`);
+      if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
+      const message = parts.join(', ') || 'No changes';
+
+      showStatus(message, errors > 0 ? 'warning' : 'success');
+    } catch (e) {
+      console.error('[tagManager] Updating linked tags failed:', e);
+      showStatus(`Updating linked tags failed: ${e.message || e}`, 'error');
+    } finally {
+      isImporting = false;
+      if (btnEl) btnEl.disabled = false;
     }
 
-    const parts = [];
-    if (updated > 0) parts.push(`Updated ${updated} tag${updated !== 1 ? 's' : ''}`);
-    if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
-    const message = parts.join(', ') || 'No changes';
-
-    showStatus(message, errors > 0 ? 'warning' : 'success');
-
     setTimeout(() => {
-      isImporting = false;
       renderPage(container);
       refreshLocalTags(); // #124: reconcile with server truth after import
     }, 1500);
@@ -3100,6 +3331,127 @@
   }
 
   /**
+   * F12: the diff dialog's Apply, without the DOM. validateBeforeSave runs FIRST:
+   * on a conflict nothing is created, saved or fetched. Only then does it create
+   * a '__create__' parent, update the tag and, once the update succeeded, save
+   * the category mapping. The caller passes the dialog's current selections.
+   * @param {object} p
+   * @param {object} p.tag - the local tag being matched
+   * @param {object} p.stashdbTag - the chosen stash-box tag
+   * @param {string} p.endpoint
+   * @param {'local'|'local_add_alias'|'stashdb'} p.nameChoice
+   * @param {'local'|'stashdb'} p.descChoice
+   * @param {Iterable<string>} p.aliases - the dialog's final aliases
+   * @param {?string} p.parentId - a tag id, '__create__', or null
+   * @param {boolean} p.rememberMapping
+   * @returns {Promise<object>} { ok, sanitizedAliases, updateInput?, createdParent?,
+   *   validationErrors?, error?, stage?: 'parent'|'update' }. `createdParent` is
+   *   set whenever a parent was created, even if a later step failed.
+   */
+  async function applyDiff({ tag, stashdbTag, endpoint, nameChoice, descChoice, aliases, parentId, rememberMapping }) {
+    // Determine final name
+    const finalName = nameChoice === 'stashdb' ? stashdbTag.name : tag.name;
+
+    // Sanitize aliases - remove final name to prevent self-referential alias
+    const sanitizedAliases = sanitizeAliasesForSave(aliases, finalName, tag.name);
+
+    // Pre-validation: check for conflicts before hitting the API at all
+    const validationErrors = validateBeforeSave(finalName, sanitizedAliases, tag.id);
+    if (validationErrors.length > 0) {
+      return { ok: false, validationErrors, sanitizedAliases };
+    }
+
+    const categoryName = stashdbTag.category?.name || null;
+    console.debug('[tagManager] Applying match:', {
+      localTag: tag.name,
+      stashdbTag: stashdbTag.name,
+      endpoint,
+      nameChoice,
+      descChoice,
+      aliasCount: sanitizedAliases.length,
+      categoryName,
+      parentId,
+    });
+
+    // Build update input - preserve existing stash_ids from other endpoints
+    const filteredStashIds = (tag.stash_ids || []).filter(sid => sid.endpoint !== endpoint);
+    const updateInput = {
+      id: tag.id,
+      stash_ids: [...filteredStashIds, {
+        endpoint: endpoint,
+        stash_id: stashdbTag.id,
+      }],
+    };
+    if (nameChoice === 'stashdb') {
+      updateInput.name = stashdbTag.name;
+    }
+    if (descChoice === 'stashdb') {
+      updateInput.description = stashdbTag.description || '';
+    }
+    updateInput.aliases = sanitizedAliases;
+
+    // Handle parent tag from category (#126: skipped when leaving parents alone)
+    let parentTagId = null;
+    let createdParent = null;
+    if (shouldResolveParents(settings) && categoryName && parentId) {
+      if (parentId === '__create__') {
+        try {
+          const newParent = await createTag({ name: categoryName });
+          if (!newParent?.id) throw new Error('the server returned no tag');
+          createdParent = localTagFromCreated(newParent, { name: categoryName });
+          localTags.push(createdParent);
+          console.debug(`[tagManager] Created parent tag: ${createdParent.name}`);
+        } catch (e) {
+          console.error('[tagManager] Failed to create parent tag:', e);
+          return { ok: false, stage: 'parent', error: `Failed to create parent tag: ${e.message}`, sanitizedAliases };
+        }
+        parentTagId = createdParent.id;
+      } else {
+        parentTagId = parentId;
+      }
+
+      // Merge new parent with existing parents (don't replace)
+      try {
+        const existingParentIds = await fetchTagParentIds(tag.id);
+        if (!existingParentIds.includes(parentTagId)) {
+          updateInput.parent_ids = [...existingParentIds, parentTagId];
+        }
+      } catch (e) {
+        console.error('[tagManager] Failed to read current parents:', e);
+        return {
+          ok: false, stage: 'parent', createdParent, sanitizedAliases,
+          error: `Could not read the current parents of "${tag.name}": ${e.message}`,
+        };
+      }
+    }
+
+    try {
+      await updateTag(updateInput);
+    } catch (e) {
+      console.error('[tagManager] Save error:', e.message);
+      return { ok: false, stage: 'update', error: e.message, createdParent, sanitizedAliases };
+    }
+
+    // Update local state
+    const idx = localTags.findIndex(t => t.id === tag.id);
+    if (idx >= 0) {
+      localTags[idx].stash_ids = updateInput.stash_ids;
+      if (updateInput.name) localTags[idx].name = updateInput.name;
+      if (updateInput.description !== undefined) localTags[idx].description = updateInput.description;
+      if (updateInput.aliases) localTags[idx].aliases = updateInput.aliases;
+    }
+    delete matchResults[tag.id];
+
+    // Save the mapping only once the tag itself is saved
+    if (rememberMapping && parentTagId) {
+      categoryMappings[categoryName] = parentTagId;
+      await saveCategoryMappings();
+    }
+
+    return { ok: true, updateInput, createdParent, sanitizedAliases };
+  }
+
+  /**
    * Show diff dialog for accepting a match
    */
   function showDiffDialog(tagId, container, matchIndex = 0) {
@@ -3508,168 +3860,143 @@
       if (e.target === modal) modal.remove();
     });
 
-    modal.querySelector('.tm-apply-btn').addEventListener('click', async () => {
-      const nameChoice = modal.querySelector('input[name="tm-name"]:checked').value;
-      const descChoice = modal.querySelector('input[name="tm-desc"]:checked').value;
-      const errorEl = modal.querySelector('#tm-diff-error');
+    // Pre-validation failed: explain the first conflict and offer fixes.
+    function showValidationError(errorEl, validationErrors, endpoint, sanitizedAliases) {
+      const err = validationErrors[0]; // Show first error
+      const conflictTag = err.conflictsWith;
 
-      // Hide any previous error
-      errorEl.style.display = 'none';
-      errorEl.innerHTML = '';
-
-      // Use the selected stash-box endpoint
-      const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
-      console.debug(`[tagManager] Saving stash_id with endpoint: ${endpoint}`);
-
-      // Determine final name
-      const finalName = nameChoice === 'stashdb' ? stashdbTag.name : tag.name;
-
-      // Sanitize aliases - remove final name to prevent self-referential alias
-      const sanitizedAliases = sanitizeAliasesForSave(editableAliases, finalName, tag.name);
-
-      console.debug('[tagManager] Applying match:', {
-        localTag: tag.name,
-        stashdbTag: stashdbTag.name,
-        nameChoice,
-        descChoice,
-        aliasCount: sanitizedAliases.length,
-        hasCategory,
-        selectedParentId
-      });
-
-      // Build update input - preserve existing stash_ids from other endpoints
-      const existingStashIds = tag.stash_ids || [];
-      const filteredStashIds = existingStashIds.filter(
-        sid => sid.endpoint !== endpoint
-      );
-
-      const updateInput = {
-        id: tag.id,
-        stash_ids: [...filteredStashIds, {
-          endpoint: endpoint,
-          stash_id: stashdbTag.id,
-        }],
-      };
-
-      if (nameChoice === 'stashdb') {
-        updateInput.name = stashdbTag.name;
+      if (err.type === 'name_conflict') {
+        errorEl.innerHTML = `
+          <div class="tm-error-message">
+            Cannot rename to "${escapeHtml(err.value)}" - this name already exists.
+          </div>
+          <div class="tm-error-actions">
+            <button type="button" class="btn btn-primary btn-sm tm-error-merge" data-conflict-id="${conflictTag.id}">
+              Merge into "${escapeHtml(conflictTag.name)}"
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
+              Keep local name instead
+            </button>
+            <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+              Edit "${escapeHtml(conflictTag.name)}"
+            </a>
+          </div>
+        `;
+      } else {
+        errorEl.innerHTML = `
+          <div class="tm-error-message">
+            Alias "${escapeHtml(err.value)}" conflicts with tag "${escapeHtml(conflictTag.name)}".
+          </div>
+          <div class="tm-error-actions">
+            <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(err.value)}">
+              Remove from aliases
+            </button>
+            <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+              Edit "${escapeHtml(conflictTag.name)}"
+            </a>
+          </div>
+        `;
       }
 
-      if (descChoice === 'stashdb') {
-        updateInput.description = stashdbTag.description || '';
+      errorEl.style.display = 'block';
+
+      // Attach action handlers
+      const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
+      if (keepLocalBtn) {
+        keepLocalBtn.addEventListener('click', () => {
+          modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
+          errorEl.style.display = 'none';
+        });
       }
 
-      // Use sanitized aliases
-      updateInput.aliases = sanitizedAliases;
+      const removeAliasBtn = errorEl.querySelector('.tm-error-remove-alias');
+      if (removeAliasBtn) {
+        removeAliasBtn.addEventListener('click', () => {
+          const aliasToRemove = removeAliasBtn.dataset.alias;
+          editableAliases.delete(aliasToRemove);
+          renderAliasPills();
+          errorEl.style.display = 'none';
+        });
+      }
 
-      // Handle parent tag from category (#126: skipped when leaving parents alone)
-      let parentTagId = null;
-      if (shouldResolveParents(settings) && hasCategory && selectedParentId) {
-        if (selectedParentId === '__create__') {
-          // Create the parent tag
-          try {
-            const newParent = await createTag({ name: stashdbTag.category.name });
-            parentTagId = newParent.id;
-            // Add to localTags for future reference
-            localTags.push({ id: newParent.id, name: newParent.name, aliases: [] });
-            console.debug(`[tagManager] Created parent tag: ${newParent.name}`);
-          } catch (e) {
-            console.error('[tagManager] Failed to create parent tag:', e);
-            errorEl.innerHTML = `<div class="tm-error-message">Failed to create parent tag: ${escapeHtml(e.message)}</div>`;
-            errorEl.style.display = 'block';
-            return;
+      // Merge button handler - merges current tag into the conflicting tag
+      const mergeBtn = errorEl.querySelector('.tm-error-merge');
+      if (mergeBtn) {
+        mergeBtn.addEventListener('click', async () => {
+          const destinationId = mergeBtn.dataset.conflictId;
+          const originalText = mergeBtn.textContent;
+
+          mergeBtn.disabled = true;
+          mergeBtn.textContent = 'Merging...';
+
+          const result = await performTagMerge({
+            sourceTag: tag,
+            destinationId,
+            stashdbTag,
+            endpoint,
+            sanitizedAliases,
+            modal,
+            container
+          });
+
+          if (result.cancelled) {
+            mergeBtn.disabled = false;
+            mergeBtn.textContent = originalText;
+          } else if (!result.success) {
+            errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
+            mergeBtn.disabled = false;
+            mergeBtn.textContent = originalText;
           }
-        } else {
-          parentTagId = selectedParentId;
-        }
-
-        // Merge new parent with existing parents (don't replace)
-        if (parentTagId) {
-          const existingParentIds = await fetchTagParentIds(tag.id);
-          // Add new parent if not already present
-          if (!existingParentIds.includes(parentTagId)) {
-            updateInput.parent_ids = [...existingParentIds, parentTagId];
-          }
-          // If already a parent, no need to update parent_ids
-        }
-
-        // Save mapping if checkbox is checked
-        const rememberCheckbox = modal.querySelector('#tm-remember-mapping');
-        if (rememberCheckbox?.checked && parentTagId) {
-          categoryMappings[stashdbTag.category.name] = parentTagId;
-          await saveCategoryMappings();
-        }
+        });
       }
+    }
 
-      // Pre-validation: check for conflicts before hitting API
-      const validationErrors = validateBeforeSave(finalName, sanitizedAliases, tag.id);
-      if (validationErrors.length > 0) {
-        const err = validationErrors[0]; // Show first error
-        const conflictTag = err.conflictsWith;
+    // The save itself failed: parse known server conflicts into actions.
+    function showSaveError(errorEl, message, endpoint, sanitizedAliases) {
+      // Parse "tag with name 'X' already exists"
+      const nameExistsMatch = message.match(/tag with name '([^']+)' already exists/i);
+      if (nameExistsMatch) {
+        const conflictName = nameExistsMatch[1];
+        const conflictTag = findConflictingTag(conflictName, tag.id);
 
-        if (err.type === 'name_conflict') {
-          errorEl.innerHTML = `
-            <div class="tm-error-message">
-              Cannot rename to "${escapeHtml(err.value)}" - this name already exists.
-            </div>
-            <div class="tm-error-actions">
-              <button type="button" class="btn btn-primary btn-sm tm-error-merge" data-conflict-id="${conflictTag.id}">
+        errorEl.innerHTML = `
+          <div class="tm-error-message">
+            Cannot save: "${escapeHtml(conflictName)}" conflicts with an existing tag.
+          </div>
+          <div class="tm-error-actions">
+            ${conflictTag ? `
+              <button type="button" class="btn btn-primary btn-sm tm-error-merge-api" data-conflict-id="${conflictTag.id}">
                 Merge into "${escapeHtml(conflictTag.name)}"
               </button>
-              <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
-                Keep local name instead
-              </button>
               <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
                 Edit "${escapeHtml(conflictTag.name)}"
               </a>
-            </div>
-          `;
-        } else {
-          errorEl.innerHTML = `
-            <div class="tm-error-message">
-              Alias "${escapeHtml(err.value)}" conflicts with tag "${escapeHtml(conflictTag.name)}".
-            </div>
-            <div class="tm-error-actions">
-              <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(err.value)}">
-                Remove from aliases
-              </button>
-              <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
-                Edit "${escapeHtml(conflictTag.name)}"
-              </a>
-            </div>
-          `;
-        }
-
+            ` : ''}
+            <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(conflictName)}">
+              Remove from aliases
+            </button>
+          </div>
+        `;
         errorEl.style.display = 'block';
 
-        // Attach action handlers
-        const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
-        if (keepLocalBtn) {
-          keepLocalBtn.addEventListener('click', () => {
-            modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
-            errorEl.style.display = 'none';
-          });
-        }
-
-        const removeAliasBtn = errorEl.querySelector('.tm-error-remove-alias');
-        if (removeAliasBtn) {
-          removeAliasBtn.addEventListener('click', () => {
-            const aliasToRemove = removeAliasBtn.dataset.alias;
-            editableAliases.delete(aliasToRemove);
+        const removeBtn = errorEl.querySelector('.tm-error-remove-alias');
+        if (removeBtn) {
+          removeBtn.addEventListener('click', () => {
+            editableAliases.delete(removeBtn.dataset.alias);
             renderAliasPills();
             errorEl.style.display = 'none';
           });
         }
 
-        // Merge button handler - merges current tag into the conflicting tag
-        const mergeBtn = errorEl.querySelector('.tm-error-merge');
-        if (mergeBtn) {
-          mergeBtn.addEventListener('click', async () => {
-            const destinationId = mergeBtn.dataset.conflictId;
-            const originalText = mergeBtn.textContent;
+        // Merge button handler for API error case
+        const mergeApiBtn = errorEl.querySelector('.tm-error-merge-api');
+        if (mergeApiBtn) {
+          mergeApiBtn.addEventListener('click', async () => {
+            const destinationId = mergeApiBtn.dataset.conflictId;
+            const originalText = mergeApiBtn.textContent;
 
-            mergeBtn.disabled = true;
-            mergeBtn.textContent = 'Merging...';
+            mergeApiBtn.disabled = true;
+            mergeApiBtn.textContent = 'Merging...';
 
             const result = await performTagMerge({
               sourceTag: tag,
@@ -3682,142 +4009,111 @@
             });
 
             if (result.cancelled) {
-              mergeBtn.disabled = false;
-              mergeBtn.textContent = originalText;
+              mergeApiBtn.disabled = false;
+              mergeApiBtn.textContent = originalText;
             } else if (!result.success) {
               errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
-              mergeBtn.disabled = false;
-              mergeBtn.textContent = originalText;
+              mergeApiBtn.disabled = false;
+              mergeApiBtn.textContent = originalText;
             }
           });
         }
-
-        return; // Don't proceed with save
+        return;
       }
 
-      try {
-        await updateTag(updateInput);
-        modal.remove();
+      // Parse "name 'X' is used as alias for 'Y'"
+      const aliasUsedMatch = message.match(/name '([^']+)' is used as alias for '([^']+)'/i);
+      if (aliasUsedMatch) {
+        const [, conflictName, otherTagName] = aliasUsedMatch;
+        const otherTag = localTags.find(t => t.name === otherTagName);
 
-        // Update local state
-        const idx = localTags.findIndex(t => t.id === tag.id);
-        if (idx >= 0) {
-          localTags[idx].stash_ids = updateInput.stash_ids;
-          if (updateInput.name) localTags[idx].name = updateInput.name;
-          if (updateInput.description !== undefined) localTags[idx].description = updateInput.description;
-          if (updateInput.aliases) localTags[idx].aliases = updateInput.aliases;
-        }
-        delete matchResults[tag.id];
-
-        showStatus(`Matched "${tag.name}" to "${stashdbTag.name}"`, 'success');
-        renderPage(container);
-      } catch (e) {
-        console.error('[tagManager] Save error:', e.message);
-
-        // Parse "tag with name 'X' already exists"
-        const nameExistsMatch = e.message.match(/tag with name '([^']+)' already exists/i);
-        if (nameExistsMatch) {
-          const conflictName = nameExistsMatch[1];
-          const conflictTag = findConflictingTag(conflictName, tag.id);
-
-          errorEl.innerHTML = `
-            <div class="tm-error-message">
-              Cannot save: "${escapeHtml(conflictName)}" conflicts with an existing tag.
-            </div>
-            <div class="tm-error-actions">
-              ${conflictTag ? `
-                <button type="button" class="btn btn-primary btn-sm tm-error-merge-api" data-conflict-id="${conflictTag.id}">
-                  Merge into "${escapeHtml(conflictTag.name)}"
-                </button>
-                <a href="/tags/${conflictTag.id}" target="_blank" class="btn btn-secondary btn-sm">
-                  Edit "${escapeHtml(conflictTag.name)}"
-                </a>
-              ` : ''}
-              <button type="button" class="btn btn-secondary btn-sm tm-error-remove-alias" data-alias="${escapeHtml(conflictName)}">
-                Remove from aliases
-              </button>
-            </div>
-          `;
-          errorEl.style.display = 'block';
-
-          const removeBtn = errorEl.querySelector('.tm-error-remove-alias');
-          if (removeBtn) {
-            removeBtn.addEventListener('click', () => {
-              editableAliases.delete(removeBtn.dataset.alias);
-              renderAliasPills();
-              errorEl.style.display = 'none';
-            });
-          }
-
-          // Merge button handler for API error case
-          const mergeApiBtn = errorEl.querySelector('.tm-error-merge-api');
-          if (mergeApiBtn) {
-            mergeApiBtn.addEventListener('click', async () => {
-              const destinationId = mergeApiBtn.dataset.conflictId;
-              const originalText = mergeApiBtn.textContent;
-
-              mergeApiBtn.disabled = true;
-              mergeApiBtn.textContent = 'Merging...';
-
-              const result = await performTagMerge({
-                sourceTag: tag,
-                destinationId,
-                stashdbTag,
-                endpoint,
-                sanitizedAliases,
-                modal,
-                container
-              });
-
-              if (result.cancelled) {
-                mergeApiBtn.disabled = false;
-                mergeApiBtn.textContent = originalText;
-              } else if (!result.success) {
-                errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
-                mergeApiBtn.disabled = false;
-                mergeApiBtn.textContent = originalText;
-              }
-            });
-          }
-          return;
-        }
-
-        // Parse "name 'X' is used as alias for 'Y'"
-        const aliasUsedMatch = e.message.match(/name '([^']+)' is used as alias for '([^']+)'/i);
-        if (aliasUsedMatch) {
-          const [, conflictName, otherTagName] = aliasUsedMatch;
-          const otherTag = localTags.find(t => t.name === otherTagName);
-
-          errorEl.innerHTML = `
-            <div class="tm-error-message">
-              Cannot use "${escapeHtml(conflictName)}" - it's an alias on "${escapeHtml(otherTagName)}".
-            </div>
-            <div class="tm-error-actions">
-              ${otherTag ? `
-                <a href="/tags/${otherTag.id}" target="_blank" class="btn btn-secondary btn-sm">
-                  Edit "${escapeHtml(otherTagName)}"
-                </a>
-              ` : ''}
-              <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
-                Keep local name instead
-              </button>
-            </div>
-          `;
-          errorEl.style.display = 'block';
-
-          const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
-          if (keepLocalBtn) {
-            keepLocalBtn.addEventListener('click', () => {
-              modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
-              errorEl.style.display = 'none';
-            });
-          }
-          return;
-        }
-
-        // Fallback for unknown errors
-        errorEl.innerHTML = `<div class="tm-error-message">${escapeHtml(e.message)}</div>`;
+        errorEl.innerHTML = `
+          <div class="tm-error-message">
+            Cannot use "${escapeHtml(conflictName)}" - it's an alias on "${escapeHtml(otherTagName)}".
+          </div>
+          <div class="tm-error-actions">
+            ${otherTag ? `
+              <a href="/tags/${otherTag.id}" target="_blank" class="btn btn-secondary btn-sm">
+                Edit "${escapeHtml(otherTagName)}"
+              </a>
+            ` : ''}
+            <button type="button" class="btn btn-secondary btn-sm tm-error-keep-local">
+              Keep local name instead
+            </button>
+          </div>
+        `;
         errorEl.style.display = 'block';
+
+        const keepLocalBtn = errorEl.querySelector('.tm-error-keep-local');
+        if (keepLocalBtn) {
+          keepLocalBtn.addEventListener('click', () => {
+            modal.querySelector('input[name="tm-name"][value="local"]').checked = true;
+            errorEl.style.display = 'none';
+          });
+        }
+        return;
+      }
+
+      // Fallback for unknown errors
+      errorEl.innerHTML = `<div class="tm-error-message">${escapeHtml(message)}</div>`;
+      errorEl.style.display = 'block';
+    }
+
+    // F12: Apply validates first (applyDiff), stays disabled and ignores re-clicks
+    // until it finishes, and reuses a parent that a failed attempt already created.
+    const applyBtn = modal.querySelector('.tm-apply-btn');
+    let applying = false;
+    let createdParentId = null;
+    applyBtn.addEventListener('click', async () => {
+      if (applying) return;
+      applying = true;
+      applyBtn.disabled = true;
+      let closed = false;
+      try {
+        const nameChoice = modal.querySelector('input[name="tm-name"]:checked').value;
+        const descChoice = modal.querySelector('input[name="tm-desc"]:checked').value;
+        const errorEl = modal.querySelector('#tm-diff-error');
+
+        // Hide any previous error
+        errorEl.style.display = 'none';
+        errorEl.innerHTML = '';
+
+        // Use the selected stash-box endpoint
+        const endpoint = selectedStashBox?.endpoint || settings.stashdbEndpoint;
+        const parentId = selectedParentId === '__create__' && createdParentId ? createdParentId : selectedParentId;
+
+        const result = await applyDiff({
+          tag,
+          stashdbTag,
+          endpoint,
+          nameChoice,
+          descChoice,
+          aliases: editableAliases,
+          parentId,
+          rememberMapping: !!modal.querySelector('#tm-remember-mapping')?.checked,
+        });
+        if (result.createdParent) createdParentId = result.createdParent.id;
+
+        if (result.ok) {
+          closed = true;
+          modal.remove();
+          showStatus(`Matched "${tag.name}" to "${stashdbTag.name}"`, 'success');
+          try {
+            renderPage(container);
+          } catch (renderErr) {
+            console.error('[tagManager] re-render after Apply failed:', renderErr);
+          }
+        } else if (result.validationErrors) {
+          showValidationError(errorEl, result.validationErrors, endpoint, result.sanitizedAliases);
+        } else if (result.stage === 'update') {
+          showSaveError(errorEl, result.error, endpoint, result.sanitizedAliases);
+        } else {
+          errorEl.innerHTML = `<div class="tm-error-message">${escapeHtml(result.error)}</div>`;
+          errorEl.style.display = 'block';
+        }
+      } finally {
+        applying = false;
+        if (!closed) applyBtn.disabled = false;
       }
     });
   }
@@ -3844,7 +4140,8 @@
   }
 
   /**
-   * Create a new tag via GraphQL
+   * Create a new tag via GraphQL. Returns the full tag (the fields localTags
+   * entries carry), so callers can track it without a refetch.
    */
   async function createTag(input) {
     const query = `
@@ -3852,12 +4149,37 @@
         tagCreate(input: $input) {
           id
           name
+          description
+          aliases
+          stash_ids {
+            endpoint
+            stash_id
+          }
+          parents {
+            id
+            name
+          }
         }
       }
     `;
 
     const data = await graphqlRequest(query, { input });
     return data?.tagCreate;
+  }
+
+  /**
+   * Delete a tag via GraphQL (used to undo a create whose follow-up failed).
+   * @param {string} id
+   */
+  async function destroyTag(id) {
+    const query = `
+      mutation TagDestroy($input: TagDestroyInput!) {
+        tagDestroy(input: $input)
+      }
+    `;
+
+    const data = await graphqlRequest(query, { input: { id } });
+    return data?.tagDestroy;
   }
 
   /**
@@ -5486,10 +5808,24 @@
       supportsMergeValues,
       confirmTagMerge,
       performTagMerge,
+      detectImportConflicts,
+      sanitizeAliasesForImport,
+      buildMergeIntoExistingInput,
+      summarizeImportResult,
+      renderConflictResolutionModal,
+      createConflictSession,
+      resolveConflictRow,
+      recheckConflictRows,
+      conflictRowHtml,
+      handleImportSelected,
+      handleUpdateLinkedTags,
+      showDiffDialog,
+      applyDiff,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,
       categoryMappings, tagBlacklist, isImporting, pendingChanges, isEditMode, cacheStatus,
+      selectedForImport,
     });
     window.__TAG_MANAGER_TEST__.setState = (patch) => {
       if ("localTags" in patch) localTags = patch.localTags;
@@ -5503,6 +5839,7 @@
       if ("isImporting" in patch) isImporting = patch.isImporting;
       if ("pendingChanges" in patch) pendingChanges = patch.pendingChanges;
       if ("isEditMode" in patch) isEditMode = patch.isEditMode;
+      if ("selectedForImport" in patch) selectedForImport = patch.selectedForImport;
     };
   }
 })();

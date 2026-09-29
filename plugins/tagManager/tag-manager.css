@@ -1654,3 +1654,22 @@
 .tm-conflict-actions .btn {
   font-size: 0.85em;
 }
+
+/* F6: one row action at a time; resolved rows keep their result */
+.tm-conflict-list.tm-conflict-busy .tm-conflict-actions {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.tm-conflict-row.tm-conflict-done {
+  opacity: 0.8;
+}
+
+.tm-conflict-result {
+  font-size: 0.9em;
+}
+
+.tm-conflict-error {
+  color: var(--bs-danger, #dc3545);
+  font-size: 0.9em;
+}
