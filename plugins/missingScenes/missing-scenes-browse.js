@@ -16,6 +16,8 @@
     describeFingerprintBuild,
     fingerprintFields,
     directionFor,
+    describeNoFavorites,
+    TRENDING_NOTE,
     createSceneCard,
   } = Core;
 
@@ -143,6 +145,11 @@
       }
     }
 
+    // Trending results only cover recent activity (the empty list's placeholder says so too)
+    const trendingNote = stats && scenes.length > 0 && sortField === "TRENDING"
+      ? `<div class="ms-browse-note">${escapeHtml(TRENDING_NOTE)}</div>`
+      : '';
+
     // ThePornDB takes one request per favorite, so only the first (most engaged) are searched
     let favoritesNote = '';
     if (stats && stats.favorites_limited) {
@@ -189,6 +196,16 @@
       // Pages are left (Load More carries on from the cursor), so nothing is known yet
       resultsPlaceholder = `
         <div class="ms-placeholder">No missing scenes in the pages checked so far.${hasMore ? ' Load More checks the next pages.' : ''}</div>
+      `;
+    } else if (scenes.length === 0 && stats && (stats.empty_filter_types || []).length > 0) {
+      // A favorites filter with no favorites on this box: nothing to match, not "none missing"
+      resultsPlaceholder = `
+        <div class="ms-placeholder">${escapeHtml(describeNoFavorites(stats.empty_filter_types, stats.stashdb_name || stashdbName))}</div>
+      `;
+    } else if (scenes.length === 0 && sortField === "TRENDING") {
+      // Trending leaves out scenes with no recent activity, so an empty list says little
+      resultsPlaceholder = `
+        <div class="ms-placeholder">No missing scenes are trending. ${escapeHtml(TRENDING_NOTE)}</div>
       `;
     } else if (scenes.length === 0) {
       resultsPlaceholder = `
@@ -268,6 +285,7 @@
 
         <div class="ms-browse-stats">${escapeHtml(statsText)}</div>
         ${favoritesNote}
+        ${trendingNote}
         ${fingerprintHtml}
         ${whisparrConfigured && whisparrError ? `<div class="ms-warning ms-whisparr-banner"><span class="ms-warning-text">${escapeHtml(describeWhisparrStatusError(whisparrError))}</span></div>` : ''}
         <div class="ms-browse-whisparr-status" id="ms-browse-status"></div>
@@ -397,6 +415,7 @@
           filters_active: result.filters_active,
           excluded_tags_applied: result.excluded_tags_applied,
           favorites_limited: result.favorites_limited,
+          empty_filter_types: result.empty_filter_types || [],
           favorites_query_limit: result.favorites_query_limit,
           cache_info: result.cache_info || null,
         }

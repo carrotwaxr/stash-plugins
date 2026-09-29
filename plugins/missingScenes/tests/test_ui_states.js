@@ -485,6 +485,51 @@ test("browse: direction labels follow the sort, and Trending hides the direction
   assert.strictEqual(trending.calls[1].sort, "TRENDING");
 });
 
+// ---------------- empty lists that aren't "all found" ----------------
+
+// find_missing / browse_stashdb when a favorites filter has no favorites on this box
+const noFavorites = (types, extra = {}) => okPage({
+  total_on_stashdb: 0, missing_count_estimate: null, cursor: null, has_more: false, is_complete: true,
+  missing_scenes: [], filters_active: true, empty_filter_types: types, ...extra,
+});
+
+test("modal: no favorites linked says so, not 'all available scenes'", async () => {
+  const { els, m } = modalSetup({ RunPluginOperation: () => wrap(noFavorites(["studios"])) });
+  await m.performSearch(true);
+  const t = text(els["ms-results"]) + " " + text(els["ms-status"]);
+  assert.ok(t.includes("You have no favorite studios linked to StashDB"), t);
+  assert.ok(!t.includes("all available scenes"), t);
+});
+
+test("browse: no favorites linked says so, not 'No missing scenes found'", async () => {
+  const ms = loadMissingScenes({ fetchResponses: { RunPluginOperation: () => wrap(noFavorites(["performers"])) } });
+  const c = browseContainer();
+  await ms.exports.browse.performSearch(c, true);
+  const t = text(c);
+  assert.ok(t.includes("You have no favorite performers linked to StashDB"), t);
+  assert.ok(!t.includes("No missing scenes found"), t);
+});
+
+test("browse: an empty Trending list says what Trending covers, not 'No missing scenes found'", async () => {
+  let empty = true;
+  const ms = loadMissingScenes({
+    fetchResponses: { RunPluginOperation: () => wrap(okPage(empty ? { missing_scenes: [] } : {})) },
+  });
+  const c = browseContainer();
+  await ms.exports.browse.performSearch(c, true);
+  c.querySelector("#ms-sort-field").listeners.change[0]({ target: { value: "TRENDING" } });
+  await flush(ms);
+  let t = text(c);
+  assert.ok(!t.includes("No missing scenes found"), t);
+  assert.ok(t.includes("No missing scenes are trending") && t.includes("last 7 days"), t);
+  // with results, the note stays
+  empty = false;
+  c.querySelector("#ms-page-size").listeners.change[0]({ target: { value: "25" } });
+  await flush(ms);
+  t = text(c);
+  assert.ok(t.includes("Scene a") && t.includes("last 7 days"), t);
+});
+
 // ---------------- fingerprint index (#160) ----------------
 
 /** RunPluginOperation that answers per operation; records every call's args. */

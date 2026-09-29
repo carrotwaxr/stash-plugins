@@ -16,6 +16,8 @@
     describeFingerprintBuild,
     fingerprintFields,
     directionFor,
+    describeNoFavorites,
+    TRENDING_NOTE,
     createSceneCard: coreCreateSceneCard,
   } = Core;
 
@@ -50,7 +52,6 @@
   let totalOnStashdb = 0;
   let totalLocal = 0;
   let sortField = "DATE";
-  const TRENDING_NOTE = "Trending only includes scenes with activity on the stash-box in the last 7 days.";
   // No scenes yet, but the stash-box has pages left (the 50-page cap of one request)
   const NOT_FOUND_YET = "No missing scenes in the pages checked so far.";
   let sortDirection = "DESC";
@@ -60,6 +61,7 @@
   let filterFavoriteStudios = false;
   let filterFavoriteTags = false;
   let activeFilterTagIds = [];
+  let emptyFilterTypes = []; // favorites filters with no favorites linked to this box
 
   /**
    * Find missing scenes for the current entity (paginated)
@@ -563,6 +565,8 @@
         // Pages are left (Load More carries on from the cursor), so nothing is known yet
         const note = sortField === "TRENDING" ? ` ${TRENDING_NOTE}` : "";
         container.innerHTML = `<div class="ms-placeholder">${NOT_FOUND_YET}${hasMore ? " Load More checks the next pages." : ""}${note}</div>`;
+      } else if (emptyFilterTypes.length > 0) {
+        container.innerHTML = `<div class="ms-placeholder">${escapeHtml(describeNoFavorites(emptyFilterTypes, stashdbName))}</div>`;
       } else if (sortField === "TRENDING") {
         // Trending leaves out scenes with no recent activity, so an empty list
         // says nothing about the rest of the catalogue
@@ -852,6 +856,7 @@
       isComplete = false;
       missingScenes = [];
       currentWarning = null;
+      emptyFilterTypes = [];
       // The note waits for this search's answer (the endpoint may have changed)
       fingerprintInfo = null;
       ownedByFingerprint = 0;
@@ -902,6 +907,7 @@
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
       stashdbName = result.stashdb_name || stashdbName;
       activeFilterTagIds = result.active_filter_tag_ids || [];
+      emptyFilterTypes = result.empty_filter_types || [];
       fingerprintInfo = fingerprintFields(result);
       ownedByFingerprint += Number(result.owned_by_fingerprint) || 0;
 
@@ -929,6 +935,8 @@
         setStatus(sortField === "TRENDING" ? `${statusText}. ${TRENDING_NOTE}` : statusText, "success");
       } else if (!isComplete) {
         setStatus(NOT_FOUND_YET);
+      } else if (emptyFilterTypes.length > 0) {
+        setStatus(describeNoFavorites(emptyFilterTypes, stashdbName));
       } else if (sortField === "TRENDING") {
         setStatus(`No missing scenes are trending. ${TRENDING_NOTE}`);
       } else {

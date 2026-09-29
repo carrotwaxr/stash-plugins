@@ -171,6 +171,20 @@
     };
   }
 
+  // Trending is stash-box's recent-activity ordering, so an empty list says little
+  const TRENDING_NOTE = "Trending only includes scenes with activity on the stash-box in the last 7 days.";
+
+  /**
+   * Text for a response whose favorites filter has nothing to match: the user has no
+   * favorites of these types (empty_filter_types) linked to the box. Plain text; "" for none.
+   */
+  function describeNoFavorites(types, boxName) {
+    const list = (types || []).filter(Boolean).map(String);
+    if (list.length === 0) return "";
+    const joined = list.length > 1 ? `${list.slice(0, -1).join(", ")} or ${list[list.length - 1]}` : list[0];
+    return `You have no favorite ${joined} linked to ${boxName || "this stash-box"}, so this filter matches no scenes.`;
+  }
+
   /**
    * Direction options for a sort, shared by the modal and the browse page. Dates read
    * Newest/Oldest, Title reads Descending/Ascending. stash-box orders TRENDING by recent
@@ -549,6 +563,8 @@
     describeFingerprintBuild,
     fingerprintFields,
     directionFor,
+    describeNoFavorites,
+    TRENDING_NOTE,
     escapeHtml,
     formatDate,
     formatDuration,
@@ -576,6 +592,8 @@
       describeFingerprintBuild,
       fingerprintFields,
       directionFor,
+      describeNoFavorites,
+      TRENDING_NOTE,
       escapeHtml,
       formatDate,
       formatDuration,
