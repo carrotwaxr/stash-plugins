@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest something a plugin should do
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: plugin
+    attributes:
+      label: Plugin
+      options:
+        - mcMetadata
+        - Missing Scenes
+        - Performer Image Search
+        - Scene Matcher
+        - Studio Manager
+        - Tag Manager
+        - A new plugin
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The task or problem, before any particular solution
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?

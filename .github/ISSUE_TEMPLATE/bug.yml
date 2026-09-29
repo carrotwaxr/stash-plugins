@@ -1,0 +1,49 @@
+name: Bug report
+description: Something in a plugin doesn't work
+labels: [bug]
+body:
+  - type: dropdown
+    id: plugin
+    attributes:
+      label: Plugin
+      options:
+        - mcMetadata
+        - Missing Scenes
+        - Performer Image Search
+        - Scene Matcher
+        - Studio Manager
+        - Tag Manager
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: Shown under Settings → Plugins, for example 1.4.1-f31d773
+    validations:
+      required: true
+  - type: input
+    id: stash-version
+    attributes:
+      label: Stash version
+      description: Shown under Settings → About
+    validations:
+      required: true
+  - type: input
+    id: endpoint
+    attributes:
+      label: Stash-box endpoint
+      description: Which stash-box the plugin was using, if any (StashDB, FansDB, ThePornDB...)
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines
+      description: From Settings → Logs, with the log level at Debug. Remove API keys and anything else private.
+      render: text
