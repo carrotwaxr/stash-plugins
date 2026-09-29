@@ -470,6 +470,37 @@ test("leaving while a save runs says the changes are being saved", async () => {
   await saving;
 });
 
+test("after a drop, a drop from outside the page queues nothing", async () => {
+  const env = setup([["1"], ["2"], ["3"], ["4", "1"]]);
+  const { sm, container } = env;
+  mount(env);
+  await sm.settle();
+  const fire = (type, target) => container.listeners[type][0]({
+    target, preventDefault() {}, dataTransfer: { setData() {}, effectAllowed: "" },
+  });
+  const onNode = (id) => tgt({ ".sh-node": nodeEl(id) });
+  const onZone = () => tgt({ "#sh-root-drop-zone": createQueryableElement("div") });
+  const changes = () => plain(sm.getState().pendingChanges.map((c) => [c.studioId, c.parentId]));
+
+  // A drop re-renders the tree, detaching the dragged node: its dragend never reaches the page
+  fire("dragstart", onNode("1"));
+  fire("drop", onNode("2"));
+  assert.deepStrictEqual(changes(), [["1", "2"]]);
+  const toasts = toastTexts(sm).length;
+  fire("drop", onNode("3")); // a file or text dragged in from outside
+  fire("drop", onZone());
+  assert.deepStrictEqual(changes(), [["1", "2"]], "outside drops after a node drop");
+  assert.strictEqual(toastTexts(sm).length, toasts, "no toast");
+
+  fire("dragstart", onNode("4"));
+  fire("drop", onZone());
+  assert.deepStrictEqual(changes(), [["1", "2"], ["4", null]]);
+  fire("drop", onNode("3"));
+  fire("drop", onZone());
+  assert.deepStrictEqual(changes(), [["1", "2"], ["4", null]], "outside drops after a root-zone drop");
+  assert.strictEqual(toastTexts(sm).length, toasts + 1, "only the root-zone drop's own toast");
+});
+
 test("title timeouts are cleared on unmount", async () => {
   const env = setup([["1"]]);
   const { sm } = env;

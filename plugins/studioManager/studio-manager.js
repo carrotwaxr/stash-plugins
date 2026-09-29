@@ -1101,8 +1101,8 @@
   }
 
   function clearDragMarks(container) {
-    container.querySelectorAll('.drag-over, .drag-invalid').forEach(n => {
-      n.classList.remove('drag-over', 'drag-invalid');
+    container.querySelectorAll('.drag-over, .drag-invalid, .dragging').forEach(n => {
+      n.classList.remove('drag-over', 'drag-invalid', 'dragging');
     });
   }
 
@@ -1235,24 +1235,27 @@
 
       drop(e) {
         const zone = closestFrom(e, '#sh-root-drop-zone');
+        const node = zone ? null : closestFrom(e, '.sh-node');
+        if (!zone && !node) return;
+        e.preventDefault();
+        // End the drag here: the re-render below detaches the dragged node, so its
+        // dragend never reaches this container. No id means the drag came from
+        // outside the page (a file or text): ignore it.
+        const draggedId = draggedStudioId;
+        draggedStudioId = null;
+        clearDragMarks(container);
+        if (!draggedId) return;
         if (zone) {
-          e.preventDefault();
-          zone.classList.remove('drag-over');
-          if (draggedStudioId) removeParent(draggedStudioId);
+          removeParent(draggedId);
           return;
         }
-        const node = closestFrom(e, '.sh-node');
-        if (!node) return;
-        e.preventDefault();
-        node.classList.remove('drag-over', 'drag-invalid');
-        if (!draggedStudioId || node.dataset.studioId === draggedStudioId) return;
-
         const targetId = node.dataset.studioId;
-        if (wouldCreateCircularRef(targetId, draggedStudioId)) {
+        if (targetId === draggedId) return;
+        if (wouldCreateCircularRef(targetId, draggedId)) {
           showToast('Cannot create circular reference', 'error');
           return;
         }
-        setParent(draggedStudioId, targetId);
+        setParent(draggedId, targetId);
       },
     };
 
