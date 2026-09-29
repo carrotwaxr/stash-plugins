@@ -14,6 +14,7 @@
   let pendingChanges = [];
   let isEditMode = false;
   let originalParentMap = new Map();
+  let isSaving = false;       // a save is running: editing is locked
 
   // Drag state
   let draggedStudioId = null;
@@ -434,7 +435,7 @@
 
     const toast = document.createElement('div');
     toast.className = `sh-toast ${type}`;
-    toast.textContent = message;
+    toast.textContent = message; // .sh-toast is white-space: pre-line
     container.appendChild(toast);
 
     setTimeout(() => {
@@ -615,6 +616,7 @@
    * Leave edit mode and forget pending changes (no refetch: the server state is intact)
    */
   function cancelPendingChanges() {
+    if (isSaving) return;
     pendingChanges = [];
     isEditMode = false;
     originalParentMap.clear();
@@ -626,6 +628,7 @@
    * Remove a pending change by index; the others stay applied
    */
   function removePendingChange(index) {
+    if (isSaving) return;
     pendingChanges.splice(index, 1);
     if (pendingChanges.length === 0) {
       isEditMode = false;
@@ -658,9 +661,9 @@
         : `Remove parent from "${escapeHtml(change.studioName)}"`;
 
       return `
-        <div class="sh-change-item">
-          <span class="sh-change-text">${text}</span>
-          <button class="sh-change-remove" data-index="${index}">&times;</button>
+        <div class="sh-change-item${change.error ? ' sh-change-failed' : ''}">
+          <span class="sh-change-text">${text}${change.error ? `<span class="sh-change-error">${escapeHtml(change.error)}</span>` : ''}</span>
+          <button class="sh-change-remove" data-index="${index}" ${isSaving ? 'disabled' : ''}>&times;</button>
         </div>
       `;
     }).join('');
@@ -673,8 +676,8 @@
         ${changesHtml}
       </div>
       <div class="sh-changes-actions">
-        <button class="btn btn-secondary" id="sh-cancel-changes">Cancel</button>
-        <button class="btn btn-primary" id="sh-save-changes">Save Changes</button>
+        <button class="btn btn-secondary" id="sh-cancel-changes" ${isSaving ? 'disabled' : ''}>Cancel</button>
+        <button class="btn btn-primary" id="sh-save-changes" ${isSaving ? 'disabled' : ''}>${isSaving ? 'Saving…' : 'Save Changes'}</button>
       </div>
     `;
 
@@ -693,59 +696,78 @@
   }
 
   /**
-   * Save all pending changes to server
+   * Save pending changes in a safe order (see orderForSave). Editing is locked
+   * meanwhile. Failed changes stay pending with their error; the data is then
+   * refetched and the failures re-applied on top of it.
    */
   async function savePendingChanges() {
-    if (pendingChanges.length === 0) return;
-
-    const saveBtn = document.querySelector('#sh-save-changes');
-    if (saveBtn) {
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Saving...';
-    }
-
-    const errors = [];
-
-    for (const change of pendingChanges) {
-      try {
-        const parentId = change.type === 'set-parent' ? change.parentId : null;
-        await updateStudioParent(change.studioId, parentId);
-      } catch (err) {
-        errors.push(`Failed to update "${change.studioName}": ${err.message}`);
-      }
-    }
-
-    if (errors.length > 0) {
-      showToast(`Some changes failed:\n${errors.join('\n')}`, 'error', 5000);
-    } else {
-      showToast(`Saved ${pendingChanges.length} change${pendingChanges.length !== 1 ? 's' : ''}`, 'success');
-    }
-
-    // Reset state
-    pendingChanges = [];
-    isEditMode = false;
-    originalParentMap.clear();
+    if (isSaving || pendingChanges.length === 0) return;
+    isSaving = true;
     renderChangesPanel();
 
-    // Reload data
-    const container = document.querySelector('.studio-hierarchy-container');
-    if (container) {
-      reloadHierarchy(container);
+    const total = pendingChanges.length;
+    const failed = [];
+    let saved = 0;
+    try {
+      // Parent map as the server evolves while we save
+      const running = new Map(baseParentMap());
+      for (const change of orderForSave(pendingChanges, running)) {
+        delete change.error;
+        const parentId = change.type === 'set-parent' ? change.parentId : null;
+        if (parentId && wouldCreateCycle(change.studioId, parentId, running)) {
+          change.error = 'Parent chain contains a cycle; fix that first';
+          failed.push(change);
+          continue;
+        }
+        try {
+          await updateStudioParent(change.studioId, parentId);
+          running.set(change.studioId, parentId);
+          saved++;
+        } catch (err) {
+          change.error = err.message || String(err);
+          failed.push(change);
+        }
+      }
+
+      if (failed.length === 0) {
+        showToast(`${saved} saved`, 'success');
+      } else {
+        const lines = failed.map(c => `"${c.studioName}": ${c.error}`);
+        showToast(`${saved} saved, ${failed.length} failed\n${lines.join('\n')}`, 'error', 8000);
+      }
+
+      pendingChanges = pendingChanges.filter(c => failed.includes(c));
+      const reloaded = await reloadHierarchy();
+      if (!reloaded) {
+        // Keep the view consistent without a refetch: successes become the baseline
+        originalParentMap = running;
+      }
+      if (pendingChanges.length === 0) {
+        isEditMode = false;
+        originalParentMap.clear();
+      }
+    } finally {
+      isSaving = false;
+      renderChangesPanel();
+      refreshView();
     }
   }
 
   /**
-   * Reload hierarchy data and re-render
+   * Refetch the studios and re-snapshot the baseline from them. Returns false
+   * (after showing an error) when the fetch fails, leaving state untouched.
    */
-  async function reloadHierarchy(container) {
+  async function reloadHierarchy() {
     try {
-      hierarchyStudios = await fetchAllStudiosWithHierarchy();
-      hierarchyTree = buildStudioTree(hierarchyStudios);
-      hierarchyStats = getTreeStats(hierarchyStudios);
-      renderHierarchyPage(container);
+      const studios = await fetchAllStudiosWithHierarchy();
+      hierarchyStudios = studios;
+      originalParentMap = new Map();
+      for (const s of studios) originalParentMap.set(s.id, s.parent_studio?.id || null);
+      return true;
     } catch (e) {
       console.error('[studioManager] Failed to reload hierarchy:', e);
-      showToast('Failed to reload hierarchy', 'error');
+      showToast('Failed to reload hierarchy; pending changes were kept', 'error');
+      return false;
     }
   }
 
@@ -753,6 +775,7 @@
    * Set a studio's parent (queue as pending change)
    */
   function setParent(studioId, newParentId) {
+    if (isSaving) return;
     if (studioId === newParentId) {
       showToast('Cannot set studio as its own parent', 'error');
       return;
@@ -784,6 +807,7 @@
    * Remove a studio's parent (make it a root studio)
    */
   function removeParent(studioId) {
+    if (isSaving) return;
     const studio = derivedStudios().find(s => s.id === studioId);
 
     if (!studio) {
@@ -1270,7 +1294,7 @@
     window.__STUDIO_MANAGER_TEST__.exports = {
       effectiveParentMap, ancestorsOf, wouldCreateCycle, findCycleMembers,
       buildStudioTree, orderForSave, wouldCreateCircularRef, getTreeStats,
-      derivedStudios, addPendingChange, removePendingChange, cancelPendingChanges,
+      derivedStudios, savePendingChanges, reloadHierarchy, addPendingChange, removePendingChange, cancelPendingChanges,
       setParent, removeParent, renderChangesPanel, showContextMenu,
     };
     window.__STUDIO_MANAGER_TEST__.getState = () => ({

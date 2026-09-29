@@ -363,6 +363,7 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   animation: sh-toast-in 0.3s ease;
   max-width: 350px;
+  white-space: pre-line;
 }
 
 .sh-toast.success {
@@ -438,6 +439,17 @@
 .sh-change-text {
   flex: 1;
   font-size: 0.9rem;
+}
+
+.sh-change-failed {
+  border-left: 3px solid var(--bs-danger, #dc3545);
+}
+
+.sh-change-error {
+  display: block;
+  color: var(--bs-danger, #dc3545);
+  font-size: 0.8rem;
+  margin-top: 2px;
 }
 
 .sh-change-remove {
