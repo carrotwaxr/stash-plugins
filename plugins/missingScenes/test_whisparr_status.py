@@ -53,7 +53,7 @@ def whisparr_request(endpoint, method="GET", payload=None):
         return json.loads(response.read().decode("utf-8"))
 
 
-def test_get_all_scenes():
+def fetch_all_scenes():
     """Test fetching all scenes from Whisparr."""
     print("\n=== Testing whisparr_get_all_scenes ===")
 
@@ -73,7 +73,7 @@ def test_get_all_scenes():
     return scenes
 
 
-def test_get_queue():
+def fetch_queue():
     """Test fetching download queue from Whisparr."""
     print("\n=== Testing whisparr_get_queue ===")
 
@@ -96,7 +96,7 @@ def test_get_queue():
     return records
 
 
-def test_build_status_map():
+def build_status_map():
     """Test building the full status map."""
     print("\n=== Testing whisparr_get_status_map ===")
 
@@ -210,11 +210,11 @@ def main():
 
     try:
         # Test individual components
-        scenes = test_get_all_scenes()
-        queue = test_get_queue()
+        fetch_all_scenes()
+        fetch_queue()
 
         # Test the full status map
-        status_map = test_build_status_map()
+        status_map = build_status_map()
 
         print("\n" + "=" * 50)
         print("All tests passed!")
