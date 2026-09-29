@@ -818,6 +818,8 @@ def search_javdatabase(name, max_results=100, max_pages=5, deadline=None):
 
 
 DDG_RETRY_WAIT_SECONDS = 2
+# The retry is skipped unless this much of the budget is left: the wait, and time for its requests
+DDG_RETRY_MIN_SECONDS_LEFT = DDG_RETRY_WAIT_SECONDS + 3
 DDG_RATE_LIMITED = "DuckDuckGo rate-limited this search; try again later"
 
 # DDG wants these on top of the shared HEADERS to avoid 403
@@ -837,11 +839,21 @@ DDG_VQD_PATTERNS = (
 )
 
 
+def _duckduckgo_fetch(url, deadline, headers):
+    """_fetch, with DDG's HTTP 202 (its rate-limit answer) raised as SourceBlocked."""
+    try:
+        return _fetch(url, deadline, headers)
+    except SourceHTTPError as e:
+        if e.status == 202:
+            raise SourceBlocked("duckduckgo.com is rate-limiting (HTTP 202)") from None
+        raise
+
+
 def _duckduckgo_images_once(query, size, layout, deadline):
     """One attempt: get a vqd token, then the image API's results (a list of dicts).
 
-    Raises SourceBlocked on a 403 or 429, a page without a token or a reply that is
-    not JSON; those are how DDG turns away a search it is rate-limiting. The JSON
+    Raises SourceBlocked on a 202, 403 or 429, a page without a token or a reply that
+    is not JSON; those are how DDG turns away a search it is rate-limiting. The JSON
     itself is never scanned for block pages: _fetch returns any 200 reply as it is.
     """
     search_params = urllib.parse.urlencode({
@@ -854,7 +866,7 @@ def _duckduckgo_images_once(query, size, layout, deadline):
     search_url = f"https://duckduckgo.com/?{search_params}"
 
     log.LogDebug("[DuckDuckGo] Getting vqd token...")
-    html = _fetch(search_url, deadline, DDG_HEADERS)
+    html = _duckduckgo_fetch(search_url, deadline, DDG_HEADERS)
 
     vqd = None
     for pattern in DDG_VQD_PATTERNS:
@@ -891,7 +903,7 @@ def _duckduckgo_images_once(query, size, layout, deadline):
         "X-Requested-With": "XMLHttpRequest",
     }
     log.LogDebug("[DuckDuckGo] Fetching images from API...")
-    data = _fetch(api_url, deadline, api_headers)
+    data = _duckduckgo_fetch(api_url, deadline, api_headers)
 
     try:
         images = json.loads(data).get("results", [])
@@ -906,7 +918,9 @@ def search_duckduckgo_images(query, size="Large", layout="All", max_results=50, 
     Search DuckDuckGo Images with safe search off.
     DDG requires a two-step process: get a vqd token, then query /i.js.
     A blocked attempt is retried once, with a fresh token, after
-    DDG_RETRY_WAIT_SECONDS; a second one raises SourceBlocked.
+    DDG_RETRY_WAIT_SECONDS; a second one raises SourceBlocked. With less than
+    DDG_RETRY_MIN_SECONDS_LEFT of the deadline left there is no retry: the
+    first block raises SourceBlocked at once.
     """
     deadline = _default_deadline(deadline)
     log.LogDebug(f"[DuckDuckGo] Query: {query}, size: {size}, layout: {layout}")
@@ -914,6 +928,10 @@ def search_duckduckgo_images(query, size="Large", layout="All", max_results=50, 
     try:
         images = _duckduckgo_images_once(query, size, layout, deadline)
     except SourceBlocked as first:
+        left = deadline - _now()
+        if left < DDG_RETRY_MIN_SECONDS_LEFT:
+            log.LogWarning(f"[DuckDuckGo] {first}; {max(left, 0):.1f}s left, too little to retry")
+            raise SourceBlocked(DDG_RATE_LIMITED) from None
         log.LogWarning(f"[DuckDuckGo] {first}; retrying in {DDG_RETRY_WAIT_SECONDS}s")
         time.sleep(DDG_RETRY_WAIT_SECONDS)
         try:

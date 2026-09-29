@@ -88,7 +88,7 @@ Each enabled source shows a chip above the results. Hover over a chip to see the
 
 Each source gets 25 seconds on the server. Gallery pages are fetched in parallel. The browser gives up on a source after 45 seconds.
 
-DuckDuckGo retries once when it is blocked. If the retry is blocked too, it reports that it is rate-limited.
+DuckDuckGo retries once when it is blocked, if at least 5 of its 25 seconds are left. If the retry is blocked too, or there is no time for one, it reports that it is rate-limited.
 
 ## Network requirements
 

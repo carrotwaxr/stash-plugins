@@ -818,6 +818,92 @@ def test_duckduckgo_does_not_retry_a_timeout(web, sleeps):
     assert ddg_kinds(web) == ["token"]
 
 
+class Clock:
+    """A fake _now: requests and sleeps move it forward."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(web, monkeypatch):
+    """A fake clock, and a fake _fetch that runs out of time at the deadline as the real one does."""
+    fake = Clock()
+    monkeypatch.setattr(image_search, "_now", fake)
+    monkeypatch.setattr(image_search.time, "sleep", fake.sleep)
+
+    def fetch(url, deadline, headers=None):
+        if fake() >= deadline:
+            raise SourceTimeout(f"Ran out of time before fetching {image_search._host(url)}")
+        return web(url, deadline, headers)
+
+    monkeypatch.setattr(image_search, "_fetch", fetch)
+    return fake
+
+
+def slow_block(clock, seconds):
+    """A token page that takes this long to answer, without a token."""
+    def page():
+        clock.now += seconds
+        return "<html>Sorry</html>"
+    return page
+
+
+def test_duckduckgo_block_late_in_the_budget_is_rate_limited_not_a_timeout(web, clock):
+    # Blocked with 1 s of the budget left: waiting 2 s to retry would only run out of time
+    ddg_sequence(web, [slow_block(clock, 24), fixture("duckduckgo_vqd.html")], [fixture("duckduckgo.json")])
+    deadline = clock() + image_search.SOURCE_BUDGET_SECONDS
+    outcome = image_search.search_single_source("duckduckgo", NAME, "Jane Example pornstar")
+    assert outcome == {"results": [], "status": "blocked", "error": RATE_LIMITED}
+    assert clock.sleeps == []
+    assert ddg_kinds(web) == ["token"]
+    assert clock() <= deadline
+
+
+@pytest.mark.parametrize("taken,retried", [(19, True), (21, False)])
+def test_duckduckgo_retries_only_with_time_for_the_wait_and_a_search(web, clock, taken, retried):
+    # A retry needs the 2 s wait plus 3 s for its requests: 6 s left is enough, 4 s is not
+    ddg_sequence(web, [slow_block(clock, taken), fixture("duckduckgo_vqd.html")], [fixture("duckduckgo.json")])
+    outcome = image_search.search_single_source("duckduckgo", NAME, "Jane Example pornstar")
+    if retried:
+        assert outcome["status"] == "ok" and len(outcome["results"]) == 2
+        assert clock.sleeps == [2]
+    else:
+        assert outcome["status"] == "blocked" and outcome["error"] == RATE_LIMITED
+        assert clock.sleeps == []
+
+
+def test_duckduckgo_http_202_is_rate_limiting_and_retried(web, sleeps):
+    ddg_sequence(web, [fixture("duckduckgo_vqd.html")],
+                 [SourceHTTPError(202, "https://duckduckgo.com/i.js"), fixture("duckduckgo.json")])
+    assert len(image_search.search_duckduckgo_images("Jane Example pornstar")) == 2
+    assert sleeps == [2]
+    assert ddg_kinds(web) == ["token", "api", "token", "api"]
+
+
+def test_duckduckgo_a_second_202_is_rate_limited(urlopen, sleeps):
+    def route(url):
+        if url.startswith("https://duckduckgo.com/i.js?"):
+            return FakeResponse(b"", status=202)
+        if url.startswith("https://duckduckgo.com/?"):
+            return FakeResponse(fixture("duckduckgo_vqd.html").encode())
+        return http_error(404)
+
+    urlopen.outcome = route
+    outcome = image_search.search_single_source("duckduckgo", NAME, "Jane Example pornstar")
+    assert outcome == {"results": [], "status": "blocked", "error": RATE_LIMITED}
+    assert sleeps == [2]
+    assert len(urlopen.calls) == 4
+
+
 def test_duckduckgo_unreadable_reply_is_blocked_not_scraped(web, sleeps):
     ddg_routes(web, api="<html>not json \"image\":\"https://x.example/a.jpg\"</html>")
     with pytest.raises(SourceBlocked, match=RATE_LIMITED):
