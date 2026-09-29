@@ -98,6 +98,16 @@ Manage studio hierarchy with visual tree editing. View and edit parent-child stu
 - **Issues**: [GitHub Issues](https://github.com/carrotwaxr/stash-plugins/issues)
 - **Community**: [Stash Discord](https://discord.gg/stashapp) | [Stash Discourse](https://discourse.stashapp.cc/)
 
+## Publishing
+
+Every push to `main` publishes. The Deploy workflow runs the tests, then `build_site.sh` builds the plugin index and zips and publishes them to GitHub Pages.
+
+- Zips are built from the committed tree and hold only runtime files. Tests, samples and `.env` files stay in the repo.
+- A plugin's index version is `<manifest version>-<sha>`, where the sha is the last commit that changed a shipped file. Test-only commits don't offer users an update.
+- The zips are reproducible, so rebuilding the same commit produces the same sha256.
+
+To preview a build locally: `./build_site.sh /tmp/site`.
+
 ## License
 
 MIT License
