@@ -1,8 +1,6 @@
 (function () {
   "use strict";
 
-  const PLUGIN_ID = "missingScenes";
-
   // Use shared core module
   const Core = window.MissingScenesCore;
   const {
@@ -359,23 +357,17 @@
     // Check if filters are active
     const filtersActive = data.filters_active || false;
 
-    // Handle both legacy (missing_count) and paginated (missing_count_estimate/loaded) responses
+    // Paginated response: complete, estimated, or just the loaded count
     let missingDisplay;
-    if (data.is_complete !== undefined) {
-      // Paginated response
-      const estimate = data.missing_count_estimate;
-      const loaded = missingScenes.length;
-      if (data.is_complete) {
-        missingDisplay = `${loaded}`;
-      } else if (estimate !== null) {
-        missingDisplay = `~${estimate} (${loaded} loaded)`;
-      } else {
-        // When filters are active or no estimate, just show loaded count
-        missingDisplay = `${loaded} loaded`;
-      }
+    const estimate = data.missing_count_estimate;
+    const loaded = missingScenes.length;
+    if (data.is_complete) {
+      missingDisplay = `${loaded}`;
+    } else if (estimate !== null && estimate !== undefined) {
+      missingDisplay = `~${estimate} (${loaded} loaded)`;
     } else {
-      // Legacy response
-      missingDisplay = `${data.missing_count || 0}`;
+      // When filters are active or no estimate, just show loaded count
+      missingDisplay = `${loaded} loaded`;
     }
 
     // Build stats HTML - when filters are active, indicate filtered results

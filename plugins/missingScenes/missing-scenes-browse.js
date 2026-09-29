@@ -1,7 +1,6 @@
 (function () {
   "use strict";
 
-  const PLUGIN_ID = "missingScenes";
   const BROWSE_PATH = "/plugins/missing-scenes";
 
   // Use shared core module

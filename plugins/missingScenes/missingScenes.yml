@@ -70,14 +70,6 @@ settings:
     displayName: Max Retries
     description: Number of times to retry failed StashDB requests (for 504, 503, connection errors). Default is 3.
     type: NUMBER
-  stashbox_max_pages_performer:
-    displayName: Max Pages (Performer)
-    description: Maximum pages to fetch when querying performer scenes (100 scenes per page). Default is 25 (2500 scenes max). Reduce for faster results.
-    type: NUMBER
-  stashbox_max_pages_studio:
-    displayName: Max Pages (Studio)
-    description: Maximum pages to fetch when querying studio scenes (100 scenes per page). Default is 25 (2500 scenes max). Reduce for faster results.
-    type: NUMBER
 
   # Content filtering
   excludedTags:

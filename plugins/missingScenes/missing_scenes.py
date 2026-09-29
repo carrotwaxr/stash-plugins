@@ -651,63 +651,6 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
 
 
 # ============================================================================
-# StashDB API (using resilient stashbox_api module)
-# ============================================================================
-
-def query_stashdb_performer_scenes(stashdb_url, api_key, performer_stash_id, plugin_settings=None):
-    """Query StashDB/TPDB for all scenes featuring a performer."""
-    if theporndb_api.is_theporndb(stashdb_url):
-        return _tpdb_fetch_all_pages(api_key, "performer", performer_stash_id, plugin_settings)
-    return stashbox_api.query_scenes_by_performer(
-        stashdb_url, api_key, performer_stash_id,
-        plugin_settings=plugin_settings
-    )
-
-
-def query_stashdb_studio_scenes(stashdb_url, api_key, studio_stash_id, plugin_settings=None):
-    """Query StashDB/TPDB for all scenes from a studio."""
-    if theporndb_api.is_theporndb(stashdb_url):
-        return _tpdb_fetch_all_pages(api_key, "studio", studio_stash_id, plugin_settings)
-    return stashbox_api.query_scenes_by_studio(
-        stashdb_url, api_key, studio_stash_id,
-        plugin_settings=plugin_settings
-    )
-
-
-def query_stashdb_tag_scenes(stashdb_url, api_key, tag_stash_id, plugin_settings=None):
-    """Query StashDB/TPDB for all scenes with a tag."""
-    if theporndb_api.is_theporndb(stashdb_url):
-        log.LogInfo("TPDB: Tag-based scene queries are not supported (different taxonomy)")
-        return []
-    return stashbox_api.query_scenes_by_tag(
-        stashdb_url, api_key, tag_stash_id,
-        plugin_settings=plugin_settings
-    )
-
-
-def _tpdb_fetch_all_pages(api_key, entity_type, entity_stash_id, plugin_settings=None):
-    """Fetch all pages of scenes from TPDB for the non-paginated code path."""
-    all_scenes = []
-    page = 1
-    max_pages = stashbox_api.get_config(plugin_settings, "max_pages_performer")
-
-    while page <= max_pages:
-        result = theporndb_api.query_scenes_page(
-            api_key, entity_type, entity_stash_id,
-            page=page, plugin_settings=plugin_settings
-        )
-        if not result or not result["scenes"]:
-            break
-        all_scenes.extend(result["scenes"])
-        if not result["has_more"]:
-            break
-        page += 1
-
-    log.LogInfo(f"TPDB: Fetched {len(all_scenes)} scenes for {entity_type}")
-    return all_scenes
-
-
-# ============================================================================
 # Whisparr API (v3 - Compatible with Stasharr approach)
 # ============================================================================
 
@@ -884,33 +827,6 @@ def whisparr_get_all_scenes(whisparr_url, api_key):
     except Exception as e:
         log.LogWarning(f"Error fetching Whisparr scenes: {e}")
         return []
-
-
-def whisparr_get_existing_stash_ids(whisparr_url, api_key):
-    """Get all StashDB IDs for scenes already in Whisparr.
-
-    Scenes in Whisparr have a foreignId field formatted as "stash:{uuid}".
-
-    Returns:
-        Set of StashDB scene IDs
-    """
-    stash_ids = set()
-
-    try:
-        scenes = whisparr_get_all_scenes(whisparr_url, api_key)
-
-        for scene in scenes:
-            foreign_id = scene.get("foreignId", "")
-            if foreign_id and foreign_id.startswith("stash:"):
-                stash_id = foreign_id.replace("stash:", "")
-                stash_ids.add(stash_id)
-
-        log.LogInfo(f"Found {len(stash_ids)} scenes with StashDB IDs in Whisparr")
-        return stash_ids
-
-    except Exception as e:
-        log.LogWarning(f"Error fetching Whisparr scenes: {e}")
-        return stash_ids
 
 
 def whisparr_get_queue(whisparr_url, api_key):
@@ -1126,8 +1042,6 @@ def get_or_build_cache(endpoint: str) -> set[str]:
         if page * per_page >= total_count:
             break
         page += 1
-
-    build_time_ms = int((time.time() - build_start) * 1000)
 
     # Save to both memory and disk
     _local_stash_id_cache[endpoint] = stash_ids
@@ -1425,159 +1339,6 @@ def fetch_until_full(url, api_key, entity_type, entity_stash_id, local_ids,
 # ============================================================================
 # Main Operations
 # ============================================================================
-
-def find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=None):
-    """
-    Find scenes from StashDB that are not in local Stash.
-
-    Args:
-        entity_type: "performer", "studio", or "tag"
-        entity_id: Local Stash ID of the performer/studio/tag
-        plugin_settings: Plugin configuration from Stash
-        endpoint_override: Optional endpoint URL to use instead of settings
-
-    Returns:
-        Dict with missing scenes and metadata
-    """
-
-    # Get stash-box configuration
-    stashbox_configs = get_stashbox_config()
-    if not stashbox_configs:
-        return {"error": "No stash-box endpoints configured in Stash settings"}
-
-    # Determine which endpoint to use:
-    # 1. endpoint_override from frontend (user selected from dropdown)
-    # 2. stashBoxEndpoint from plugin settings (user's configured preference)
-    # 3. First configured stash-box
-    target_endpoint = endpoint_override or plugin_settings.get("stashBoxEndpoint", "").strip()
-
-    # Find the matching stash-box config
-    stashbox = None
-    if target_endpoint:
-        # User specified an endpoint - find it
-        for config in stashbox_configs:
-            if config["endpoint"] == target_endpoint:
-                stashbox = config
-                break
-        if not stashbox:
-            # Endpoint not found in configured list
-            available = ", ".join([c.get("name", c["endpoint"]) for c in stashbox_configs])
-            return {"error": f"Stash-box endpoint '{target_endpoint}' not found. Available: {available}"}
-    else:
-        # Use the first stash-box (usually StashDB)
-        stashbox = stashbox_configs[0]
-
-    stashdb_url = stashbox["endpoint"]
-    stashdb_api_key = stashbox.get("api_key", "")
-    stashdb_name = stashbox.get("name", "StashDB")
-
-    log.LogInfo(f"Using stash-box: {stashdb_name} ({stashdb_url})")
-
-    # Get the local entity and its stash_id
-    if entity_type == "performer":
-        entity = get_local_performer(entity_id)
-    elif entity_type == "studio":
-        entity = get_local_studio(entity_id)
-    elif entity_type == "tag":
-        entity = get_local_tag(entity_id)
-    else:
-        return {"error": f"Unknown entity type: {entity_type}"}
-
-    if not entity:
-        return {"error": f"{entity_type.title()} not found: {entity_id}"}
-
-    # Find the stash_id for this stash-box endpoint
-    stash_id = None
-    for sid in entity.get("stash_ids", []):
-        if sid.get("endpoint") == stashdb_url:
-            stash_id = sid.get("stash_id")
-            break
-
-    if not stash_id:
-        return {
-            "error": f"{entity_type.title()} '{entity.get('name')}' is not linked to {stashdb_name}. "
-                     f"Please use the Tagger to link this {entity_type} first."
-        }
-
-    log.LogInfo(f"Found {entity_type} '{entity.get('name')}' with StashDB ID: {stash_id}")
-
-    # Query StashDB for all scenes (with retry/rate limit handling)
-    if entity_type == "performer":
-        stashdb_scenes = query_stashdb_performer_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
-    elif entity_type == "studio":
-        stashdb_scenes = query_stashdb_studio_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
-    else:  # tag
-        stashdb_scenes = query_stashdb_tag_scenes(stashdb_url, stashdb_api_key, stash_id, plugin_settings)
-
-    if not stashdb_scenes:
-        return {
-            "entity_name": entity.get("name"),
-            "entity_type": entity_type,
-            "stashdb_name": stashdb_name,
-            "total_on_stashdb": 0,
-            "total_local": 0,
-            "missing_count": 0,
-            "missing_scenes": []
-        }
-
-    # Get all local scene stash_ids
-    log.LogDebug("[find_missing] Getting local scene stash_ids...")
-    local_stash_ids = get_local_scene_stash_ids(stashdb_url)
-    log.LogDebug(f"[find_missing] Got {len(local_stash_ids)} local scene IDs")
-
-    # Also check Whisparr if configured - get full status map
-    whisparr_status_map = {}
-    whisparr_configured = False
-    whisparr_url = plugin_settings.get("whisparrUrl", "")
-    whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
-
-    if whisparr_url and whisparr_api_key:
-        whisparr_configured = True
-        log.LogDebug(f"[find_missing] Whisparr configured at {whisparr_url}, fetching status map...")
-        try:
-            whisparr_status_map = whisparr_get_status_map(whisparr_url, whisparr_api_key)
-            log.LogDebug(f"[find_missing] Got Whisparr status map with {len(whisparr_status_map)} entries")
-        except Exception as e:
-            log.LogWarning(f"Could not fetch Whisparr status: {e}")
-    else:
-        log.LogDebug("[find_missing] Whisparr not configured, skipping")
-
-    # Find missing scenes
-    missing_scenes = []
-    for scene in stashdb_scenes:
-        scene_stash_id = scene.get("id")
-        if scene_stash_id not in local_stash_ids:
-            # Format the scene data
-            formatted = format_scene(scene, scene_stash_id)
-
-            # Add Whisparr status (detailed object or null if not in Whisparr)
-            if scene_stash_id in whisparr_status_map:
-                formatted["whisparr_status"] = whisparr_status_map[scene_stash_id]
-            else:
-                formatted["whisparr_status"] = None
-
-            # Keep in_whisparr for backwards compatibility
-            formatted["in_whisparr"] = scene_stash_id in whisparr_status_map
-
-            missing_scenes.append(formatted)
-
-    # Sort by release date (newest first)
-    missing_scenes.sort(key=lambda s: s.get("release_date") or "", reverse=True)
-
-    log.LogInfo(f"Found {len(missing_scenes)} missing scenes out of {len(stashdb_scenes)} total")
-
-    return {
-        "entity_name": entity.get("name"),
-        "entity_type": entity_type,
-        "stashdb_name": stashdb_name,
-        "stashdb_url": stashdb_url.replace("/graphql", ""),
-        "total_on_stashdb": len(stashdb_scenes),
-        "total_local": len(stashdb_scenes) - len(missing_scenes),
-        "missing_count": len(missing_scenes),
-        "missing_scenes": missing_scenes,
-        "whisparr_configured": whisparr_configured
-    }
-
 
 def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
                                    endpoint_override=None, page_size=PAGE_SIZE_DEFAULT,
@@ -2144,7 +1905,7 @@ def _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, empty_filte
     }
 
 
-def add_to_whisparr(stash_id, title, plugin_settings, studio_name=None):
+def add_to_whisparr(stash_id, title, plugin_settings):
     """Add a scene to Whisparr by its StashDB ID.
 
     Uses the same approach as Stasharr:
@@ -2157,7 +1918,6 @@ def add_to_whisparr(stash_id, title, plugin_settings, studio_name=None):
         stash_id: StashDB scene ID (UUID)
         title: Scene title (for logging/error messages)
         plugin_settings: Plugin configuration from Stash
-        studio_name: Optional studio name (not used in movie-mode API)
     """
     whisparr_url = plugin_settings.get("whisparrUrl", "")
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
@@ -2600,7 +2360,6 @@ def main():
             entity_id = args.get("entity_id", "")
             endpoint = args.get("endpoint")  # Optional endpoint override
 
-            # Check for pagination parameters to decide which function to use
             page_size = args.get("page_size")
             cursor = args.get("cursor")
             sort = args.get("sort", "DATE")
@@ -2613,8 +2372,7 @@ def main():
 
             if not entity_id:
                 output = {"error": "entity_id is required"}
-            elif page_size is not None or cursor is not None:
-                # Use paginated version
+            else:
                 output = find_missing_scenes_paginated(
                     entity_type, entity_id, plugin_settings,
                     endpoint_override=endpoint,
@@ -2626,9 +2384,6 @@ def main():
                     filter_favorite_studios=filter_favorite_studios,
                     filter_favorite_tags=filter_favorite_tags
                 )
-            else:
-                # Backward compatible - use original version
-                output = find_missing_scenes(entity_type, entity_id, plugin_settings, endpoint_override=endpoint)
 
         elif operation == "browse_stashdb":
             endpoint = args.get("endpoint")
