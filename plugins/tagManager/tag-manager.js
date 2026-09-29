@@ -935,13 +935,7 @@
    * @returns {object|null} - The conflicting tag or null
    */
   function findConflictingTag(name, excludeTagId) {
-    const lowerName = name.toLowerCase();
-    return localTags.find(t =>
-      t.id !== excludeTagId && (
-        t.name.toLowerCase() === lowerName ||
-        t.aliases?.some(a => a.toLowerCase() === lowerName)
-      )
-    ) || null;
+    return indexFindByName(getLocalTagIndex(), name, excludeTagId) || null;
   }
 
   /**
@@ -1174,6 +1168,7 @@
     const sourceIdx = localTags.findIndex(t => t.id === sourceId);
     if (sourceIdx >= 0) {
       localTags.splice(sourceIdx, 1);
+      localTagsChanged();
     }
     delete matchResults[sourceId];
   }
@@ -1276,6 +1271,7 @@
       if (destIdx >= 0) {
         localTags[destIdx].stash_ids = values.stash_ids;
         localTags[destIdx].aliases = values.aliases;
+        localTagsChanged();
         if (values.description !== undefined) {
           localTags[destIdx].description = values.description;
         }
@@ -1436,9 +1432,10 @@
    */
   function resolveCategoryParents(selectedIds) {
     const result = {};
+    const stashdbById = new Map((stashdbTags || []).map(t => [t.id, t]));
 
     for (const stashdbId of selectedIds) {
-      const tag = stashdbTags.find(t => t.id === stashdbId);
+      const tag = stashdbById.get(stashdbId);
       if (!tag?.category) continue;
 
       const catName = tag.category.name;
@@ -1729,13 +1726,15 @@
 
   /**
    * Handle importing selected StashDB tags, with optional category parent assignment.
+   * Resolves false if the user cancelled in the category preview, true otherwise.
    * F11: isImporting and the import button are reset in `finally` on every exit
    * path (done, cancelled or thrown); a throw is shown to the user.
    */
   async function handleImportSelected(container) {
-    if (selectedForImport.size === 0) return;
-    if (isImporting) return;
+    if (selectedForImport.size === 0) return true;
+    if (isImporting) return true;
     isImporting = true;
+    importCancelRequested = false;
 
     const statusEl = container.querySelector('.tm-selection-info');
     const btnEl = container.querySelector('#tm-import-selected');
@@ -1751,7 +1750,7 @@
       isImporting = false;
       if (btnEl) btnEl.disabled = selectedForImport.size === 0;
     }
-    if (message === null) return; // cancelled in the category preview
+    if (message === null) return false; // cancelled in the category preview
 
     if (statusEl) statusEl.textContent = message;
     if (failed) showToast(message, 'error');
@@ -1760,6 +1759,37 @@
       renderPage(container);
       refreshLocalTags(); // #124: reconcile with server truth after import
     }, 1500);
+    return true;
+  }
+
+  /**
+   * "Import All Unlinked": select every non-blacklisted, not-yet-linked StashDB
+   * tag and import. Ignored while an import runs (it owns selectedForImport).
+   */
+  async function handleImportAll(container) {
+    if (isImporting) return; // a running import owns selectedForImport
+    const endpoint = selectedStashBox?.endpoint;
+    if (!stashdbTags || !endpoint) return;
+
+    const unlinked = importAllCandidates({ stashdbTags, localTags, endpoint, isBlacklisted });
+
+    if (unlinked.length === 0) {
+      showStatus('All tags are already linked', 'info');
+      return;
+    }
+
+    if (!confirm(`Import ${unlinked.length} unlinked tag${unlinked.length !== 1 ? 's' : ''} from all categories?`)) {
+      return;
+    }
+
+    const previousSelection = selectedForImport;
+    selectedForImport = new Set(unlinked);
+    const started = await handleImportSelected(container);
+    // Cancelled in the category preview: give the user their own selection back.
+    if (started === false) {
+      selectedForImport = previousSelection;
+      renderPage(container);
+    }
   }
 
   /**
@@ -1792,8 +1822,19 @@
       }
     }
 
+    const total = selectedForImport.size;
     if (statusEl) statusEl.textContent = 'Importing...';
     if (btnEl) btnEl.disabled = true;
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-sm btn-secondary';
+    cancelBtn.id = 'tm-import-cancel';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => {
+      requestImportCancel();
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = 'Cancelling...';
+    });
+    if (btnEl?.parentNode) btnEl.parentNode.insertBefore(cancelBtn, btnEl.nextSibling);
 
     let created = 0;
     let linked = 0;
@@ -1813,6 +1854,7 @@
             if (newTag) {
               createdParents[catName] = newTag.id;
               localTags.push({ id: newTag.id, name: newTag.name, aliases: [], stash_ids: [], parents: [] });
+              localTagsChanged();
             }
           } catch (e) {
             console.error(`[tagManager] Failed to create parent tag "${catName}":`, e);
@@ -1838,8 +1880,16 @@
       }
     }
 
+    const stashdbById = new Map(stashdbTags.map(t => [t.id, t]));
+    const processed = new Set();
+    let cancelledAt = -1;
+    let position = 0;
     for (const stashdbId of selectedForImport) {
-      const stashdbTag = stashdbTags.find(t => t.id === stashdbId);
+      if (importCancelRequested) { cancelledAt = position; break; }
+      position++;
+      processed.add(stashdbId);
+      if (statusEl) statusEl.textContent = `Importing ${position} / ${total}`;
+      const stashdbTag = stashdbById.get(stashdbId);
       if (!stashdbTag) continue;
 
       // Resolve parent ID for this tag's category
@@ -1872,6 +1922,7 @@
               endpoint: endpoint,
               stash_id: stashdbId
             }];
+            localTagsChanged();
           }
 
           linked++;
@@ -1932,6 +1983,7 @@
               stash_ids: input.stash_ids,
               parents: parentId ? [{ id: parentId }] : []
             });
+            localTagsChanged();
             created++;
             if (parentId) parented++;
           }
@@ -1950,6 +2002,8 @@
       }
     }
 
+    cancelBtn.remove();
+
     // Save category mappings if requested
     if (remember && resolutions) {
       for (const [catName, info] of Object.entries(resolutions)) {
@@ -1961,7 +2015,11 @@
       await saveCategoryMappings();
     }
 
-    selectedForImport.clear();
+    if (cancelledAt >= 0) {
+      for (const id of processed) selectedForImport.delete(id); // keep the untouched rest selected
+    } else {
+      selectedForImport.clear();
+    }
 
     // #125: resolve any collected alias/name conflicts via the modal. Counts from
     // resolution actions fold into the created/linked totals; resolved/skipped are
@@ -1976,7 +2034,7 @@
       skipped = outcome.skipped;
     }
 
-    return summarizeImportResult({
+    const summary = summarizeImportResult({
       created,
       linked,
       parented,
@@ -1985,6 +2043,7 @@
       skipped,
       errors,
     });
+    return cancelledAt >= 0 ? `Cancelled after ${cancelledAt} of ${total}. ${summary}` : summary;
   }
 
   /**
@@ -2017,6 +2076,7 @@
    * whose conflicts are all gone is offered a plain Import.
    */
   function recheckConflictRows(session) {
+    localTagsChanged(); // tags may have been edited in place since the last lookup (e.g. via an "Open" link)
     for (const row of session.rows.values()) {
       if (!row.done) row.conflicts = detectImportConflicts(row.stashdbTag);
     }
@@ -2120,6 +2180,7 @@
     if (idx >= 0) {
       localTags[idx].aliases = input.aliases;
       localTags[idx].stash_ids = (updated && updated.stash_ids) || input.stash_ids;
+      localTagsChanged();
       if (input.parent_ids) localTags[idx].parents = input.parent_ids.map(id => ({ id }));
     }
     session.outcome.linked++; session.outcome.resolved++;
@@ -2147,6 +2208,7 @@
     }
     if (!created?.id) return { ok: false, message: 'Import failed: the server returned no tag.' };
     localTags.push(localTagFromCreated(created, input));
+    localTagsChanged();
     session.outcome.created++; session.outcome.resolved++;
     let message = 'Imported';
     if (removed.length) message = `Imported without the ${droppedAliasesText(row.conflicts, removed)}`;
@@ -2193,6 +2255,7 @@
       } catch (destroyErr) {
         console.error('[tagManager] could not remove the new tag after a failed merge:', destroyErr);
         localTags.push(localTagFromCreated(created, input)); // it exists on the server
+        localTagsChanged();
         return {
           ok: false,
           localTagsChanged: true,
@@ -2210,6 +2273,7 @@
       aliases: (merged && merged.aliases) || createdLocal.aliases,
       stash_ids: (merged && merged.stash_ids) || createdLocal.stash_ids,
     });
+    localTagsChanged();
     session.outcome.created++; session.outcome.resolved++;
     // Aliases that clashed with OTHER tags were stripped and are not brought back by the merge.
     const otherConflicts = row.conflicts.filter(c => c.conflictingTag.id !== tagId);
@@ -2504,6 +2568,7 @@
           if (idx >= 0) {
             if (needsDescription) localTags[idx].description = stashdbTag.description;
             if (newAliases.length > 0) localTags[idx].aliases = input.aliases;
+            localTagsChanged();
           }
           updated++;
         } catch (e) {
@@ -2548,11 +2613,112 @@
    */
   function findLocalTagByName(name) {
     if (!name) return undefined;
-    const lowerName = name.toLowerCase();
-    return localTags.find(t =>
-      t.name.toLowerCase() === lowerName ||
-      t.aliases?.some(a => a.toLowerCase() === lowerName)
-    );
+    return indexFindByName(getLocalTagIndex(), name);
+  }
+
+  // ---- F10: local tag index -------------------------------------------------
+  // Lookups by name/alias/stash_id were linear scans of localTags (10k+ tags),
+  // repeated per StashDB tag (3k+) on every render and import. The index turns
+  // them into Map lookups with the same semantics as the scans they replace.
+
+  /**
+   * Build lookup maps over local tags.
+   *  byName:  lowercase name or alias -> tags carrying it, in localTags order
+   *  byStash: `endpoint|stash_id` -> first tag having that stash_id
+   */
+  function buildLocalTagIndex(tags) {
+    const byName = new Map();
+    const byStash = new Map();
+    const addName = (value, tag) => {
+      if (typeof value !== 'string' || !value) return;
+      const key = value.toLowerCase();
+      const list = byName.get(key);
+      if (!list) byName.set(key, [tag]);
+      else if (list[list.length - 1] !== tag) list.push(tag);
+    };
+    for (const tag of tags || []) {
+      addName(tag.name, tag);
+      for (const a of tag.aliases || []) addName(a, tag);
+      for (const sid of tag.stash_ids || []) {
+        const key = `${sid.endpoint}|${sid.stash_id}`;
+        if (!byStash.has(key)) byStash.set(key, tag);
+      }
+    }
+    return { byName, byStash };
+  }
+
+  /** First tag whose name or alias equals `name` (case-insensitive), skipping excludeId. */
+  function indexFindByName(index, name, excludeId) {
+    const list = index.byName.get(String(name).toLowerCase());
+    if (!list) return undefined;
+    return excludeId === undefined || excludeId === null
+      ? list[0]
+      : list.find(t => t.id !== excludeId);
+  }
+
+  /** The tag linked to `stashId` for `endpoint`, if any. */
+  function indexFindByStashId(index, endpoint, stashId) {
+    return index.byStash.get(`${endpoint}|${stashId}`);
+  }
+
+  // Invalidation rule: the memoized index is rebuilt when (a) the localTags array
+  // reference changed (reassignment after a fetch), (b) its length changed (a push
+  // or splice, even one that forgot to notify), or (c) localTagsChanged() was
+  // called. In-place edits of a tag's name/aliases/stash_ids keep the array and
+  // its length, so those sites must call localTagsChanged().
+  let _localIndex = null;
+  let _localIndexRef = null;
+  let _localIndexLen = -1;
+  let _localIndexVersion = 0;
+  let _localIndexBuiltVersion = -1;
+
+  function localTagsChanged() {
+    _localIndexVersion++;
+  }
+
+  function getLocalTagIndex() {
+    if (!_localIndex || _localIndexRef !== localTags || _localIndexLen !== localTags.length ||
+        _localIndexBuiltVersion !== _localIndexVersion) {
+      _localIndex = buildLocalTagIndex(localTags);
+      _localIndexRef = localTags;
+      _localIndexLen = localTags.length;
+      _localIndexBuiltVersion = _localIndexVersion;
+    }
+    return _localIndex;
+  }
+
+  /** True if some local tag has this stash_id for this endpoint. */
+  function isLinkedForEndpoint(stashId, endpoint) {
+    return !!endpoint && !!indexFindByStashId(getLocalTagIndex(), endpoint, stashId);
+  }
+
+  /**
+   * StashDB tags to import with "Import All Unlinked": everything except
+   * blacklisted tags and tags already linked (for this endpoint) to a local tag.
+   * Tags that only match a local tag by name stay in: the import links them.
+   * @returns {string[]} StashDB tag ids
+   */
+  function importAllCandidates({ stashdbTags: tags, localTags: locals, endpoint, isBlacklisted: blacklisted }) {
+    const index = buildLocalTagIndex(locals);
+    const skip = blacklisted || (() => false);
+    const ids = [];
+    for (const tag of tags || []) {
+      if (skip(tag.name)) continue;
+      if (indexFindByStashId(index, endpoint, tag.id)) continue;
+      ids.push(tag.id);
+    }
+    return ids;
+  }
+
+  /** Tags on a page that still need a match for `endpoint` (ignores links to other stash-boxes). */
+  function tagsToSearchOnPage(tags, endpoint) {
+    return tags.filter(t => !hasStashIdForEndpoint(t, endpoint));
+  }
+
+  // F10: cancel flag for a running import; checked before each tag.
+  let importCancelRequested = false;
+  function requestImportCancel() {
+    importCancelRequested = true;
   }
 
   /**
@@ -2597,13 +2763,11 @@
     let filteredTags = tags;
     if (browseFilter === 'linked') {
       filteredTags = tags.filter(tag => {
-        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-        return hasStashIdForEndpoint(localMatch, endpoint);
+        return isLinkedForEndpoint(tag.id, endpoint);
       });
     } else if (browseFilter === 'unlinked') {
       filteredTags = tags.filter(tag => {
-        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-        return !hasStashIdForEndpoint(localMatch, endpoint);
+        return !isLinkedForEndpoint(tag.id, endpoint);
       });
     }
 
@@ -2615,10 +2779,7 @@
 
     const rows = tags.map(tag => {
       // Check if linked to THIS endpoint specifically
-      const isLinkedToEndpoint = hasStashIdForEndpoint(
-        localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id)),
-        endpoint
-      );
+      const isLinkedToEndpoint = isLinkedForEndpoint(tag.id, endpoint);
       // Check if tag exists locally by name (for smart import)
       const existsByName = findLocalTagByName(tag.name);
       const canLink = existsByName && !isLinkedToEndpoint;
@@ -2665,13 +2826,11 @@
     let filteredTags = tags;
     if (browseFilter === 'linked') {
       filteredTags = tags.filter(tag => {
-        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-        return hasStashIdForEndpoint(localMatch, endpoint);
+        return isLinkedForEndpoint(tag.id, endpoint);
       });
     } else if (browseFilter === 'unlinked') {
       filteredTags = tags.filter(tag => {
-        const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-        return !hasStashIdForEndpoint(localMatch, endpoint);
+        return !isLinkedForEndpoint(tag.id, endpoint);
       });
     }
 
@@ -2683,10 +2842,7 @@
 
     const rows = tags.map(tag => {
       // Check if linked to THIS endpoint specifically
-      const isLinkedToEndpoint = hasStashIdForEndpoint(
-        localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id)),
-        endpoint
-      );
+      const isLinkedToEndpoint = isLinkedForEndpoint(tag.id, endpoint);
       // Check if tag exists locally by name (for smart import)
       const existsByName = findLocalTagByName(tag.name);
       const canLink = existsByName && !isLinkedToEndpoint;
@@ -3109,31 +3265,7 @@
       // Import All Unlinked button
       const importAllBtn = container.querySelector('#tm-import-all');
       if (importAllBtn) {
-        importAllBtn.addEventListener('click', () => {
-          const endpoint = selectedStashBox?.endpoint;
-          if (!stashdbTags || !endpoint) return;
-
-          // Collect all unlinked StashDB tag IDs
-          const unlinkedIds = new Set();
-          for (const tag of stashdbTags) {
-            const localMatch = localTags.find(t => t.stash_ids?.some(sid => sid.stash_id === tag.id));
-            if (!hasStashIdForEndpoint(localMatch, endpoint)) {
-              unlinkedIds.add(tag.id);
-            }
-          }
-
-          if (unlinkedIds.size === 0) {
-            showStatus('All tags are already linked', 'info');
-            return;
-          }
-
-          if (!confirm(`Import ${unlinkedIds.size} unlinked tag${unlinkedIds.size !== 1 ? 's' : ''} from all categories?`)) {
-            return;
-          }
-
-          selectedForImport = unlinkedIds;
-          handleImportSelected(container);
-        });
+        importAllBtn.addEventListener('click', () => handleImportAll(container));
       }
 
       // Update Linked Tags button
@@ -3270,8 +3402,8 @@
     const startIdx = (currentPage - 1) * settings.pageSize;
     const pageTags = filtered.slice(startIdx, startIdx + settings.pageSize);
 
-    // Only search tags that don't already have StashDB IDs
-    const tagsToSearch = pageTags.filter(t => !t.stash_ids || t.stash_ids.length === 0);
+    // Only search tags that have no ID for the selected stash-box (a link to another one doesn't count)
+    const tagsToSearch = tagsToSearchOnPage(pageTags, selectedStashBox?.endpoint);
 
     if (tagsToSearch.length === 0) {
       showStatus('All tags on this page are already matched', 'info');
@@ -3391,6 +3523,7 @@
           if (!newParent?.id) throw new Error('the server returned no tag');
           createdParent = localTagFromCreated(newParent, { name: categoryName });
           localTags.push(createdParent);
+          localTagsChanged();
           console.debug(`[tagManager] Created parent tag: ${createdParent.name}`);
         } catch (e) {
           console.error('[tagManager] Failed to create parent tag:', e);
@@ -3430,6 +3563,7 @@
       if (updateInput.name) localTags[idx].name = updateInput.name;
       if (updateInput.description !== undefined) localTags[idx].description = updateInput.description;
       if (updateInput.aliases) localTags[idx].aliases = updateInput.aliases;
+      localTagsChanged();
     }
     delete matchResults[tag.id];
 
@@ -5930,6 +6064,15 @@
       recheckConflictRows,
       conflictRowHtml,
       handleImportSelected,
+      buildLocalTagIndex,
+      importAllCandidates,
+      tagsToSearchOnPage,
+      requestImportCancel,
+      findLocalTagByName,
+      findConflictingTag,
+      handleImportAll,
+      hasStashIdForEndpoint,
+      importSelectedTags,
       handleUpdateLinkedTags,
       showDiffDialog,
       applyDiff,
