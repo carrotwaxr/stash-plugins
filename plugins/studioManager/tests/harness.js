@@ -148,8 +148,15 @@ function loadStudioManager({ fetchResponses = {}, base = "/", pathname = "/", co
     getElementById: () => null,
     createElement,
     createElementNS: (ns, tag) => createElement(tag),
-    addEventListener() { listenerCounts.add++; },
-    removeEventListener() { listenerCounts.remove++; },
+    listeners: {},
+    addEventListener(type, fn) {
+      listenerCounts.add++;
+      (document.listeners[type] = document.listeners[type] || []).push(fn);
+    },
+    removeEventListener(type, fn) {
+      listenerCounts.remove++;
+      document.listeners[type] = (document.listeners[type] || []).filter((f) => f !== fn);
+    },
     listenerCounts,
   };
   // location: pushState moves it silently; direct href/assign/replace is recorded.
@@ -180,16 +187,19 @@ function loadStudioManager({ fetchResponses = {}, base = "/", pathname = "/", co
     },
   };
 
+  const confirmCalls = [];
   const window = {
     __STUDIO_MANAGER_TEST__: {},
     location,
     history,
     dispatchEvent: (evt) => { dispatchedEvents.push(evt); return true; },
+    listeners: {},
+    addEventListener(type, fn) { (window.listeners[type] = window.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { window.listeners[type] = (window.listeners[type] || []).filter((f) => f !== fn); },
     innerWidth: 1280,
     innerHeight: 800,
-    confirm,
+    confirm: (msg) => { confirmCalls.push(String(msg)); return confirm(msg); },
   };
-  const confirmCalls = [];
 
   class PopStateEvent {
     constructor(type, init = {}) { this.type = type; this.state = init.state === undefined ? null : init.state; }
@@ -238,7 +248,7 @@ function loadStudioManager({ fetchResponses = {}, base = "/", pathname = "/", co
     CSS: { escape: (s) => String(s).replace(/[^\w-]/g, (c) => "\\" + c) },
     URL,
     alert() {},
-    confirm: (msg) => { confirmCalls.push(String(msg)); return !!window.confirm(msg); },
+    confirm: (msg) => !!window.confirm(msg),
   });
   window.window = window;
 
