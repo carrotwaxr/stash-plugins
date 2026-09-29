@@ -14,15 +14,14 @@ Called via runPluginOperation from JavaScript UI.
 import hashlib
 import json
 import os
-import ssl
 import sys
 import time
-import urllib.request
 
 import log
 from stashdb_api import search_tags_by_name, query_all_tags
 from matcher import TagMatcher, load_synonyms
 from blacklist import Blacklist
+from stash_client import LocalStash, StashError
 
 # Plugin ID must match yml
 PLUGIN_ID = "tagManager"
@@ -243,44 +242,6 @@ def resolve_sync_dry_run(stash_config):
         return plugin_config.get("syncDryRun", DEFAULT_PLUGIN_SETTINGS["syncDryRun"])
     except (AttributeError, TypeError):
         return DEFAULT_PLUGIN_SETTINGS["syncDryRun"]
-
-
-# Stash runs on this host. With HTTPS its cert names a public host while we connect
-# via localhost, so hostname checks would fail. Don't verify.
-STASH_SSL_CONTEXT = ssl.create_default_context()
-STASH_SSL_CONTEXT.check_hostname = False
-STASH_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
-
-
-def stash_graphql(server_connection, query, variables=None):
-    """Query the Stash server that launched this plugin, using its session cookie."""
-    host = server_connection.get("Host", "localhost")
-    if host == "0.0.0.0":
-        host = "localhost"
-    url = f"{server_connection.get('Scheme', 'http')}://{host}:{server_connection.get('Port', 9999)}/graphql"
-
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    cookie = (server_connection.get("SessionCookie") or {}).get("Value")
-    if cookie:
-        headers["Cookie"] = f"session={cookie}"
-
-    data = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=30, context=STASH_SSL_CONTEXT) as response:
-        result = json.loads(response.read().decode("utf-8"))
-    if result.get("errors"):
-        raise RuntimeError(f"Stash GraphQL errors: {result['errors']}")
-    return result.get("data") or {}
-
-
-STASHBOX_CONFIG_QUERY = """
-query TagManagerStashBoxes {
-    configuration {
-        general { stashBoxes { endpoint api_key name } }
-        plugins
-    }
-}
-"""
 
 
 def _normalize_endpoint(url):
@@ -626,7 +587,7 @@ def main():
     # and its API key come from Stash's config. Scene sync resolves its own below.
     if mode != "sync_scene_tags":
         try:
-            stash_config = stash_graphql(server_connection, STASHBOX_CONFIG_QUERY).get("configuration") or {}
+            stash_config = LocalStash(server_connection).configuration()
             stashdb_url, stashdb_api_key = resolve_stashbox(args.get("stashdb_url"), stash_config)
         except Exception as e:
             log.LogError(f"Could not resolve stash-box endpoint: {e}")
