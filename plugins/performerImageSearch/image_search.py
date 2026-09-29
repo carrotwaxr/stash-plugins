@@ -1129,32 +1129,38 @@ def _reply(payload):
     os._exit(0)
 
 
-def main():
-    """Main entry point - reads input from stdin, performs search, outputs results"""
-
+def _handle_request(text):
+    """The reply for the plugin's stdin text: {"output": {...}}, or {"error": ...} for bad input."""
     try:
-        input_data = json.loads(sys.stdin.read())
+        input_data = json.loads(text)
     except json.JSONDecodeError as e:
-        return _reply({"error": f"Failed to parse input: {e}"})
+        return {"error": f"Failed to parse input: {e}"}
+    if not isinstance(input_data, dict):
+        return {"error": "Input must be a JSON object"}
 
-    args = input_data.get("args", {})
+    args = input_data.get("args")
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return {"error": "args must be an object"}
     mode = args.get("mode", "search")
 
     log.LogDebug(f"Plugin called with mode: {mode}, args: {args}")
 
     if mode != "search":
-        return _reply({"error": f"Unknown mode: {mode}"})
+        return {"error": f"Unknown mode: {mode}"}
 
     query = args.get("query", "")
-    if not query:
-        return _reply({"error": "No search query provided"})
+    if not isinstance(query, str) or not query:
+        return {"error": "No search query provided"}
 
     source = args.get("source")
     if not source:
-        return _reply({"error": "source is required"})
+        return {"error": "source is required"}
 
     # Use explicit performer name if provided, otherwise extract from query
-    performer_name = args.get("performerName", "").strip()
+    performer_name = args.get("performerName")
+    performer_name = performer_name.strip() if isinstance(performer_name, str) else ""
     if not performer_name:
         # Fallback: try to extract from query by removing common suffixes
         performer_name = query
@@ -1173,10 +1179,10 @@ def main():
             size_filter=args.get("size", "All"),
             layout_filter=args.get("layout", "All"),
         )
-        output = {"output": {**outcome, "query": query, "source": source}}
+        return {"output": {**outcome, "query": query, "source": source}}
     except Exception as e:
         log.LogError(f"Search failed: {e}")
-        output = {
+        return {
             "output": {
                 "results": [],
                 "query": query,
@@ -1186,7 +1192,23 @@ def main():
             }
         }
 
-    _reply(output)
+
+def main():
+    """Main entry point: reads the request from stdin and prints one JSON reply.
+
+    Every path ends in _reply, so the UI always gets an answer, even for input
+    that is not what it should be.
+    """
+    try:
+        payload = _handle_request(sys.stdin.read())
+    except Exception as e:
+        payload = {"error": f"Unexpected error: {e}"}
+        try:  # the reply must not depend on logging working
+            log.LogError(f"Plugin failed: {e}")
+            log.LogDebug(f"Traceback: {traceback.format_exc()}")
+        except Exception:
+            pass
+    _reply(payload)
 
 
 if __name__ == "__main__":

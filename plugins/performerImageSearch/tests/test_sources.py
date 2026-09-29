@@ -1407,6 +1407,44 @@ def test_main_unknown_mode_and_missing_query(monkeypatch, capsys):
     assert "error" in reply
 
 
+@pytest.mark.parametrize("payload,error", [
+    ('{"args": null}', "No search query provided"),
+    ("{}", "No search query provided"),
+    ('{"args": "search"}', "args must be an object"),
+    ('{"args": []}', "args must be an object"),
+    ("[]", "Input must be a JSON object"),
+    ('[{"args": {}}]', "Input must be a JSON object"),
+    ("null", "Input must be a JSON object"),
+    ("42", "Input must be a JSON object"),
+    ('{"args": {"mode": "search", "query": 5, "source": "babepedia"}}', "No search query provided"),
+])
+def test_main_replies_to_malformed_input(monkeypatch, capsys, payload, error):
+    reply, code = run_main(monkeypatch, capsys, payload)
+    assert reply == {"error": error}
+    assert code == 0
+
+
+@pytest.mark.parametrize("performer_name", [None, 7])
+def test_main_performer_name_that_is_not_text_falls_back_to_the_query(web, monkeypatch, capsys, performer_name):
+    web.routes[BABEPEDIA_URL] = fixture("babepedia.html")
+    payload = search_args()
+    payload["args"]["performerName"] = performer_name
+    reply, code = run_main(monkeypatch, capsys, payload)
+    assert reply["output"]["status"] == "ok"
+    assert web.urls() == [BABEPEDIA_URL]  # "Jane Example pornstar" less its suffix
+    assert code == 0
+
+
+def test_main_replies_even_when_something_unexpected_fails(monkeypatch, capsys):
+    def broken(*args, **kwargs):
+        raise RuntimeError("log is broken")
+
+    monkeypatch.setattr(image_search.log, "LogDebug", broken)
+    reply, code = run_main(monkeypatch, capsys, search_args())
+    assert reply == {"error": "Unexpected error: log is broken"}
+    assert code == 0
+
+
 def test_main_exception_becomes_an_error_outcome(monkeypatch, capsys):
     def boom(*a, **k):
         raise RuntimeError("kaboom")
