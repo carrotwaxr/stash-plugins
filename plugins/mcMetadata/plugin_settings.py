@@ -1,6 +1,6 @@
 """Pure mapping from Stash's camelCase plugin config to internal snake_case settings.
 
-Kept separate from mcMetadata.py (which reads stdin at import) so the mapping —
+Kept separate from mcMetadata.py (the plugin's entry point) so the mapping —
 including list-parsing and the hookTriggerMode -> organizedCondition migration — is
 unit-testable without a Stash connection.
 """

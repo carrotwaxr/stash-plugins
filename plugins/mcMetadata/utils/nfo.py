@@ -138,19 +138,23 @@ def artwork_templates(settings):
     return nfo, poster, backdrop
 
 
-def artwork_filenames(settings, video_path, warn=True):
+def artwork_filenames(settings, video_path, warn=True, video_count=None):
     """Rendered {"nfo", "poster", "backdrop"} file names for a video (None = don't write).
 
     Folder-level names (no {basename}: movie.nfo, poster.jpg, folder.jpg ...) are only
-    safe when the folder holds a single video, so they are None otherwise.
+    safe when the folder holds a single video, so they are None otherwise. video_count
+    overrides the number of videos counted in the folder (a dry run passes the count
+    the folder would have after its moves).
     """
     nfo, poster, backdrop = artwork_templates(settings)
     result = {}
     folder = os.path.dirname(video_path) if video_path else ""
     for key, template in (("nfo", nfo), ("poster", poster), ("backdrop", backdrop)):
+        if template is not None and is_folder_level(template) and video_count is None:
+            video_count = _count_videos(folder)
         if template is None:
             result[key] = None
-        elif is_folder_level(template) and _count_videos(folder) > 1:
+        elif is_folder_level(template) and video_count > 1:
             if warn:
                 _warn_once(
                     f"Skipping {template} in {folder}: a folder-level file name needs exactly "

@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from utils.files import rename_file, replace_file_ext
 from utils.nfo import build_nfo_xml
@@ -71,11 +72,13 @@ class TestFiles(unittest.TestCase):
         )
 
     def test_rename_fail(self):
-        result = rename_file(
-            MOCK_SCENE["files"][0]["path"],
-            MOCK_SCENE["files"][0]["path"],
-            {},
-        )
+        # A live move of a file that isn't there ({} would be a dry run: fail safe)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = rename_file(
+                os.path.join(tmp, "missing.mp4"),
+                os.path.join(tmp, "dest.mp4"),
+                {"dry_run": False},
+            )
         self.assertEqual(result, False, "Rename should return False when it fails")
 
     def test_replace_file_ext(self):

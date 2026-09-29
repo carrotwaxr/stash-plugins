@@ -5,6 +5,7 @@ import time
 import urllib.request
 import urllib.error
 import utils.logger as log
+from utils.run_flow import is_dry_run
 
 # JPEG magic bytes (SOI marker)
 JPEG_MAGIC = b'\xff\xd8\xff'
@@ -86,9 +87,10 @@ def download_image(url, dest_filepath, settings):
         settings: Plugin settings dict (checks dry_run)
 
     Returns:
-        bool: True if successful, False otherwise
+        bool: True if successful (or would be, in a dry run), False otherwise
     """
-    if settings.get("dry_run", False):
+    if is_dry_run(settings):
+        log.info(f"[DRY RUN] Would download image to: {dest_filepath}")
         return True
 
     # Sanitize URL for logging (hide API key)
@@ -228,7 +230,7 @@ def rename_file(filepath, dest_filepath, settings):
         log.warning(f"Not moving {filepath}: destination already exists at {dest_filepath}")
         return False
     try:
-        if settings["dry_run"] is not False:
+        if is_dry_run(settings):
             return dest_filepath
         os.makedirs(os.path.dirname(dest_filepath), exist_ok=True)
         shutil.move(filepath, dest_filepath)

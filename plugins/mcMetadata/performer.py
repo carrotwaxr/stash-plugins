@@ -2,6 +2,7 @@ import os
 import utils.logger as log
 from utils.files import download_image
 from utils.paths import PathEscapeError, join_under, sanitize_component
+from utils.run_flow import is_dry_run
 
 # Constants
 BATCH_SIZE = 100
@@ -87,7 +88,7 @@ def process_performer(performer, settings, api_key, overwrite=False):
         return
 
     # In dry run mode, just log what would happen
-    if settings.get("dry_run", False):
+    if is_dry_run(settings):
         if os.path.exists(image_path):
             log.info(f"[DRY RUN] Would overwrite image for {performer_name}: {image_path}")
         else:
@@ -157,7 +158,7 @@ def process_performer_hook(stash, performer_id, settings, api_key):
     if not performer:
         log.warning(f"Performer {performer_id} not found")
         return
-    if settings.get("dry_run", False):
+    if is_dry_run(settings):
         log.info(f"[DRY RUN] Would re-export image for performer {performer.get('name', performer_id)}")
         return
     process_performer(performer, settings, api_key, overwrite=True)

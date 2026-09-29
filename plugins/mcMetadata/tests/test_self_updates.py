@@ -310,7 +310,9 @@ class TestRenameOrder(_TempDirs):
 
     def test_dry_run_writes_no_marker_and_no_update(self):
         result, _ = self._run(dry_run=True)
-        self.assertEqual(result, self.video)
+        # Where the video would be, so the dry run reports the NFO and poster there
+        self.assertEqual(result, os.path.join(self.lib, "A Title.mp4"))
+        self.assertTrue(os.path.exists(self.video))
         self.assertNotIn("update_scene", [c[0] for c in self.calls])
         self.assertNotIn("moveFiles", [c[0] for c in self.calls])
         self.assertFalse(os.path.exists(os.path.join(self.data_dir, "self_updates")))

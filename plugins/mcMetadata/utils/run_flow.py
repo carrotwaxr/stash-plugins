@@ -12,3 +12,8 @@ def is_disabled_hook_run(mode, settings):
     if mode == "Performer.Update.Post":
         return not settings.get("enable_actor_images", False)
     return False
+
+
+def is_dry_run(settings):
+    """True unless dry_run is exactly False: a missing, null or odd value is a dry run (fail safe)."""
+    return (settings or {}).get("dry_run") is not False
