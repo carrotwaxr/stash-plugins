@@ -20,10 +20,6 @@
   let searchInfo = null; // notices from the search responses: warnings, partial, truncated, error
   const REQUEST_TIMEOUT_MS = 120000;
 
-  // Cache for local stash_ids (persists across modal opens in the same session)
-  let cachedLocalStashIds = null;
-  let cacheEndpoint = null;
-
   /**
    * Get the GraphQL endpoint URL
    */
@@ -119,24 +115,8 @@
       scene_id: sceneId,
     };
     if (endpoint) args.endpoint = endpoint;
-
-    // Pass cached stash_ids if we have them for this endpoint
-    if (cachedLocalStashIds && cacheEndpoint) {
-      args.cached_local_stash_ids = cachedLocalStashIds;
-      args.cache_endpoint = cacheEndpoint;
-    }
-
-    const result = await runPluginOperation(args);
-
-    // Cache the stash_ids from the response for future calls
-    // Note: Stash auto-unwraps the "output" field from PluginOutput structure
-    if (result.local_stash_ids && result.stashdb_url) {
-      cachedLocalStashIds = result.local_stash_ids;
-      cacheEndpoint = result.stashdb_url;
-      console.log(`[SceneMatcher] Cached ${cachedLocalStashIds.length} local stash_ids for ${cacheEndpoint}`);
-    }
-
-    return result;
+    // Stash unwraps the plugin's "output" field. The server caches the local IDs itself.
+    return runPluginOperation(args);
   }
 
   /**
@@ -149,22 +129,7 @@
       exclude_ids: excludeIds || [],
     };
     if (endpoint) args.endpoint = endpoint;
-
-    // Pass cached stash_ids if we have them for this endpoint
-    if (cachedLocalStashIds && cacheEndpoint) {
-      args.cached_local_stash_ids = cachedLocalStashIds;
-      args.cache_endpoint = cacheEndpoint;
-    }
-
-    const result = await runPluginOperation(args);
-
-    // Cache the stash_ids from the response for future calls
-    if (result.local_stash_ids && result.stashdb_url) {
-      cachedLocalStashIds = result.local_stash_ids;
-      cacheEndpoint = result.stashdb_url;
-    }
-
-    return result;
+    return runPluginOperation(args);
   }
 
   /**
@@ -1339,7 +1304,7 @@
     };
     window.__SCENE_MATCHER_TEST__.getState = () => ({
       modalRoot, currentSceneId, currentSceneElement, matchResults, isLoading, isLoadingDeep,
-      stashdbUrl, canSearchDeep, phase1SearchAttrs, cachedLocalStashIds, cacheEndpoint,
+      stashdbUrl, canSearchDeep, phase1SearchAttrs,
     });
     window.__SCENE_MATCHER_TEST__.setState = (patch) => {
       if ("modalRoot" in patch) modalRoot = patch.modalRoot;
@@ -1351,8 +1316,6 @@
       if ("stashdbUrl" in patch) stashdbUrl = patch.stashdbUrl;
       if ("canSearchDeep" in patch) canSearchDeep = patch.canSearchDeep;
       if ("phase1SearchAttrs" in patch) phase1SearchAttrs = patch.phase1SearchAttrs;
-      if ("cachedLocalStashIds" in patch) cachedLocalStashIds = patch.cachedLocalStashIds;
-      if ("cacheEndpoint" in patch) cacheEndpoint = patch.cacheEndpoint;
     };
   }
 })();

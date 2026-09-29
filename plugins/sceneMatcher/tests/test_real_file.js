@@ -183,7 +183,7 @@ test("exports reachable", () => {
   assert.strictEqual(typeof sm.getState, "function");
   assert.strictEqual(typeof sm.setState, "function");
   const st = sm.getState();
-  for (const k of ["matchResults", "isLoading", "isLoadingDeep", "stashdbUrl", "canSearchDeep", "cachedLocalStashIds"]) {
+  for (const k of ["matchResults", "isLoading", "isLoadingDeep", "stashdbUrl", "canSearchDeep"]) {
     assert.ok(k in st, "state should include " + k);
   }
   sm.setState({ isLoading: true });

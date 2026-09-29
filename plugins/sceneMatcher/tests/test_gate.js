@@ -237,6 +237,22 @@ test("Match click sends the endpoint to both ops", async () => {
   assert.ok(!("endpoint" in last));
 });
 
+test("no client-side ID cache: nothing from a response is sent back", async () => {
+  // An older backend still returned the IDs; the UI must not echo them to the server
+  const reply = { data: { runPluginOperation: JSON.stringify({
+    phase: 1, results: [], local_stash_ids: ["x", "y"], stashdb_url: "https://stashdb.org" }) } };
+  const sm2 = loadSceneMatcher({ fetchResponses: { SceneMatcherConfig: CONFIG, RunPluginOperation: reply } });
+  await sm2.exports.findMatchesFast("7", STASHDB);
+  await sm2.exports.findMatchesFast("7", STASHDB);
+  await sm2.exports.findMatchesThorough("7", [], STASHDB);
+  for (const c of sm2.fetchCalls.filter((x) => x.op === "RunPluginOperation")) {
+    const args = c.body.variables.args;
+    assert.ok(!("cached_local_stash_ids" in args) && !("cache_endpoint" in args), JSON.stringify(args));
+  }
+  const src = require("fs").readFileSync(require("path").join(__dirname, "..", "scene-matcher.js"), "utf8");
+  assert.ok(!/cached_local_stash_ids|cachedLocalStashIds|cacheEndpoint/.test(src), "dead cache code left in the UI");
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {
