@@ -142,6 +142,36 @@ class TestCacheFunctions(unittest.TestCase):
         self.assertEqual(len(cached['tags']), 2)
         self.assertEqual(cached['tags'][0]['name'], "Tag A")
 
+    def _write_expired_cache(self, endpoint):
+        from tag_manager import save_tags_to_cache, get_cache_file_path
+        save_tags_to_cache(endpoint, [{"id": "1", "name": "Anal Creampie", "aliases": []}])
+        path = get_cache_file_path(endpoint)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        data["timestamp"] = time.time() - 48 * 3600
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def test_load_expired_cache_only_when_allowed(self):
+        from tag_manager import load_cached_tags
+        endpoint = "https://test.example.org/graphql"
+        self._write_expired_cache(endpoint)
+
+        self.assertIsNone(load_cached_tags(endpoint))
+        self.assertEqual(len(load_cached_tags(endpoint, allow_expired=True)["tags"]), 1)
+
+    @patch('stashdb_api.graphql_request', return_value={"queryTags": {"count": 0, "tags": []}})
+    def test_search_uses_expired_cache_for_fuzzy(self, _graphql):
+        from tag_manager import handle_search
+        endpoint = "https://test.example.org/graphql"
+        self._write_expired_cache(endpoint)
+
+        result = handle_search(tag_name="Anal Cream Pie", stashdb_url=endpoint,
+                               stashdb_api_key="k", settings={})
+
+        self.assertFalse(result.get("fuzzy_unavailable"))
+        self.assertTrue(any(m["tag"]["id"] == "1" for m in result["matches"]))
+
     def test_load_returns_none_for_missing_cache(self):
         """Should return None when no cache exists."""
         from tag_manager import load_cached_tags

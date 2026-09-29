@@ -88,12 +88,14 @@ def get_cache_file_path(endpoint_url):
     return os.path.join(get_cache_dir(), filename)
 
 
-def load_cached_tags(endpoint_url):
+def load_cached_tags(endpoint_url, allow_expired=False):
     """
     Load cached tags for an endpoint if available and not expired.
 
     Args:
         endpoint_url: The stash-box endpoint URL
+        allow_expired: Return the cache even when older than the max age
+            (fuzzy matching uses stale tags rather than none)
 
     Returns:
         Dict with 'tags', 'timestamp', 'count' or None if cache miss
@@ -114,8 +116,10 @@ def load_cached_tags(endpoint_url):
         max_age = CACHE_MAX_AGE_HOURS
 
         if age_hours > max_age:
-            log.LogDebug(f"Cache expired: {age_hours:.1f} hours old (max: {max_age}h)")
-            return None
+            if not allow_expired:
+                log.LogDebug(f"Cache expired: {age_hours:.1f} hours old (max: {max_age}h)")
+                return None
+            log.LogDebug(f"Cache expired ({age_hours:.1f}h old, max {max_age}h), using it anyway")
 
         tag_count = len(cache_data.get('tags', []))
         log.LogInfo(f"Cache hit: {tag_count} tags from {endpoint_url} ({age_hours:.1f}h old)")
@@ -363,7 +367,7 @@ def handle_search(tag_name, stashdb_url, stashdb_api_key, settings):
     # If we have cached tags, also do local fuzzy matching
     local_matches = []
     fuzzy_unavailable = False
-    cache = load_cached_tags(stashdb_url) if enable_fuzzy else None
+    cache = load_cached_tags(stashdb_url, allow_expired=True) if enable_fuzzy else None
     stashdb_tags = (cache or {}).get("tags") or []
     if enable_fuzzy and not stashdb_tags:
         fuzzy_unavailable = True
