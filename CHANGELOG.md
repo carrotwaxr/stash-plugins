@@ -22,12 +22,12 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ### 0.7.0
 - Python 3.9+ with no required packages. `thefuzz` is optional. `stashapp-tools` is no longer used (fixes #129).
-- A full StashDB tag fetch takes about 5 seconds instead of 30-40+. Stash-box errors show in the UI, and a rejected API key (HTTP 401/403) says so. Requests send a `User-Agent`, which fixes HTTP 403 from ThePornDB and JAVStash.
+- A full StashDB tag fetch takes about 5 seconds instead of 30-40+. Stash-box errors show in the UI, and a rejected API key (HTTP 401/403) says so. Requests send a `User-Agent`, which fixes HTTP 403 from ThePornDB and JAVStash. ThePornDB tag fetches now get every tag instead of the first 100.
 - Caches and sync history moved to `<Stash config dir>/plugin_data/tagManager/`, so plugin updates no longer wipe them. The old `cache/` folder can be deleted.
 - Scene Tag Sync uses every linked stash-box that has an API key, keeps tags added during a long sync, and doesn't add back tags you removed. New "Reset Scene Tag Sync History" task. The first live sync after upgrading can re-add tags you removed before 0.7.0 one last time.
 - Blacklist: `/regex/flags` syntax, `,` and `;` separators, a Blacklist editor on the Match tab, and it now applies to searches, Import All and sync.
 - Accept/Apply: saved category mappings are pre-selected, and `Create "<category>"` now really creates the parent. Category mappings are stored per stash-box.
-- Merging tags asks for confirmation. On Stash 0.31+ the merge is one transaction. Parents and children carry over.
+- Merging tags asks for confirmation. On Stash 0.31+ the merge is one transaction. Parents and children carry over, plus the parent picked in the dialog.
 - Import shows progress and can be cancelled. The conflicts dialog re-checks rows after each action.
 - Tag Hierarchy, navigation under a sub-path and numeric settings fixes.
 
