@@ -273,19 +273,23 @@ def test_add_to_whisparr_reports_error(monkeypatch):
     assert res["whisparr_error"] == res["error"]
 
 
+STASHDB = "https://stashdb.org/graphql"
+
+
 def test_hook_reports_lookup_error(monkeypatch):
     monkeypatch.setattr(ms, "stash_graphql", lambda *a, **k: {"findScene": {
-        "id": "1", "title": "T", "stash_ids": [{"endpoint": "e", "stash_id": SID}]}})
-    monkeypatch.setattr(ms, "get_stashbox_config", lambda: [{"endpoint": "e"}])
+        "id": "1", "title": "T", "stash_ids": [{"endpoint": STASHDB, "stash_id": SID}]}})
+    monkeypatch.setattr(ms, "get_stashbox_config", lambda: [{"endpoint": STASHDB}])
     install(monkeypatch, lambda r: http_error(500, b"boom"))
-    res = ms.handle_scene_update_hook({"id": "1"}, {"enableAutoCleanup": True, "whisparrUrl": URL,
-                                                    "whisparrApiKey": KEY})
+    ctx = {"id": 1, "type": "Scene.Update.Post", "input": {"id": "1"}, "inputFields": ["id", "stash_ids"]}
+    res = ms.handle_scene_update_hook(ctx, {"enableAutoCleanup": True, "whisparrUrl": URL,
+                                            "whisparrApiKey": KEY})
     assert res["success"] is False
     assert "500" in res["message"]
 
 
 def test_cleanup_task_reports_error(monkeypatch):
-    monkeypatch.setattr(ms, "get_stashbox_config", lambda: [{"endpoint": "e"}])
+    monkeypatch.setattr(ms, "get_stashbox_config", lambda: [{"endpoint": STASHDB}])
     install(monkeypatch, lambda r: http_error(500, b"boom"))
     res = ms.task_cleanup_whisparr({"whisparrUrl": URL, "whisparrApiKey": KEY})
     assert res["success"] is False

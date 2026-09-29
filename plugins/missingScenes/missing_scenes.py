@@ -265,6 +265,31 @@ def get_stashbox_config():
     return []
 
 
+def is_stashdb_endpoint(url):
+    """True when a stash-box URL is StashDB's (host stashdb.org, any case, slash or port).
+
+    Whisparr v3 stores and looks up StashDB scene IDs only, so every Whisparr action checks this.
+    """
+    text = str(url or "").strip().lower().rstrip("/")
+    if not text:
+        return False
+    if "://" not in text:
+        text = "https://" + text
+    try:
+        return urllib.parse.urlsplit(text).hostname == "stashdb.org"
+    except ValueError:
+        return False
+
+
+def get_stashdb_endpoint(boxes):
+    """The endpoint of the first configured stash-box that is StashDB, or None."""
+    for box in boxes or []:
+        endpoint = box.get("endpoint") if isinstance(box, dict) else None
+        if is_stashdb_endpoint(endpoint):
+            return endpoint
+    return None
+
+
 def get_available_endpoints_for_entity(entity_stash_ids):
     """Get stash-box endpoints that both the entity is linked to AND are configured in Stash.
 
@@ -353,59 +378,6 @@ def get_local_tag(tag_id):
     if data:
         return data.get("findTag")
     return None
-
-
-def get_local_scene_stash_ids(endpoint):
-    """Get all stash_ids for scenes that are linked to a specific stash-box endpoint."""
-    # Get all scenes with stash_ids
-    query = """
-    query FindScenes($filter: FindFilterType) {
-        findScenes(filter: $filter) {
-            count
-            scenes {
-                id
-                stash_ids {
-                    endpoint
-                    stash_id
-                }
-            }
-        }
-    }
-    """
-
-    all_stash_ids = set()
-    page = 1
-    per_page = 100
-
-    while True:
-        data = stash_graphql(query, {
-            "filter": {
-                "page": page,
-                "per_page": per_page
-            }
-        })
-
-        if not data or "findScenes" not in data:
-            break
-
-        scenes = data["findScenes"].get("scenes", [])
-        if not scenes:
-            break
-
-        for scene in scenes:
-            for stash_id in scene.get("stash_ids", []):
-                if stash_id.get("endpoint") == endpoint:
-                    all_stash_ids.add(stash_id.get("stash_id"))
-
-        # Check if we've gotten all scenes
-        total = data["findScenes"].get("count", 0)
-        if page * per_page >= total:
-            break
-
-        page += 1
-
-    log.LogInfo(f"Found {len(all_stash_ids)} local scenes linked to {endpoint}")
-    return all_stash_ids
 
 
 def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
@@ -840,6 +812,12 @@ def whisparr_get_queue(whisparr_url, api_key):
     records = result.get("records") or [] if isinstance(result, dict) else []
     log.LogInfo(f"Found {len(records)} items in Whisparr queue")
     return records
+
+
+def _queued_movie_ids(queue):
+    """Whisparr movie ids that have an item in the download queue."""
+    return {item.get("movieId") for item in queue or []
+            if isinstance(item, dict) and item.get("movieId") is not None}
 
 
 WHISPARR_STATUS_TTL_SECONDS = 60
@@ -1942,68 +1920,95 @@ def _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, empty_filte
     }
 
 
-def add_to_whisparr(stash_id, title, plugin_settings):
+def add_to_whisparr(stash_id, title, plugin_settings, endpoint=None):
     """Add a scene to Whisparr by its StashDB ID.
 
     Uses the same approach as Stasharr:
     1. Check if scene already exists (movie?stashId=X)
     2. Lookup scene in TPDB (lookup/scene?term=stash:X)
-    3. Add scene to Whisparr (POST movie)
-    4. Optionally trigger search
+    3. Add scene to Whisparr (POST movie; with whisparrSearchOnAdd, Whisparr searches on add)
+    4. For a scene already in Whisparr without a file, trigger a search if whisparrSearchOnAdd
 
     Args:
         stash_id: StashDB scene ID (UUID)
         title: Scene title (for logging/error messages)
         plugin_settings: Plugin configuration from Stash
+        endpoint: stash-box endpoint the scene came from. Whisparr matches StashDB IDs only,
+            so any other endpoint is refused without calling Whisparr. None or "" means StashDB.
+
+    Returns:
+        On success {success: True, message, search_triggered, already_exists?, scene?,
+        search_error?}; search_error means the scene is in Whisparr but its search didn't start.
+        On failure {success: False, error, whisparr_error?}.
     """
+    # Older UI builds don't send the endpoint; treat that as StashDB, as they always did
+    if str(endpoint or "").strip() and not is_stashdb_endpoint(endpoint):
+        msg = (f"Can't add '{title}' to Whisparr: Whisparr matches scenes by StashDB ID, and this "
+               f"scene is from {endpoint}. Only StashDB scenes can be added.")
+        log.LogWarning(msg)
+        return {"success": False, "error": msg}
+
     whisparr_url = plugin_settings.get("whisparrUrl", "")
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
     quality_profile = int(plugin_settings.get("whisparrQualityProfile") or 1)  # Default to first profile
     root_folder = plugin_settings.get("whisparrRootFolder", "")
-    search_on_add = plugin_settings.get("whisparrSearchOnAdd", False)  # Default to False for manual control
+    search_on_add = bool(plugin_settings.get("whisparrSearchOnAdd", False))  # Default to False for manual control
 
     if not whisparr_url or not whisparr_api_key:
-        return {"error": "Whisparr is not configured. Please set URL and API key in plugin settings."}
+        return {"success": False,
+                "error": "Whisparr is not configured. Please set URL and API key in plugin settings."}
 
     if not root_folder:
-        return {"error": "Whisparr root folder is not configured. Please set it in plugin settings."}
+        return {"success": False,
+                "error": "Whisparr root folder is not configured. Please set it in plugin settings."}
 
     try:
         # Step 1: Check if scene already exists in Whisparr
         existing_scene = whisparr_get_scene_by_stash_id(whisparr_url, whisparr_api_key, stash_id)
         if existing_scene:
-            has_file = existing_scene.get("hasFile", False)
-            if has_file:
+            if existing_scene.get("hasFile", False):
                 return {
                     "success": True,
                     "message": f"Scene '{title}' already exists in Whisparr with file.",
-                    "already_exists": True
+                    "already_exists": True,
+                    "search_triggered": False,
                 }
-            else:
-                # Scene exists but no file - maybe trigger search?
-                if search_on_add:
-                    whisparr_trigger_search(whisparr_url, whisparr_api_key, existing_scene["id"])
-                    return {
-                        "success": True,
-                        "message": f"Scene '{title}' already in Whisparr. Triggered search.",
-                        "already_exists": True
-                    }
+            if not search_on_add:
                 return {
                     "success": True,
                     "message": f"Scene '{title}' already in Whisparr (no file yet). Use Whisparr to search.",
-                    "already_exists": True
+                    "already_exists": True,
+                    "search_triggered": False,
                 }
+            try:
+                whisparr_trigger_search(whisparr_url, whisparr_api_key, existing_scene["id"])
+            except WhisparrError as e:
+                log.LogWarning(f"'{title}' is in Whisparr, but its search could not be started: {e}")
+                return {
+                    "success": True,
+                    "message": f"Scene '{title}' already in Whisparr, but the search could not be started.",
+                    "already_exists": True,
+                    "search_triggered": False,
+                    "search_error": str(e),
+                }
+            return {
+                "success": True,
+                "message": f"Scene '{title}' already in Whisparr. Triggered search.",
+                "already_exists": True,
+                "search_triggered": True,
+            }
 
-        # Step 2: Lookup scene in TPDB via Whisparr
+        # Step 2: Lookup scene in TPDB via Whisparr (raises WhisparrError with Whisparr's text)
         scene_data = whisparr_lookup_scene(whisparr_url, whisparr_api_key, stash_id)
         if not scene_data:
             return {
+                "success": False,
                 "error": f"Scene '{title}' not found in TPDB/Whisparr lookup. "
                          "It may not be indexed in ThePornDB yet, or the StashDB ID "
                          "doesn't have a matching TPDB entry. Try searching manually in Whisparr."
             }
 
-        # Step 3: Add scene to Whisparr
+        # Step 3: Add scene to Whisparr; addOptions.searchForMovie makes Whisparr search on add
         added_scene = whisparr_add_scene(
             whisparr_url,
             whisparr_api_key,
@@ -2016,11 +2021,12 @@ def add_to_whisparr(stash_id, title, plugin_settings):
         if not added_scene:
             return {"success": False, "error": f"Whisparr accepted the request but returned nothing for '{title}'."}
 
-        search_msg = " and triggered search" if search_on_add else ""
+        search_msg = " and triggered search" if search_on_add else " without a search"
         return {
             "success": True,
             "message": f"Added '{title}' to Whisparr{search_msg}.",
-            "scene": added_scene
+            "scene": added_scene,
+            "search_triggered": search_on_add,
         }
 
     except WhisparrError as e:
@@ -2028,7 +2034,7 @@ def add_to_whisparr(stash_id, title, plugin_settings):
         return {"success": False, "error": str(e), "whisparr_error": str(e)}
     except Exception as e:
         log.LogError(f"Error adding scene to Whisparr: {e}")
-        return {"error": str(e)}
+        return {"success": False, "error": str(e)}
 
 
 def whisparr_delete_scene(whisparr_url, api_key, movie_id, delete_files=False):
@@ -2086,35 +2092,47 @@ def whisparr_unmonitor_scene(whisparr_url, api_key, movie_id):
 # Automation: Hook and Task Handlers
 # ============================================================================
 
-def handle_scene_update_hook(scene_input, plugin_settings):
-    """Handle Scene.Update.Post hook - cleanup Whisparr when scene is tagged.
+def handle_scene_update_hook(hook_context, plugin_settings):
+    """Handle Scene.Update.Post: clean up Whisparr once a scene has its StashDB ID in Stash.
 
-    This is triggered whenever a scene is updated. We check if:
-    1. Auto-cleanup is enabled
-    2. Whisparr is configured
-    3. The scene now has a StashDB stash_id
-    4. The scene exists in Whisparr
-
-    If all conditions are met, we remove/unmonitor the scene from Whisparr.
+    hook_context is Stash's args.hookContext: {id, type, input, inputFields}. Nothing happens
+    unless the update set stash_ids (inputFields). Then the local stash_id indexes are dropped
+    (they may be stale), and with auto-cleanup on and Whisparr configured, the scene's StashDB
+    ID is looked up in Whisparr. Whisparr keys on StashDB IDs, so other stash-boxes are ignored.
+    Only an entry whose stashId equals that ID is touched, and not while it is in Whisparr's
+    download queue. It is deleted, or unmonitored with unmonitorOnly.
     """
-    # Check if auto-cleanup is enabled
+    hook_context = hook_context or {}
+    if "stash_ids" not in (hook_context.get("inputFields") or []):
+        log.LogDebug("Scene update did not set stash_ids; no Whisparr cleanup")
+        return {"success": True, "message": "stash_ids not changed"}
+
+    # scenesUpdate passes a list as input, so prefer the hook's own scene id
+    hook_input = hook_context.get("input")
+    scene_id = hook_context.get("id") or (hook_input.get("id") if isinstance(hook_input, dict) else None)
+    if not scene_id:
+        log.LogWarning("No scene ID in hook input")
+        return {"success": False, "message": "No scene ID"}
+
+    # The scene's stash_ids changed, so any box's local index may be missing it
+    stashbox_configs = get_stashbox_config() or []
+    for box in stashbox_configs:
+        if isinstance(box, dict) and box.get("endpoint"):
+            invalidate_cache(box["endpoint"])
+
     if not plugin_settings.get("enableAutoCleanup", False):
         log.LogDebug("Auto-cleanup is disabled, skipping")
         return {"success": True, "message": "Auto-cleanup disabled"}
 
-    # Check if Whisparr is configured
     whisparr_url = plugin_settings.get("whisparrUrl", "")
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
-
     if not whisparr_url or not whisparr_api_key:
         log.LogDebug("Whisparr not configured, skipping auto-cleanup")
         return {"success": True, "message": "Whisparr not configured"}
 
-    # Get the scene ID from the hook input
-    scene_id = scene_input.get("id")
-    if not scene_id:
-        log.LogWarning("No scene ID in hook input")
-        return {"success": False, "message": "No scene ID"}
+    if not get_stashdb_endpoint(stashbox_configs):
+        log.LogDebug("No StashDB stash-box is configured; Whisparr auto-cleanup works with StashDB IDs only")
+        return {"success": True, "message": "No StashDB stash-box configured"}
 
     # Fetch the scene with its stash_ids
     scene_data = stash_graphql("""
@@ -2128,66 +2146,45 @@ def handle_scene_update_hook(scene_input, plugin_settings):
                 }
             }
         }
-    """, {"id": scene_id})
+    """, {"id": str(scene_id)})
 
     if not scene_data or not scene_data.get("findScene"):
         log.LogWarning(f"Could not find scene {scene_id}")
         return {"success": False, "message": "Scene not found"}
 
     scene = scene_data["findScene"]
-    stash_ids = scene.get("stash_ids", [])
-
-    if not stash_ids:
-        log.LogDebug(f"Scene {scene_id} has no stash_ids, skipping")
-        return {"success": True, "message": "Scene not tagged"}
-
-    # Get the stash-box endpoint we're using
-    stashbox_configs = get_stashbox_config()
-    preferred_endpoint = plugin_settings.get("stashBoxEndpoint", "").strip()
-
-    if preferred_endpoint:
-        target_endpoint = preferred_endpoint
-    elif stashbox_configs:
-        target_endpoint = stashbox_configs[0].get("endpoint", "")
-    else:
-        log.LogWarning("No stash-box endpoint configured")
-        return {"success": False, "message": "No stash-box configured"}
-
-    # Find the stash_id for our target endpoint
-    stash_id = None
-    for sid in stash_ids:
-        if sid.get("endpoint") == target_endpoint:
-            stash_id = sid.get("stash_id")
-            break
-
+    stash_id = next((sid.get("stash_id") for sid in scene.get("stash_ids") or []
+                     if is_stashdb_endpoint(sid.get("endpoint")) and sid.get("stash_id")), None)
     if not stash_id:
-        log.LogDebug(f"Scene {scene_id} not tagged with {target_endpoint}")
-        return {"success": True, "message": "Scene not tagged with target endpoint"}
+        log.LogDebug(f"Scene {scene_id} has no StashDB ID, skipping")
+        return {"success": True, "message": "Scene not tagged with StashDB"}
 
-    # Check if scene exists in Whisparr
+    scene_title = scene.get("title") or "Unknown"
     try:
+        # Returns only an entry whose stashId equals this ID, never another scene
         whisparr_scene = whisparr_get_scene_by_stash_id(whisparr_url, whisparr_api_key, stash_id)
+        if not whisparr_scene:
+            log.LogDebug(f"Scene with StashDB ID {stash_id} not in Whisparr")
+            return {"success": True, "message": "Scene not in Whisparr"}
+        queued = _queued_movie_ids(whisparr_get_queue(whisparr_url, whisparr_api_key))
     except WhisparrError as e:
         log.LogError(f"Whisparr cleanup skipped for scene {scene_id}: {e}")
         return {"success": False, "message": str(e), "error": str(e), "whisparr_error": str(e)}
 
-    if not whisparr_scene:
-        log.LogDebug(f"Scene with StashDB ID {stash_id} not in Whisparr")
-        return {"success": True, "message": "Scene not in Whisparr"}
+    movie_id = whisparr_scene.get("id")
+    if movie_id in queued:
+        log.LogInfo(f"'{scene_title}' is in Whisparr's download queue; leaving it in Whisparr")
+        return {"success": True, "message": f"'{scene_title}' is in Whisparr's download queue; left alone"}
 
-    # Remove or unmonitor the scene
     unmonitor_only = plugin_settings.get("unmonitorOnly", False)
-    scene_title = scene.get("title", "Unknown")
-
     try:
         if unmonitor_only:
-            whisparr_unmonitor_scene(whisparr_url, whisparr_api_key, whisparr_scene["id"])
+            whisparr_unmonitor_scene(whisparr_url, whisparr_api_key, movie_id)
             log.LogInfo(f"Unmonitored '{scene_title}' in Whisparr after tagging")
             return {"success": True, "message": f"Unmonitored '{scene_title}' in Whisparr"}
-        else:
-            whisparr_delete_scene(whisparr_url, whisparr_api_key, whisparr_scene["id"])
-            log.LogInfo(f"Removed '{scene_title}' from Whisparr after tagging")
-            return {"success": True, "message": f"Removed '{scene_title}' from Whisparr"}
+        whisparr_delete_scene(whisparr_url, whisparr_api_key, movie_id)
+        log.LogInfo(f"Removed '{scene_title}' from Whisparr after tagging")
+        return {"success": True, "message": f"Removed '{scene_title}' from Whisparr"}
     except Exception as e:
         log.LogError(f"Failed to cleanup Whisparr for scene {scene_id}: {e}")
         return {"success": False, "message": str(e), "error": str(e)}
@@ -2350,69 +2347,84 @@ def task_test_whisparr(plugin_settings):
 
 
 def task_cleanup_whisparr(plugin_settings):
-    """Task: Remove scenes from Whisparr that are now tagged in Stash."""
+    """Task: remove (or unmonitor) Whisparr scenes whose StashDB ID a local scene now has.
+
+    Uses the StashDB stash-box only (Whisparr keys on StashDB IDs) and a freshly built local
+    stash_id index (a stash_id_endpoint query, not a library scan). Entries in Whisparr's
+    download queue are skipped.
+
+    Returns {success: True, message, cleaned, skipped_in_queue, errors}, or
+    {success: False, message, error} when Whisparr, its queue or Stash can't be read.
+    """
     whisparr_url = plugin_settings.get("whisparrUrl", "")
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
 
     if not whisparr_url or not whisparr_api_key:
-        log.LogWarning("Whisparr not configured")
-        return {"success": False, "message": "Whisparr not configured"}
+        msg = "Whisparr is not configured. Set the URL and API key in the plugin settings."
+        log.LogWarning(msg)
+        return {"success": False, "message": msg, "error": msg}
 
-    # Get the stash-box endpoint
-    stashbox_configs = get_stashbox_config()
-    preferred_endpoint = plugin_settings.get("stashBoxEndpoint", "").strip()
-
-    if preferred_endpoint:
-        target_endpoint = preferred_endpoint
-    elif stashbox_configs:
-        target_endpoint = stashbox_configs[0].get("endpoint", "")
-    else:
-        log.LogWarning("No stash-box endpoint configured")
-        return {"success": False, "message": "No stash-box configured"}
+    stashdb_endpoint = get_stashdb_endpoint(get_stashbox_config())
+    if not stashdb_endpoint:
+        msg = ("No StashDB stash-box is configured in Stash. Whisparr cleanup matches StashDB IDs "
+               "only; add StashDB under Settings > Metadata Providers.")
+        log.LogWarning(msg)
+        return {"success": False, "message": msg, "error": msg}
 
     unmonitor_only = plugin_settings.get("unmonitorOnly", False)
 
     log.LogInfo("Starting Whisparr cleanup task...")
 
-    # Get all scenes from Whisparr
     try:
         whisparr_scenes = whisparr_get_all_scenes(whisparr_url, whisparr_api_key)
+        queued = _queued_movie_ids(whisparr_get_queue(whisparr_url, whisparr_api_key))
     except WhisparrError as e:
         log.LogError(f"Whisparr cleanup failed: {e}")
         return {"success": False, "message": str(e), "error": str(e), "whisparr_error": str(e)}
-    log.LogInfo(f"Found {len(whisparr_scenes)} scenes in Whisparr")
 
-    # Get all local scenes with StashDB IDs
-    local_stash_ids = get_local_scene_stash_ids(target_endpoint)
-    log.LogInfo(f"Found {len(local_stash_ids)} local scenes tagged with {target_endpoint}")
+    try:
+        # Rebuilt, not up to 5 minutes old: this decides what leaves Whisparr
+        invalidate_cache(stashdb_endpoint)
+        local_stash_ids = get_or_build_cache(stashdb_endpoint)
+    except Exception as e:
+        msg = f"Whisparr cleanup failed: could not read the local StashDB IDs: {e}"
+        log.LogError(msg)
+        return {"success": False, "message": msg, "error": msg}
+    log.LogInfo(f"Found {len(local_stash_ids)} local scenes tagged with {stashdb_endpoint}")
 
-    # Find and cleanup scenes that are in both
     cleaned_count = 0
+    skipped_in_queue = 0
     errors = []
 
     for scene in whisparr_scenes:
-        stash_id = scene.get("stashId")
-        if not stash_id:
+        stash_id = scene.get("stashId") if isinstance(scene, dict) else None
+        if not stash_id or stash_id not in local_stash_ids:
             continue
-
-        if stash_id in local_stash_ids:
-            try:
-                if unmonitor_only:
-                    whisparr_unmonitor_scene(whisparr_url, whisparr_api_key, scene["id"])
-                else:
-                    whisparr_delete_scene(whisparr_url, whisparr_api_key, scene["id"])
-                cleaned_count += 1
-                log.LogInfo(f"Cleaned up: {scene.get('title', 'Unknown')}")
-            except Exception as e:
-                errors.append(f"{scene.get('title', 'Unknown')}: {e}")
+        title = scene.get("title") or "Unknown"
+        if scene.get("id") in queued:
+            skipped_in_queue += 1
+            log.LogInfo(f"Skipped '{title}': it is in Whisparr's download queue")
+            continue
+        try:
+            if unmonitor_only:
+                whisparr_unmonitor_scene(whisparr_url, whisparr_api_key, scene["id"])
+            else:
+                whisparr_delete_scene(whisparr_url, whisparr_api_key, scene["id"])
+            cleaned_count += 1
+            log.LogInfo(f"Cleaned up: {title}")
+        except Exception as e:
+            errors.append(f"{title}: {e}")
 
     action = "unmonitored" if unmonitor_only else "removed"
     message = f"{action.title()} {cleaned_count} scenes from Whisparr"
+    if skipped_in_queue:
+        message += f", skipped {skipped_in_queue} in the download queue"
     if errors:
         message += f" ({len(errors)} errors)"
 
     log.LogInfo(message)
-    return {"success": True, "message": message, "cleaned": cleaned_count, "errors": errors}
+    return {"success": True, "message": message, "cleaned": cleaned_count,
+            "skipped_in_queue": skipped_in_queue, "errors": errors}
 
 
 # ============================================================================
@@ -2457,12 +2469,11 @@ def main():
     hook_context = input_data.get("args", {}).get("hookContext")
     if hook_context:
         hook_type = hook_context.get("type", "")
-        hook_input = hook_context.get("input", {})
 
         log.LogDebug(f"Hook triggered: {hook_type}")
 
         if hook_type == "Scene.Update.Post":
-            output = handle_scene_update_hook(hook_input, plugin_settings)
+            output = handle_scene_update_hook(hook_context, plugin_settings)
         else:
             output = {"success": True, "message": f"Unhandled hook type: {hook_type}"}
 
@@ -2551,11 +2562,13 @@ def main():
         elif operation == "add_to_whisparr":
             stash_id = args.get("stash_id", "")
             title = args.get("title", "Unknown")
+            # Older UI builds don't send it; add_to_whisparr treats a missing endpoint as StashDB
+            endpoint = args.get("endpoint")
 
             if not stash_id:
                 output = {"error": "stash_id is required"}
             else:
-                output = add_to_whisparr(stash_id, title, plugin_settings)
+                output = add_to_whisparr(stash_id, title, plugin_settings, endpoint=endpoint)
 
         elif operation == "get_endpoints":
             entity_type = args.get("entity_type", "")
