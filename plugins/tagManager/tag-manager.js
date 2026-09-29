@@ -22,6 +22,7 @@
   let isLoading = false;
   let isCacheLoading = false;
   let matchResults = {}; // Cache of tag_id -> matches
+  let fuzzyHintShown = false; // the "fuzzy matching unavailable" hint shows once per page visit
   let currentFilter = 'unmatched'; // 'unmatched', 'matched', or 'all'
   let categoryMappingsLoaded = false; // true once the stored mappings were read (or found empty)
   let pendingMappingDeletes = new Set(); // JSON [endpoint, category] deleted while not loaded
@@ -3736,12 +3737,14 @@
     renderPage(container);
 
     let searchError = null;
+    let fuzzyUnavailable = false;
     for (const tag of tagsToSearch) {
       try {
         const result = await callBackend('search', {
           tag_name: tag.name,
         });
         matchResults[tag.id] = result.matches || [];
+        if (result.fuzzy_unavailable) fuzzyUnavailable = true;
       } catch (e) {
         console.error(`[tagManager] Error searching for ${tag.name}:`, e);
         matchResults[tag.id] = [];
@@ -3754,6 +3757,7 @@
     isLoading = false;
     renderPage(container);
     if (searchError) showStatus(`Error: ${searchError}`, 'error');
+    else if (fuzzyUnavailable) showFuzzyUnavailableHint();
   }
 
   /**
@@ -3769,6 +3773,7 @@
       });
       matchResults[tagId] = result.matches || [];
       renderPage(container);
+      if (result.fuzzy_unavailable) showFuzzyUnavailableHint();
     } catch (e) {
       console.error(`[tagManager] Error searching for ${tag.name}:`, e);
       showStatus(`Error: ${backendErrorText(e)}`, 'error');
@@ -4748,6 +4753,7 @@
           tag_name: term,
         });
         matchResults[tagId] = result.matches || [];
+        if (result.fuzzy_unavailable) showFuzzyUnavailableHint();
 
         // Re-render matches list
         const listEl = modal.querySelector('#tm-matches-list');
@@ -4803,6 +4809,17 @@
   }
 
   /**
+   * Once per page visit, say that searches run without fuzzy matching: the
+   * backend has no stash-box tag cache yet (search result `fuzzy_unavailable`).
+   * Nothing when fuzzy search is turned off.
+   */
+  function showFuzzyUnavailableHint() {
+    if (fuzzyHintShown || !settings.enableFuzzySearch) return;
+    fuzzyHintShown = true;
+    showStatus('Fuzzy matching is unavailable until the stash-box tags are cached. Use Refresh Cache.', 'info');
+  }
+
+  /**
    * Main page component
    */
   function TagManagerPage() {
@@ -4816,6 +4833,7 @@
 
         console.debug("[tagManager] Initializing...");
         setPageTitle("Tag Matcher | Stash");
+        fuzzyHintShown = false;
         containerRef.current.innerHTML = '<div class="tag-manager"><div class="tm-loading">Loading configuration...</div></div>';
 
         // Ensure defaults are loaded/backfilled before reading settings, so
@@ -6447,6 +6465,8 @@
       saveCategoryMappings,
       resolveCategoryParents,
       renderPage,
+      searchAllOnPage,
+      searchSingleTag,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,

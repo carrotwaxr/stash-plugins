@@ -1,5 +1,6 @@
 /**
- * Backend error formatting and tag loading without fuzzy search.
+ * Backend error formatting, tag loading without fuzzy search, and the
+ * once-per-visit hint when a search reports fuzzy matching unavailable.
  * Run with: node plugins/tagManager/tests/test_backend_errors.js
  */
 const assert = require("assert");
@@ -8,6 +9,29 @@ const path = require("path");
 const { loadTagManager } = require("./harness");
 
 const RPO = (out) => ({ data: { runPluginOperation: out } });
+const BOX = { endpoint: "https://stashdb.org/graphql", name: "StashDB" };
+
+/** Record every showStatus text (the harness has no #tm-status element). */
+function recordStatuses(tm) {
+  const statuses = [];
+  const el = { className: "" };
+  Object.defineProperty(el, "textContent", {
+    get: () => statuses[statuses.length - 1] || "",
+    set: (v) => { statuses.push(String(v)); },
+  });
+  tm.document.getElementById = (id) => (id === "tm-status" ? el : null);
+  return statuses;
+}
+
+/** A Match-tab page with `tags` unlinked local tags. */
+function matchPage(tm, tags, settingsPatch = {}) {
+  tm.setState({
+    settings: { ...tm.getState().settings, pageSize: 25, enableFuzzySearch: true, ...settingsPatch },
+    selectedStashBox: { ...BOX }, stashBoxes: [{ ...BOX }], localTags: tags, matchResults: {},
+  });
+}
+const TAGS3 = [{ id: "1", name: "One" }, { id: "2", name: "Two" }, { id: "3", name: "Three" }];
+const HINT = /Fuzzy matching is unavailable until the stash-box tags are cached\. Use Refresh Cache\./;
 
 (async () => {
   // formatBackendError
@@ -66,6 +90,38 @@ const RPO = (out) => ({ data: { runPluginOperation: out } });
     await tm.exports.loadTagsFromCache(null);
     assert.strictEqual(tm.getState().stashdbTags, null);
     assert.ok(/Metadata Providers/.test(tm.getState().cacheStatus.error));
+  }
+
+  // fuzzy_unavailable: one status hint per page visit, not one per tag
+  {
+    const tm = loadTagManager({
+      fetchResponses: { RunPluginOperation: RPO({ matches: [], fuzzy_unavailable: true }) },
+    });
+    await tm.settle();
+    const statuses = recordStatuses(tm);
+    matchPage(tm, TAGS3);
+    const container = { innerHTML: "", querySelector: () => null, querySelectorAll: () => [] };
+    await tm.exports.searchAllOnPage(container);
+    assert.strictEqual(statuses.filter((s) => HINT.test(s)).length, 1, JSON.stringify(statuses));
+    await tm.exports.searchAllOnPage(container);
+    await tm.exports.searchSingleTag("2", container);
+    assert.strictEqual(statuses.filter((s) => HINT.test(s)).length, 1, "shown once: " + JSON.stringify(statuses));
+  }
+  {
+    // not when fuzzy search is off, nor when the result lacks the flag
+    for (const [out, patch] of [
+      [{ matches: [], fuzzy_unavailable: true }, { enableFuzzySearch: false }],
+      [{ matches: [] }, {}],
+    ]) {
+      const tm = loadTagManager({ fetchResponses: { RunPluginOperation: RPO(out) } });
+      await tm.settle();
+      const statuses = recordStatuses(tm);
+      matchPage(tm, TAGS3, patch);
+      const container = { innerHTML: "", querySelector: () => null, querySelectorAll: () => [] };
+      await tm.exports.searchAllOnPage(container);
+      await tm.exports.searchSingleTag("1", container);
+      assert.ok(!statuses.some((s) => HINT.test(s)), JSON.stringify([out, patch, statuses]));
+    }
   }
 
   // Init path (React component, not reachable via harness): source-level guards
