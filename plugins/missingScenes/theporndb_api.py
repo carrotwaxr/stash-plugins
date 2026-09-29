@@ -48,19 +48,15 @@ def is_theporndb(endpoint_url: str) -> bool:
 # REST Request with Retry
 # ============================================================================
 
-def _retry_after(error):
-    """Seconds from a Retry-After header, or None."""
-    try:
-        value = float(error.headers.get("Retry-After"))
-        return value if value >= 0 else None
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-
 def rest_request(api_key, path, params=None, plugin_settings=None,
                  operation_name=None):
     """
-    Make a REST request to the TPDB API with retry logic.
+    Make a REST request to the TPDB API, retrying transient failures within a time budget.
+
+    Retries like stashbox_api.graphql_request_with_retry: 429 (waiting Retry-After, else
+    rate_limit_pause), 5xx and connection errors (exponential backoff). The waits for one
+    request never add up to more than retry_budget seconds (60 by default): a wait that
+    would exceed it raises instead.
 
     Args:
         api_key: TPDB API key (Bearer token)
@@ -74,9 +70,9 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
 
     Raises:
         StashBoxAPIError: on every failure, with status_code for an HTTP error
-            (401/403 are auth errors, 429 after the retries is rate limiting, a 404
-            lets the caller say what wasn't found), and for connection errors and
-            a reply that isn't JSON.
+            (401/403 are auth errors, 429 is rate limiting with retry_after when the
+            server sent it, a 404 lets the caller say what wasn't found), and for
+            connection errors and a reply that isn't JSON.
     """
     max_retries = stashbox_api.get_config(plugin_settings, "max_retries")
     initial_delay = stashbox_api.get_config(plugin_settings, "initial_retry_delay")
@@ -84,6 +80,8 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
     backoff_multiplier = stashbox_api.get_config(plugin_settings, "retry_backoff_multiplier")
     timeout = stashbox_api.get_config(plugin_settings, "request_timeout")
     rate_limit_pause = stashbox_api.get_config(plugin_settings, "rate_limit_pause")
+    budget = stashbox_api.get_config(plugin_settings, "retry_budget")
+    name = operation_name or "request"
 
     # Build URL with query parameters
     url = f"{TPDB_API_BASE}{path}"
@@ -99,79 +97,82 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
 
     req = urllib.request.Request(url, headers=headers, method="GET")
 
-    last_error = None
     delay = initial_delay
-    name = operation_name or "request"
+    waited = 0.0
+
+    def can_wait(seconds):
+        return waited + seconds <= budget
 
     for attempt in range(max_retries + 1):
+        last_attempt = attempt >= max_retries
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as response:
                 body = response.read()
 
         except urllib.error.HTTPError as e:
             status_code = e.code
-            last_error = e
 
             if status_code == 429:
-                if attempt < max_retries:
-                    log.LogWarning(
-                        f"TPDB rate limited (429) on {operation_name or 'request'}. "
-                        f"Pausing {rate_limit_pause}s before retry {attempt + 1}/{max_retries}"
-                    )
-                    time.sleep(rate_limit_pause)
-                    continue
-                else:
-                    log.LogError("TPDB rate limited (429) - max retries exceeded")
+                retry_after = stashbox_api.parse_retry_after(
+                    e.headers.get("Retry-After") if e.headers else None)
+                wait = retry_after if retry_after is not None else rate_limit_pause
+                if last_attempt or not can_wait(wait):
+                    why = (f"asked to wait {wait:.0f}s more, past the {budget:.0f}s retry budget"
+                           if not can_wait(wait) else f"still limited after {max_retries} retries")
+                    log.LogError(f"TPDB rate limited (429) on {name}: {why}")
                     raise stashbox_api.StashBoxAPIError(
-                        "HTTP 429: rate limited", status_code=429, retryable=True,
-                        retry_after=_retry_after(e))
+                        f"HTTP 429 Too Many Requests: {why}", status_code=429, retryable=True,
+                        retry_after=retry_after)
+                log.LogWarning(f"TPDB rate limited (429) on {name}. Waiting {wait:.1f}s "
+                               f"before retry {attempt + 1}/{max_retries}")
+                time.sleep(wait)
+                waited += wait
+                continue
 
-            if status_code in stashbox_api.RETRYABLE_STATUS_CODES and attempt < max_retries:
-                log.LogWarning(
-                    f"TPDB HTTP {status_code} on {operation_name or 'request'}. "
-                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
-                )
+            if status_code in stashbox_api.AUTH_STATUS_CODES:
+                log.LogError(f"TPDB HTTP {status_code} on {name}: the API key was refused")
+                raise stashbox_api.StashBoxAPIError(
+                    f"HTTP {status_code}: {e.reason} (check the ThePornDB API key)",
+                    status_code=status_code, auth=True)
+
+            retryable = status_code in stashbox_api.RETRYABLE_STATUS_CODES
+            if retryable and not last_attempt and can_wait(delay):
+                log.LogWarning(f"TPDB HTTP {status_code} on {name}. "
+                               f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
+                waited += delay
                 delay = min(delay * backoff_multiplier, max_delay)
                 continue
 
             log.LogError(f"TPDB HTTP error {status_code} on {name}: {e.reason}")
-            if status_code in stashbox_api.AUTH_STATUS_CODES:
-                raise stashbox_api.StashBoxAPIError(
-                    f"HTTP {status_code}: {e.reason} (check the ThePornDB API key)",
-                    status_code=status_code, auth=True)
             raise stashbox_api.StashBoxAPIError(
-                f"HTTP {status_code}: {e.reason}", status_code=status_code,
-                retryable=status_code in stashbox_api.RETRYABLE_STATUS_CODES)
+                f"HTTP {status_code}: {e.reason}", status_code=status_code, retryable=retryable)
 
         except urllib.error.URLError as e:
-            last_error = e
-
             # A bad certificate won't fix itself on retry
             if isinstance(e.reason, ssl.SSLCertVerificationError):
                 log.LogError(f"TPDB TLS certificate verification failed: {e.reason}")
                 raise stashbox_api.StashBoxAPIError(
                     f"TLS certificate verification failed for {TPDB_API_BASE}: {e.reason}")
 
-            if attempt < max_retries:
-                log.LogWarning(
-                    f"TPDB connection error on {operation_name or 'request'}: {e.reason}. "
-                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})"
-                )
+            if not last_attempt and can_wait(delay):
+                log.LogWarning(f"TPDB connection error on {name}: {e.reason}. "
+                               f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
+                waited += delay
                 delay = min(delay * backoff_multiplier, max_delay)
                 continue
 
-            log.LogError(f"TPDB URL error after {max_retries} retries: {e.reason}")
+            log.LogError(f"TPDB connection failed on {name}: {e.reason}")
             raise stashbox_api.StashBoxAPIError(f"Connection failed: {e.reason}", retryable=True)
 
         except (OSError, http.client.HTTPException) as e:
             # Timeouts, resets and truncated replies while reading
-            last_error = e
-            if attempt < max_retries:
+            if not last_attempt and can_wait(delay):
                 log.LogWarning(f"TPDB network error on {name}: {e}. "
                                f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
+                waited += delay
                 delay = min(delay * backoff_multiplier, max_delay)
                 continue
             log.LogError(f"TPDB network error on {name}: {e}")
@@ -188,9 +189,8 @@ def rest_request(api_key, path, params=None, plugin_settings=None,
             raise stashbox_api.StashBoxAPIError(
                 "ThePornDB's reply is not JSON (an outage page or a proxy in the way?)")
 
-    log.LogError(f"TPDB failed after {max_retries} retries: {last_error}")
-    raise stashbox_api.StashBoxAPIError(f"Failed after {max_retries} retries: {last_error}",
-                                        retryable=True)
+    # The loop always returns or raises; this is a guard
+    raise stashbox_api.StashBoxAPIError(f"Failed after {max_retries} retries", retryable=True)
 
 
 # ============================================================================

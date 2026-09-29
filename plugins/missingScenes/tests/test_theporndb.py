@@ -418,3 +418,59 @@ def test_browse_sends_favorites_in_order_and_filters_by_membership(monkeypatch):
     assert [s["stash_id"] for s in res["missing_scenes"]] == ["n1"]
     assert res["favorites_limited"] is True
     assert res["favorites_query_limit"] == tp.MAX_BROWSE_QUERIES
+
+
+# ---- rest_request: Retry-After and the retry budget, as for the stash-boxes -----------------
+
+@pytest.fixture
+def slept(monkeypatch):
+    got = []
+    monkeypatch.setattr(tp.time, "sleep", lambda s: got.append(s))
+    return got
+
+
+def retry_error(code, retry_after=None):
+    from tests.test_fetch_errors import http_error as with_headers
+    return with_headers(code, retry_after=retry_after)
+
+
+def queue_http(monkeypatch, replies):
+    from tests.test_fetch_errors import serve_http
+    return serve_http(monkeypatch, list(replies))
+
+
+def test_tpdb_retry_after_is_honoured(monkeypatch, slept):
+    queue_http(monkeypatch, [retry_error(429, retry_after=5), {"data": []}])
+    assert tp.rest_request("k", "/scenes") == {"data": []}
+    assert slept == [5.0]
+
+
+def test_tpdb_retry_after_over_the_budget_raises_without_sleeping(monkeypatch, slept):
+    queue_http(monkeypatch, [retry_error(429, retry_after=120)])
+    with pytest.raises(stashbox_api.StashBoxAPIError) as ei:
+        tp.rest_request("k", "/scenes")
+    assert ei.value.is_rate_limited and ei.value.retry_after == 120
+    assert slept == []
+
+
+def test_tpdb_retry_budget_is_cumulative(monkeypatch, slept):
+    queue_http(monkeypatch, [retry_error(429, retry_after=40), retry_error(429, retry_after=40)])
+    with pytest.raises(stashbox_api.StashBoxAPIError) as ei:
+        tp.rest_request("k", "/scenes")
+    assert ei.value.is_rate_limited
+    assert slept == [40.0]
+
+
+def test_tpdb_429_without_retry_after_pauses_within_the_budget(monkeypatch, slept):
+    queue_http(monkeypatch, [retry_error(429), {"data": []}])
+    tp.rest_request("k", "/scenes")
+    assert slept == [stashbox_api.DEFAULT_CONFIG["rate_limit_pause"]]
+
+
+def test_tpdb_backoff_stops_at_the_budget(monkeypatch, slept):
+    # Backoff waits count against the same budget: the 1s wait fits in 1.5s, the next 2s doesn't
+    queue_http(monkeypatch, [retry_error(502)] * 4)
+    with pytest.raises(stashbox_api.StashBoxAPIError) as ei:
+        tp.rest_request("k", "/scenes", plugin_settings={"stashbox_retry_budget": 1.5})
+    assert ei.value.status_code == 502
+    assert slept == [1.0]
