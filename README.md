@@ -55,12 +55,12 @@ Generate NFO metadata files for Jellyfin, Emby and Plex, organize and rename vid
 Search multiple image sources from a performer's page and set an image with one click.
 
 **Features:**
-- Sources: Babepedia, PornPics, FreeOnes, EliteBabes, Boobpedia, JavDatabase and DuckDuckGo, each of which can be turned off
+- Sources: Babepedia, PornPics, FreeOnes, EliteBabes, Boobpedia, JavDatabase and DuckDuckGo (off by default), each of which can be turned on or off
 - Preview images, with keyboard navigation, before setting one
 - Filter by aspect ratio (portrait, landscape, square)
 - Customizable search suffix
 
-[Source](plugins/performerImageSearch/)
+[Documentation](plugins/performerImageSearch/README.md)
 
 ### Missing Scenes
 

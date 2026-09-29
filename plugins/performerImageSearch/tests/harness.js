@@ -1,0 +1,251 @@
+/**
+ * Test harness that runs the REAL performer-image-search.js inside a node `vm`
+ * context with minimal browser/Stash stubs. Not a test itself (name does not
+ * match test_*.js).
+ *
+ *   const { loadPlugin } = require("./harness");
+ *   const p = loadPlugin({ fetchResponses: { RunPluginOperation: (body) => ({...}) } });
+ *   await p.settle();
+ *
+ * Returns { exports, getState, setState, window, document, fetchCalls,
+ *           windowListeners, documentListeners, pluginEvents, createdElements,
+ *           pendingTimers, flushTimers, settle, logs }.
+ * `exports`/`getState`/`setState` come from the block at the end of
+ * performer-image-search.js (active only when window.__PERFORMER_IMAGE_SEARCH_TEST__
+ * is set, which the harness does). The window.pis* handlers are on `window`.
+ *
+ * fetchCalls: { url, op, variables, body, opts, source } per call. `op` is the
+ * GraphQL operation name (e.g. "RunPluginOperation"); `source` is
+ * variables.args.source for plugin calls. Responses are looked up in
+ * `fetchResponses` by op name (a value, or a function of the parsed body);
+ * unknown ops answer { data: {} }.
+ *
+ * windowListeners / documentListeners: { type, fn, capture } for every
+ * addEventListener call (capture is true when the third arg is true or
+ * { capture: true }). Removals are recorded in windowRemoved / documentRemoved.
+ * dispatchEvent(type, init): runs the registered listeners in DOM order (window
+ * capture, document capture, document bubble, window bubble); stopPropagation
+ * stops the later phases. Returns the event (defaultPrevented etc.).
+ * pluginEvents: PluginApi.Event.addEventListener registrations { type, fn }.
+ * createdElements: every element made by document.createElement.
+ * Timers are never real: setTimeout queues, flushTimers() runs them (and any
+ * they queue) once each; pendingTimers() lists the queued { ms }.
+ * DOM: getElementById/querySelector find nothing by default; a test can
+ * register elements with `document.elements[id] = el` (getElementById) or
+ * replace document.querySelector.
+ * console.warn/error calls are recorded in logs.warn / logs.error.
+ */
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+const SRC_PATH = path.join(__dirname, "..", "performer-image-search.js");
+
+function createElement(tagName, created) {
+  const classes = new Set();
+  const el = {
+    tagName: String(tagName).toUpperCase(),
+    style: {},
+    dataset: {},
+    children: [],
+    attributes: {},
+    innerHTML: "",
+    textContent: "",
+    className: "",
+    value: "",
+    listeners: {},
+    appendChild(child) { el.children.push(child); return child; },
+    remove() { el.removed = true; },
+    setAttribute(k, v) { el.attributes[k] = String(v); },
+    getAttribute(k) { return k in el.attributes ? el.attributes[k] : null; },
+    addEventListener(type, fn) { (el.listeners[type] = el.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) {
+      el.listeners[type] = (el.listeners[type] || []).filter((f) => f !== fn);
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 100, height: 100 }; },
+    classList: {
+      add: (...c) => c.forEach((x) => classes.add(x)),
+      remove: (...c) => c.forEach((x) => classes.delete(x)),
+      contains: (c) => classes.has(c),
+      toggle: (c, force) => {
+        const on = force === undefined ? !classes.has(c) : !!force;
+        if (on) classes.add(c); else classes.delete(c);
+        return on;
+      },
+    },
+  };
+  if (created) created.push(el);
+  return el;
+}
+
+const isCapture = (opts) => opts === true || !!(opts && typeof opts === "object" && opts.capture);
+
+function loadPlugin({ fetchResponses = {}, pathname = "/", base = "/" } = {}) {
+  // ---- fetch stub ----
+  const fetchCalls = [];
+  // Resolves json (which may itself be a promise, e.g. one that never settles)
+  // but rejects with an AbortError when opts.signal aborts, like a real fetch.
+  function respond(json, signal) {
+    const guard = (value) => new Promise((resolve, reject) => {
+      const abort = () => { const e = new Error("The operation was aborted"); e.name = "AbortError"; reject(e); };
+      if (signal && signal.aborted) return abort();
+      if (signal) signal.addEventListener("abort", abort);
+      Promise.resolve(value).then(resolve, reject);
+    });
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => guard(json),
+      text: () => guard(json).then((j) => JSON.stringify(j)),
+    });
+  }
+  function fetch(url, opts = {}) {
+    let body = null;
+    let op = null;
+    if (opts.body) {
+      try { body = JSON.parse(opts.body); } catch (e) { body = null; }
+      const q = body && body.query;
+      const m = q && q.match(/(?:query|mutation)\s+(\w+)/);
+      op = m ? m[1] : null;
+    }
+    const variables = (body && body.variables) || null;
+    const source = variables && variables.args ? variables.args.source : undefined;
+    fetchCalls.push({ url: String(url), op, variables, body, opts, source });
+    const handler = op !== null ? fetchResponses[op] : undefined;
+    if (handler === undefined) return respond({ data: {} }, opts.signal);
+    return respond(typeof handler === "function" ? handler(body) : handler, opts.signal);
+  }
+
+  // ---- controllable timers ----
+  let timerQueue = [];
+  let timerId = 0;
+  const setTimeoutStub = (fn, ms) => { timerQueue.push({ id: ++timerId, fn, ms }); return timerId; };
+  const clearTimeoutStub = (id) => { timerQueue = timerQueue.filter((t) => t.id !== id); };
+  const pendingTimers = () => timerQueue.map((t) => ({ ms: t.ms }));
+  function flushTimers() {
+    let guard = 0;
+    while (timerQueue.length && guard++ < 1000) timerQueue.shift().fn();
+  }
+
+  // ---- document / window ----
+  const createdElements = [];
+  const documentListeners = [];
+  const documentRemoved = [];
+  const windowListeners = [];
+  const windowRemoved = [];
+  // Currently registered listeners (adds minus removals), used by dispatchEvent
+  const activeDoc = [];
+  const activeWin = [];
+  function removeActive(list, type, fn, capture) {
+    const i = list.findIndex((l) => l.type === type && l.fn === fn && l.capture === capture);
+    if (i >= 0) list.splice(i, 1);
+  }
+  // Tiny event model: window capture, document capture, document bubble, window
+  // bubble; stopPropagation stops later phases (and later listeners are skipped
+  // only across phases, not within one). Returns the event.
+  function dispatchEvent(type, init = {}) {
+    let stopped = false;
+    const e = Object.assign({
+      defaultPrevented: false,
+      preventDefault() { e.defaultPrevented = true; },
+      stopPropagation() { stopped = true; },
+    }, init, { type });
+    const phases = [[activeWin, true], [activeDoc, true], [activeDoc, false], [activeWin, false]];
+    for (const [list, capture] of phases) {
+      if (stopped) break;
+      for (const l of list.filter((x) => x.type === type && x.capture === capture)) l.fn(e);
+    }
+    return e;
+  }
+  const baseEl = { getAttribute: (k) => (k === "href" ? base : null) };
+  const elements = {};
+  const document = {
+    title: "",
+    body: createElement("body", createdElements),
+    elements,
+    querySelector: (sel) => (sel === "base" ? baseEl : null),
+    querySelectorAll: () => [],
+    getElementById: (id) => elements[id] || null,
+    createElement: (tag) => createElement(tag, createdElements),
+    addEventListener(type, fn, opts) {
+      documentListeners.push({ type, fn, capture: isCapture(opts) });
+      activeDoc.push({ type, fn, capture: isCapture(opts) });
+    },
+    removeEventListener(type, fn, opts) {
+      documentRemoved.push({ type, fn, capture: isCapture(opts) });
+      removeActive(activeDoc, type, fn, isCapture(opts));
+    },
+  };
+  const window = {
+    __PERFORMER_IMAGE_SEARCH_TEST__: {},
+    location: { origin: "http://localhost", pathname, search: "", hash: "", href: "http://localhost" + pathname },
+    innerWidth: 1280,
+    innerHeight: 800,
+    addEventListener(type, fn, opts) {
+      windowListeners.push({ type, fn, capture: isCapture(opts) });
+      activeWin.push({ type, fn, capture: isCapture(opts) });
+    },
+    removeEventListener(type, fn, opts) {
+      windowRemoved.push({ type, fn, capture: isCapture(opts) });
+      removeActive(activeWin, type, fn, isCapture(opts));
+    },
+  };
+  window.window = window;
+
+  const pluginEvents = [];
+  const PluginApi = {
+    Event: {
+      addEventListener: (type, fn) => { pluginEvents.push({ type, fn }); },
+    },
+  };
+
+  const logs = { warn: [], error: [] };
+  const consoleStub = {
+    log() {}, info() {}, debug() {},
+    warn: (...args) => { logs.warn.push(args); },
+    error: (...args) => { logs.error.push(args); },
+  };
+
+  const context = vm.createContext({
+    window, document, PluginApi, fetch,
+    location: window.location,
+    setTimeout: setTimeoutStub,
+    clearTimeout: clearTimeoutStub,
+    console: consoleStub,
+    URL,
+    AbortController,
+    alert() {},
+  });
+
+  vm.runInContext(fs.readFileSync(SRC_PATH, "utf8"), context, { filename: SRC_PATH });
+
+  const hook = window.__PERFORMER_IMAGE_SEARCH_TEST__;
+
+  async function settle() {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  }
+
+  return {
+    exports: hook.exports || {},
+    getState: hook.getState,
+    setState: hook.setState,
+    window,
+    document,
+    fetchCalls,
+    windowListeners,
+    windowRemoved,
+    documentListeners,
+    documentRemoved,
+    dispatchEvent,
+    pluginEvents,
+    createdElements,
+    pendingTimers,
+    flushTimers,
+    settle,
+    logs,
+  };
+}
+
+module.exports = { loadPlugin, createElement };

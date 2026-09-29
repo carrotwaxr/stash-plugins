@@ -62,8 +62,9 @@ def test_drop_disallowed_hosts_checks_thumbnail_too():
         {"image": "http://10.0.0.4/c.jpg", "thumbnail": "https://example.com/c_t.jpg", "source": "DuckDuckGo"},
         {"image": "https://www.babepedia.com/pics/d.jpg", "thumbnail": "", "source": "Babepedia"},
     ]
-    kept = image_search.drop_disallowed_hosts(results, "test")
+    kept, dropped = image_search.drop_disallowed_hosts(results, "test")
     assert [r["image"] for r in kept] == [
         "https://example.com/a.jpg",
         "https://www.babepedia.com/pics/d.jpg",
     ]
+    assert dropped == 2

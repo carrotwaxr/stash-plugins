@@ -15,6 +15,15 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ## Performer Image Search
 
+### 1.5.0
+- **DuckDuckGo is now off by default, even if you never changed the toggle.** It often rate-limits searches. Turn on **Enable DuckDuckGo Images** in the plugin settings to use it again.
+- Each source shows a status chip in the modal: ok, empty, partial, error, blocked or timeout. Hover a chip to see the error. Sources have a 25 second limit and load gallery pages in parallel.
+- FreeOnes returns full-size images instead of square crops. EliteBabes returns only the gallery's own photos. JavDatabase returns only the performer's own images, without similar-idol thumbnails or sponsored ads.
+- DuckDuckGo retries once when blocked, then reports that it is rate-limited.
+- The layout filter uses real image sizes. Portrait is below 0.9, Square is 0.9 to 1.1 and Landscape is above 1.1. Images of unknown size pass every filter.
+- Preview: arrow keys and Escape no longer trigger Stash's hotkeys. If the full image fails, the thumbnail shows with a notice, and Confirm is disabled when neither loads.
+- Editing the query box changes only DuckDuckGo results. Site sources search by the performer's name.
+
 ### 1.4.1
 - Only images hosted by the source that found them can be set as a performer image. DuckDuckGo results must be on a public host.
 
