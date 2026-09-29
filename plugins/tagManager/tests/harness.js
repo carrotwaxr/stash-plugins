@@ -6,10 +6,14 @@
  *   const tm = loadTagManager({ fetchResponses: { Configuration: {...} } });
  *   await tm.settle();
  *
- * Returns { exports, getState, setState, fetchCalls, routes, document,
- *           settle, flushTimers, window }.
+ * Returns { exports, getState, setState, fetchCalls, confirmCalls, routes,
+ *           document, settle, flushTimers, window }.
  * `exports`/`getState`/`setState` come from the hook at the end of tag-manager.js
  * (active only when window.__TAG_MANAGER_TEST__ is set).
+ *
+ * confirm(): the plugin's global confirm() records each message in `confirmCalls`
+ * and answers with `window.confirm(msg)` (default: always true). Pass
+ * `loadTagManager({ confirm: () => false })` or set `tm.window.confirm` mid-test.
  */
 const fs = require("fs");
 const path = require("path");
@@ -57,7 +61,7 @@ function createElement(tagName) {
   return el;
 }
 
-function loadTagManager({ fetchResponses = {}, base = "/" } = {}) {
+function loadTagManager({ fetchResponses = {}, base = "/", confirm = () => true } = {}) {
   const defaultSettings = JSON.parse(fs.readFileSync(DEFAULT_SETTINGS_PATH, "utf8"));
 
   // ---- fetch stub: answers by GraphQL operation name, or by URL suffix ----
@@ -130,7 +134,9 @@ function loadTagManager({ fetchResponses = {}, base = "/" } = {}) {
     location: { pathname: "/", href: "http://localhost/", origin: "http://localhost", search: "", hash: "" },
     innerWidth: 1280,
     innerHeight: 800,
+    confirm,
   };
+  const confirmCalls = [];
 
   class MutationObserver {
     constructor(cb) { this.cb = cb; this.observing = false; }
@@ -165,7 +171,7 @@ function loadTagManager({ fetchResponses = {}, base = "/" } = {}) {
     CSS: { escape: (s) => String(s).replace(/[^\w-]/g, (c) => "\\" + c) },
     URL,
     alert() {},
-    confirm: () => true,
+    confirm: (msg) => { confirmCalls.push(String(msg)); return !!window.confirm(msg); },
   });
   window.window = window;
 
@@ -183,6 +189,7 @@ function loadTagManager({ fetchResponses = {}, base = "/" } = {}) {
     getState: hook.getState,
     setState: hook.setState,
     fetchCalls,
+    confirmCalls,
     routes,
     document,
     window,

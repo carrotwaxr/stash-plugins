@@ -1031,8 +1031,161 @@
   }
 
   /**
+   * F5: does this Stash accept `TagsMergeInput.values` (Stash v0.31+)? With it,
+   * the merge and the destination's update run in ONE transaction. A successful
+   * answer is cached; a failed introspection counts as "no" and is retried on the
+   * next call.
+   * @returns {Promise<boolean>}
+   */
+  let _mergeValuesSupport = null; // Promise<boolean> once introspection is in flight/succeeded
+  async function supportsMergeValues() {
+    if (!_mergeValuesSupport) {
+      const pending = graphqlRequest(`
+        query TagsMergeInputFields {
+          __type(name: "TagsMergeInput") { inputFields { name } }
+        }
+      `).then(data => (data?.__type?.inputFields || []).some(f => f.name === 'values'));
+      _mergeValuesSupport = pending;
+      pending.catch(() => {
+        if (_mergeValuesSupport === pending) _mergeValuesSupport = null;
+      });
+    }
+    try {
+      return await _mergeValuesSupport;
+    } catch (e) {
+      console.warn('[tagManager] could not detect tagsMerge values support:', e);
+      return false;
+    }
+  }
+
+  /**
+   * F5: fetch both merge sides fresh (aliases, stash_ids, parents, children) so
+   * the destination's final values aren't built from a stale localTags.
+   * @returns {Promise<{source: object|null, destination: object|null}>}
+   */
+  async function fetchTagsForMerge(sourceId, destinationId) {
+    const fields = `
+      id
+      name
+      aliases
+      stash_ids { endpoint stash_id }
+      parents { id }
+      children { id }
+    `;
+    const data = await graphqlRequest(`
+      query FindTagsForMerge($source: ID!, $destination: ID!) {
+        source: findTag(id: $source) { ${fields} }
+        destination: findTag(id: $destination) { ${fields} }
+      }
+    `, { source: sourceId, destination: destinationId });
+    return { source: data?.source || null, destination: data?.destination || null };
+  }
+
+  /** Ids of a tag's parents/children, minus the two merge sides. */
+  function relationIdsForMerge(list, source, destination) {
+    return (list || []).map(r => String(r.id))
+      .filter(id => id !== String(source.id) && id !== String(destination.id));
+  }
+
+  /**
+   * F5: the destination's values after absorbing `source`. Stash's plain merge
+   * moves scenes etc., the source name/aliases and stash_ids, but NOT parents,
+   * children or description. With TagsMergeInput.values these override the
+   * destination, so every field is spelled out in full:
+   *   aliases    = dest ∪ source name ∪ source aliases ∪ sanitizedAliases, minus
+   *                the destination name, deduped case-insensitively
+   *   stash_ids  = dest ∪ source, with this endpoint replaced by the new link
+   *   parent_ids = dest ∪ source parents, minus both sides and dest's children
+   *   child_ids  = dest ∪ source children, minus both sides and the new parents
+   *   description only when `description` is given (no rename: never `name`).
+   * Pure.
+   */
+  function buildMergeValues({ source, destination, stashdbTag, endpoint, sanitizedAliases, description }) {
+    const aliases = [];
+    const seenAliases = new Set([String(destination.name || '').toLowerCase()]);
+    const candidates = [
+      ...(destination.aliases || []), source.name, ...(source.aliases || []), ...(sanitizedAliases || []),
+    ];
+    for (const alias of candidates) {
+      if (!alias) continue;
+      const key = String(alias).toLowerCase();
+      if (seenAliases.has(key)) continue;
+      seenAliases.add(key);
+      aliases.push(alias);
+    }
+
+    const stashIds = [];
+    const seenStashIds = new Set();
+    for (const sid of [...(destination.stash_ids || []), ...(source.stash_ids || [])]) {
+      if (!sid || sid.endpoint === endpoint) continue;
+      const key = `${sid.endpoint}\u0000${sid.stash_id}`;
+      if (seenStashIds.has(key)) continue;
+      seenStashIds.add(key);
+      stashIds.push({ endpoint: sid.endpoint, stash_id: sid.stash_id });
+    }
+    stashIds.push({ endpoint, stash_id: stashdbTag.id });
+
+    // No direct cycles: a tag that is already the destination's child can't
+    // also become its parent (and vice versa). Deeper cycles are rejected by
+    // Stash's own hierarchy validation.
+    const destChildIds = new Set(relationIdsForMerge(destination.children, source, destination));
+    const parentIds = [...new Set([
+      ...relationIdsForMerge(destination.parents, source, destination),
+      ...relationIdsForMerge(source.parents, source, destination),
+    ])].filter(id => !destChildIds.has(id));
+    const parentSet = new Set(parentIds);
+    const childIds = [...new Set([
+      ...relationIdsForMerge(destination.children, source, destination),
+      ...relationIdsForMerge(source.children, source, destination),
+    ])].filter(id => !parentSet.has(id));
+
+    const values = {
+      id: String(destination.id), // TagUpdateInput.id is required (ignored by tagsMerge)
+      aliases,
+      stash_ids: stashIds,
+      parent_ids: parentIds,
+      child_ids: childIds,
+    };
+    if (description !== undefined) values.description = description;
+    return values;
+  }
+
+  /**
+   * F5: ask before an irreversible merge, with what moves. Expects the source's
+   * `parents`/`children` (fresh from fetchTagsForMerge); relations to either
+   * merge side aren't counted.
+   * @returns {Promise<boolean>}
+   */
+  async function confirmTagMerge(sourceTag, destinationTag) {
+    const sceneCount = await getTagSceneCount(sourceTag.id);
+    const childCount = relationIdsForMerge(sourceTag.children, sourceTag, destinationTag).length;
+    const parentCount = relationIdsForMerge(sourceTag.parents, sourceTag, destinationTag).length;
+    const count = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    return confirm(
+      `Merge "${sourceTag.name}" into "${destinationTag.name}"?\n\n` +
+      `${count(sceneCount, 'scene')}, ${count(childCount, 'child tag')} and ${count(parentCount, 'parent tag')} ` +
+      `move to "${destinationTag.name}". "${sourceTag.name}" will be deleted. This can't be undone.`
+    );
+  }
+
+  /** Local state after the source tag is gone from the server. */
+  function dropMergedSourceLocally(sourceId) {
+    const sourceIdx = localTags.findIndex(t => t.id === sourceId);
+    if (sourceIdx >= 0) {
+      localTags.splice(sourceIdx, 1);
+    }
+    delete matchResults[sourceId];
+  }
+
+  /**
    * Handle merging a source tag into a destination tag, then apply StashDB link.
    * Used by both pre-validation and API error merge handlers.
+   *
+   * F5: confirms first, then on Stash v0.31+ sends ONE tagsMerge whose `values`
+   * set the destination's aliases, stash_ids, parents, children and optional
+   * description in the same transaction. On v0.30 it merges, then updates; if
+   * that update fails the merge has already happened, so the source is dropped
+   * locally and the error says what to fix.
    *
    * @param {object} params - Merge parameters
    * @param {object} params.sourceTag - The tag being merged (will be deleted)
@@ -1042,7 +1195,9 @@
    * @param {string[]} params.sanitizedAliases - Aliases to include in the merge
    * @param {HTMLElement} params.modal - The modal element (for reading description choice)
    * @param {HTMLElement} params.container - The container element (for re-rendering)
-   * @returns {Promise<{success: boolean, error?: string}>}
+   * @returns {Promise<{success: boolean, error?: string, cancelled?: boolean, merged?: boolean}>}
+   *   `cancelled`: the user declined, nothing was sent. `merged`: the source is
+   *   gone on the server even though the result is a failure.
    */
   async function performTagMerge({ sourceTag, destinationId, stashdbTag, endpoint, sanitizedAliases, modal, container }) {
     const destinationTag = localTags.find(t => t.id === destinationId);
@@ -1050,54 +1205,81 @@
       return { success: false, error: 'Could not find destination tag.' };
     }
 
+    let fresh;
     try {
-      // Merge current tag into the destination (conflicting) tag
-      // This will move all entities from current tag to destination, merge aliases, then delete current tag
-      const mergedTag = await mergeTags([sourceTag.id], destinationId);
+      fresh = await fetchTagsForMerge(sourceTag.id, destinationId);
+    } catch (e) {
+      console.error('[tagManager] Merge pre-check error:', e.message);
+      return { success: false, error: `Could not load the tags to merge: ${e.message}` };
+    }
+    if (!fresh.source || !fresh.destination) {
+      const missing = !fresh.source ? sourceTag.name : destinationTag.name;
+      return { success: false, error: `"${missing}" no longer exists in Stash (it may have been merged or deleted). Refresh and try again.` };
+    }
+    const source = fresh.source;
+    const destination = fresh.destination;
 
-      // Preserve existing stash_ids and add/update the new one for this endpoint
-      const existingStashIds = mergedTag.stash_ids || [];
-      const filteredStashIds = existingStashIds.filter(sid => sid.endpoint !== endpoint);
+    if (!(await confirmTagMerge(source, destination))) {
+      return { success: false, cancelled: true };
+    }
 
-      const stashIdUpdate = {
-        id: destinationId,
-        stash_ids: [...filteredStashIds, {
-          endpoint: endpoint,
-          stash_id: stashdbTag.id,
-        }],
-      };
+    // Apply description if user chose StashDB description
+    const descChoice = modal.querySelector('input[name="tm-desc"]:checked')?.value;
+    const values = buildMergeValues({
+      source,
+      destination,
+      stashdbTag,
+      endpoint,
+      sanitizedAliases,
+      description: descChoice === 'stashdb' && stashdbTag.description ? stashdbTag.description : undefined,
+    });
 
-      // Merge the aliases we collected (including the original tag name) into the destination
-      const mergedAliases = new Set(mergedTag.aliases || []);
-      for (const alias of sanitizedAliases) {
-        mergedAliases.add(alias);
-      }
-      stashIdUpdate.aliases = Array.from(mergedAliases);
-
-      // Apply description if user chose StashDB description
-      const descChoice = modal.querySelector('input[name="tm-desc"]:checked')?.value;
-      if (descChoice === 'stashdb' && stashdbTag.description) {
-        stashIdUpdate.description = stashdbTag.description;
-      }
-
-      await updateTag(stashIdUpdate);
-
-      // Update local state - remove the merged (source) tag and update destination
-      const sourceIdx = localTags.findIndex(t => t.id === sourceTag.id);
-      if (sourceIdx >= 0) {
-        localTags.splice(sourceIdx, 1);
-      }
-
-      const destIdx = localTags.findIndex(t => t.id === destinationId);
-      if (destIdx >= 0) {
-        localTags[destIdx].stash_ids = stashIdUpdate.stash_ids;
-        localTags[destIdx].aliases = stashIdUpdate.aliases;
-        if (stashIdUpdate.description !== undefined) {
-          localTags[destIdx].description = stashIdUpdate.description;
+    try {
+      if (await supportsMergeValues()) {
+        // Stash v0.31+: merge + destination update in one transaction.
+        try {
+          await mergeTags([sourceTag.id], destinationId, values);
+        } catch (e) {
+          console.error('[tagManager] Merge error:', e.message);
+          return { success: false, error: `${e.message} (nothing was changed)` };
+        }
+      } else {
+        // Stash v0.30: two steps. The merge moves scenes, aliases and stash_ids
+        // and deletes the source; the update adds the rest.
+        await mergeTags([sourceTag.id], destinationId);
+        try {
+          await updateTag(values);
+        } catch (e) {
+          console.error('[tagManager] Post-merge update error:', e.message);
+          // The source is gone on the server: don't keep offering it.
+          dropMergedSourceLocally(sourceTag.id);
+          try {
+            renderPage(container);
+          } catch (renderErr) {
+            console.error('[tagManager] re-render after merge failed:', renderErr);
+          }
+          await refreshLocalTags();
+          return {
+            success: false,
+            merged: true,
+            error: `Merged '${source.name}' into '${destination.name}', but updating '${destination.name}' failed: ${e.message}. ` +
+              `The merge can't be undone; fix the conflict (e.g. rename the clashing alias) and edit '${destination.name}' in Stash.`,
+          };
         }
       }
 
-      delete matchResults[sourceTag.id];
+      // Update local state - remove the merged (source) tag and update destination
+      dropMergedSourceLocally(sourceTag.id);
+
+      const destIdx = localTags.findIndex(t => t.id === destinationId);
+      if (destIdx >= 0) {
+        localTags[destIdx].stash_ids = values.stash_ids;
+        localTags[destIdx].aliases = values.aliases;
+        if (values.description !== undefined) {
+          localTags[destIdx].description = values.description;
+        }
+      }
+
       modal.remove();
 
       showStatus(`Merged "${sourceTag.name}" into "${destinationTag.name}" and linked to StashDB`, 'success');
@@ -3499,7 +3681,10 @@
               container
             });
 
-            if (!result.success) {
+            if (result.cancelled) {
+              mergeBtn.disabled = false;
+              mergeBtn.textContent = originalText;
+            } else if (!result.success) {
               errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
               mergeBtn.disabled = false;
               mergeBtn.textContent = originalText;
@@ -3584,7 +3769,10 @@
                 container
               });
 
-              if (!result.success) {
+              if (result.cancelled) {
+                mergeApiBtn.disabled = false;
+                mergeApiBtn.textContent = originalText;
+              } else if (!result.success) {
                 errorEl.innerHTML = `<div class="tm-error-message">Merge failed: ${escapeHtml(result.error)}</div>`;
                 mergeApiBtn.disabled = false;
                 mergeApiBtn.textContent = originalText;
@@ -3679,9 +3867,11 @@
    *
    * @param {string[]} sourceIds - Array of tag IDs to merge (will be deleted)
    * @param {string} destinationId - Tag ID to merge into (will be kept)
+   * @param {object} [values] - TagUpdateInput applied to the destination in the
+   *   same transaction (Stash v0.31+ only; check supportsMergeValues() first)
    * @returns {object} - The updated destination tag
    */
-  async function mergeTags(sourceIds, destinationId) {
+  async function mergeTags(sourceIds, destinationId, values) {
     const query = `
       mutation TagsMerge($input: TagsMergeInput!) {
         tagsMerge(input: $input) {
@@ -3697,9 +3887,9 @@
       }
     `;
 
-    const data = await graphqlRequest(query, {
-      input: { source: sourceIds, destination: destinationId }
-    });
+    const input = { source: sourceIds, destination: destinationId };
+    if (values) input.values = values;
+    const data = await graphqlRequest(query, { input });
     return data?.tagsMerge;
   }
 
@@ -5293,6 +5483,9 @@
       loadTagsFromCache,
       buildParentOptions,
       shouldShowParentControls,
+      supportsMergeValues,
+      confirmTagMerge,
+      performTagMerge,
     };
     window.__TAG_MANAGER_TEST__.getState = () => ({
       localTags, settings, stashBoxes, selectedStashBox, stashdbTags, matchResults,
