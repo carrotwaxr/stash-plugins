@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 import utils.logger as log
@@ -74,6 +75,25 @@ def _is_valid_image(filepath):
         return False
 
 
+def authenticated_url(url, settings, api_key):
+    """Add auth to a Stash image URL: nothing with a session cookie, else the API key, else nothing."""
+    if (settings or {}).get("session_cookie") or not api_key:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}apikey={urllib.parse.quote(str(api_key), safe='')}"
+
+
+def _safe_url(url):
+    """The URL with any apikey query value hidden, for logging."""
+    parts = urllib.parse.urlsplit(url)
+    if "apikey=" not in parts.query:
+        return url
+    query = "&".join(
+        "apikey=***" if p.startswith("apikey=") else p for p in parts.query.split("&")
+    )
+    return urllib.parse.urlunsplit(parts._replace(query=query))
+
+
 def download_image(url, dest_filepath, settings):
     """Download an image from a URL and save it to a file.
 
@@ -94,7 +114,7 @@ def download_image(url, dest_filepath, settings):
         return True
 
     # Sanitize URL for logging (hide API key)
-    safe_url = url.split('&apikey=')[0] + '&apikey=***' if '&apikey=' in url else url
+    safe_url = _safe_url(url)
 
     log.debug(f"Downloading image from {safe_url}")
 
@@ -106,6 +126,9 @@ def download_image(url, dest_filepath, settings):
         try:
             # Make the request
             request = urllib.request.Request(url)
+            cookie = (settings or {}).get("session_cookie")
+            if cookie and cookie.get("value"):
+                request.add_header("Cookie", f"{cookie.get('name') or 'session'}={cookie['value']}")
             with urllib.request.urlopen(request, timeout=30) as response:
                 # Check HTTP status
                 if response.status != 200:
@@ -114,6 +137,13 @@ def download_image(url, dest_filepath, settings):
 
                 # Check content type
                 content_type = response.headers.get('Content-Type', '')
+                if content_type.startswith('text/html'):
+                    log.error(
+                        f"Got an HTML page instead of an image from {safe_url}. Stash likely redirected "
+                        "to its login page: the plugin isn't authenticated. Check that Stash passes a "
+                        "session to plugins, or generate an API key in Settings > Security."
+                    )
+                    return False
                 if not content_type.startswith('image/'):
                     log.error(f"Invalid content type '{content_type}' from {safe_url} (expected image/*)")
                     return False

@@ -1,6 +1,6 @@
 import os
 import utils.logger as log
-from utils.files import download_image
+from utils.files import authenticated_url, download_image
 from utils.paths import PathEscapeError, join_under, sanitize_component
 from utils.run_flow import is_dry_run
 
@@ -75,11 +75,15 @@ def process_performer(performer, settings, api_key, overwrite=False):
         log.debug(f"Skipping performer {performer_name}: no image available")
         return
 
+    if "default=true" in performer["image_path"]:
+        log.debug(f"Skipping performer {performer_name}: only a default image")
+        return
+
     image_path = get_actor_image_path(performer_name, settings)
     if not image_path:
         return
 
-    image_url = f"{performer['image_path']}&apikey={api_key}"
+    image_url = authenticated_url(performer["image_path"], settings, api_key)
     dest_dir = os.path.dirname(image_path)
 
     # Check if we should skip this performer

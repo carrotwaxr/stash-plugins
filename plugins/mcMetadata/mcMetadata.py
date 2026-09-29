@@ -100,6 +100,11 @@ def main(json_input, stash):
         if is_dry_run(settings):
             log.info("[DRY RUN] Mode enabled - no changes will be made")
 
+        # Image downloads authenticate with the session Stash gives the plugin (never logged)
+        cookie = (json_input.get("server_connection") or {}).get("SessionCookie") or {}
+        if cookie.get("Value"):
+            settings["session_cookie"] = {"name": cookie.get("Name") or "session", "value": cookie["Value"]}
+
         # Get API key for modes that need it
         try:
             stash_config = stash.get_configuration()["general"]

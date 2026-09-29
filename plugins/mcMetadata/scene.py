@@ -2,7 +2,7 @@ import os
 from collections import Counter
 import utils.logger as log
 from performer import process_performer
-from utils.files import download_image, find_sidecars, rename_file, replace_file_ext
+from utils.files import authenticated_url, download_image, find_sidecars, rename_file, replace_file_ext
 from utils.nfo import _is_plex, _count_videos, artwork_filenames, artwork_templates, build_nfo_xml, is_folder_level, _render
 from utils.paths import is_inside
 from utils.replacer import get_new_path
@@ -174,7 +174,7 @@ def process_scene(scene, stash, settings, api_key):
             continue
         image_path = os.path.join(folder, names[key])
         if not pending.exists(image_path):
-            screenshot_url = f"{scene['paths']['screenshot']}&apikey={api_key}"
+            screenshot_url = authenticated_url(scene["paths"]["screenshot"], settings, api_key)
             download_image(screenshot_url, image_path, settings)
     return None
 
