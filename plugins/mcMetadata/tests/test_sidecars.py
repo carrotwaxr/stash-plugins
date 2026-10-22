@@ -193,6 +193,51 @@ class TestCollisionSuffix(_Base):
         self.assertIn("renamerFilepathBudget", errors[0])
 
 
+class TestNameHeldInPlace(_Base):
+    """A file the renamer leaves in place (in the target folder, ignore-files-in-path on) still holds its name, so a
+    second file of the scene that wants the same name gets " (2)" instead of being skipped as taken. Seen with a native
+    1080p original and a 1080p render of it in one scene: both resolve to "Title [1080p].mp4"."""
+
+    def _held(self, new_first):
+        held = os.path.join(self.lib, "New Name.mp4")
+        new = os.path.join(self.incoming, "render.mp4")
+        _write(held, "original")
+        _write(new, "render")
+        order = [new, held] if new_first else [held, new]
+        files = [{"id": f"f{i}", "path": p, "height": 1080, "width": 1920} for i, p in enumerate(order)]
+        scene = {"id": "5", "title": "New Name", "date": None, "files": files,
+                 "performers": [], "studio": None, "tags": [], "stash_ids": []}
+        self.rename(scene, _FakeStash({f["id"]: f["path"] for f in files}), self._settings())
+        return sorted(os.listdir(self.lib)), os.listdir(self.incoming)
+
+    def test_new_primary_before_the_held_file_gets_a_suffix(self):
+        names, left = self._held(new_first=True)
+        self.assertEqual(names, ["New Name (2).mp4", "New Name.mp4"])
+        self.assertEqual(left, [])
+        self.assertEqual(_read(os.path.join(self.lib, "New Name.mp4")), "original")
+        self.assertEqual(_read(os.path.join(self.lib, "New Name (2).mp4")), "render")
+
+    def test_new_file_after_the_held_primary_gets_a_suffix(self):
+        names, left = self._held(new_first=False)
+        self.assertEqual(names, ["New Name (2).mp4", "New Name.mp4"])
+        self.assertEqual(left, [])
+        self.assertEqual(_read(os.path.join(self.lib, "New Name (2).mp4")), "render")
+
+    def test_held_file_does_not_move_when_ignore_is_off(self):
+        """With ignore-files-in-path off the held file is at its expected path: it already reserves the name."""
+        held = os.path.join(self.lib, "New Name.mp4")
+        new = os.path.join(self.incoming, "render.mp4")
+        _write(held, "original")
+        _write(new, "render")
+        files = [{"id": "f0", "path": held, "height": 1080, "width": 1920},
+                 {"id": "f1", "path": new, "height": 1080, "width": 1920}]
+        scene = {"id": "5", "title": "New Name", "date": None, "files": files,
+                 "performers": [], "studio": None, "tags": [], "stash_ids": []}
+        self.rename(scene, _FakeStash({f["id"]: f["path"] for f in files}), self._settings(renamer_ignore_files_in_path=False))
+        self.assertEqual(sorted(os.listdir(self.lib)), ["New Name (2).mp4", "New Name.mp4"])
+        self.assertEqual(_read(held), "original")
+
+
 def _case_insensitive_fs():
     """Patch os.path.exists/samefile to act like Windows or macOS: names match in any case."""
     real_exists, real_samefile = os.path.exists, os.path.samefile

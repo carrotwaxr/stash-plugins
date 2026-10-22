@@ -63,6 +63,9 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ## mcMetadata
 
+### 1.6.1
+- Two files of one scene that resolve to the same name now get the numbered suffix even when one of them stays where it is (it's already in the base path and **Skip Files Already in Path** is on). Before, the other file was skipped as "destination already exists" and left where it was, outside the base path, as with a native 1080p original and a 1080p re-render of it.
+
 ### 1.6.0
 - Renames are safer. Names are sanitized, capped at 255 bytes each, and can't escape the base path, which must be inside a Stash library. **Max Filepath Length** is clamped to 40-800 and trims tags, then whole performer names, only when a path is too long. A destination that's already taken is never overwritten: the move is skipped with a warning, and two files of one scene get a numbered suffix such as ` (2)`. Case-only renames work on case-insensitive file systems.
 - Subtitles, funscripts and other sidecar files now move with the video. The new **Move Sidecar Files** setting is on by default.
