@@ -1,6 +1,6 @@
 # mcMetadata Plugin for [Stash](https://github.com/stashapp/stash)
 
-**Version**: 1.6.0
+**Version**: 1.6.1
 
 This plugin is for users who manage their collection with Stash but serve content via Jellyfin, Emby, or Plex. Instead of relying on those media servers' scrapers, mcMetadata leverages your Stash database to generate `.nfo` metadata files and performer images that your media server can use.
 

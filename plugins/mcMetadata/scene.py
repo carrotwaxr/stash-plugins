@@ -355,6 +355,12 @@ def __rename_videos(scene, stash, settings, pending=None):
     primary_path = None
     original_primary_path = files_to_process[0]["path"]  # Store before loop
     used_paths = set()  # Track paths we've used to detect conflicts
+    # A file left where it is (in the target folder, ignore-files-in-path on) keeps its name: reserve it before any
+    # file picks a path, so a sibling that wants the same name gets " (2)" instead of being skipped as taken
+    # (a native 1080p original and a 1080p render of it both resolve to "... [1080p].mp4")
+    if settings.get("renamer_ignore_files_in_path", False):
+        target = settings.get("renamer_path", IMPOSSIBLE_PATH)
+        used_paths.update(f["path"] for f in files if is_inside(f["path"], target))
     files_moved = False  # Track if any files were actually moved
     # Videos per source folder before anything moves: folder-level files (movie.nfo,
     # poster.jpg ...) only travel from a folder that held just this one video
