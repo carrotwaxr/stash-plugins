@@ -241,6 +241,9 @@ One request reads up to 50 stash-box pages (5000 scenes). If the page isn't full
 
 ## Changelog
 
+### 1.5.1
+- Bulk scene edits are faster. The scene update hook answers an update that didn't change stash IDs (adding scenes to a group, setting tags or ratings) before loading the plugin or asking Stash for its settings. Stash waits for the hook on every scene before an update returns.
+
 ### 1.5.0
 - Stash-box failures, rate limits and truncated results are shown as errors or partial results with **Retry from here**, instead of "all found".
 - The scene index moved to Stash's config dir (`plugin_data/missingScenes/`) with a 5 minute TTL.
