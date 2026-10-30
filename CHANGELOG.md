@@ -63,6 +63,9 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ## mcMetadata
 
+### 1.6.2
+- The scene update hook skips an update that changes only fields mcMetadata never reads, such as groups, galleries, custom fields and play history. It exits before loading anything. Stash runs the hook on every scene before the update returns, so adding 2,866 scenes to a group used to take about 17 minutes. Stash versions that don't report the changed fields process every update as before.
+
 ### 1.6.1
 - Two files of one scene that resolve to the same name now get the numbered suffix even when one of them stays where it is (it's already in the base path and **Skip Files Already in Path** is on). Before, the other file was skipped as "destination already exists" and left where it was, outside the base path, as with a native 1080p original and a 1080p re-render of it.
 
