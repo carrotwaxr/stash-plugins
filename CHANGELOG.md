@@ -4,6 +4,9 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ## Missing Scenes
 
+### 1.5.1
+- Bulk scene edits are faster. The scene update hook answers an update that didn't change stash IDs (adding scenes to a group, setting tags or ratings) before loading the plugin or asking Stash for its settings. Stash waits for the hook on every scene before an update returns.
+
 ### 1.5.0
 - Stash-box and ThePornDB failures and rate limits now show as errors or partial results with **Retry from here**, and a search that stops at the 50-page limit offers **Load More**. Missing Scenes no longer says you have everything when a request failed or stopped early, even before any missing scene turned up.
 - The scene index is kept in Stash's config dir (`plugin_data/missingScenes/`), so it survives plugin updates.

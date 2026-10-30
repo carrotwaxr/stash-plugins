@@ -23,6 +23,7 @@ import tempfile
 
 # Import Stash-compatible logging
 import log
+from entry import SKIPPED_UPDATE, sets_stash_ids
 import plugin_data
 import fingerprint_index
 
@@ -2527,9 +2528,10 @@ def handle_scene_update_hook(hook_context, plugin_settings):
     download queue. It is deleted, or unmonitored with unmonitorOnly.
     """
     hook_context = hook_context or {}
-    if "stash_ids" not in (hook_context.get("inputFields") or []):
+    # entry.py already answers these before loading this module; kept for direct callers
+    if not sets_stash_ids(hook_context):
         log.LogDebug("Scene update did not set stash_ids; no Whisparr cleanup")
-        return {"success": True, "message": "stash_ids not changed"}
+        return dict(SKIPPED_UPDATE)
 
     # scenesUpdate passes a list as input, so prefer the hook's own scene id
     hook_input = hook_context.get("input")
@@ -2930,8 +2932,16 @@ def task_cleanup_whisparr(plugin_settings):
 # Plugin Entry Point
 # ============================================================================
 
-def main():
-    """Main entry point for the plugin."""
+def main(input_data=None):
+    """Main entry point for the plugin.
+
+    Args:
+        input_data: The JSON input Stash sent, parsed (entry.py passes it); read from
+            stdin when None
+    """
+    global _input_data
+    if input_data is not None:
+        _input_data = input_data
 
     # Read input from stdin (uses cached version to avoid double-read issue)
     try:

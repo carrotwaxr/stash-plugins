@@ -206,7 +206,7 @@ def test_fresh_build_ignores_the_memory_and_disk_caches(monkeypatch):
 
 # ---- importing never writes (a read-only plugin folder) ------------------------------------
 
-PLUGIN_FILES = ["missing_scenes.py", "plugin_data.py", "log.py", "fingerprint_index.py",
+PLUGIN_FILES = ["entry.py", "missing_scenes.py", "plugin_data.py", "log.py", "fingerprint_index.py",
                 "stashbox_api.py", "theporndb_api.py", "missingScenes.yml"]
 
 
