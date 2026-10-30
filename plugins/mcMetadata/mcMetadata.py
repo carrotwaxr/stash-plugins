@@ -4,7 +4,7 @@ mcMetadata - Stash Plugin for Media Center Metadata Generation
 Generates NFO files for Jellyfin/Emby, organizes video files according to
 configurable templates, and exports performer images to media server folders.
 
-Version: 1.5.0
+Version: 1.6.2
 
 Stash runs this file with the plugin's JSON input on stdin (see run()). Importing it
 does nothing, so tests can drive run() with their own input and Stash client.
@@ -12,10 +12,32 @@ does nothing, so tests can drive run() with their own input and Stash client.
 
 import json
 import sys
-from stashapi_check import stashapi_problem
 
 # Plugin configuration
 PLUGIN_ID = "mcMetadata"
+
+# Scene update input fields that change nothing mcMetadata writes: no NFO field, renamer
+# variable or processing condition reads them. A denylist, so a field Stash adds later
+# costs one unneeded run instead of a stale NFO or a file left unrenamed.
+UNREAD_SCENE_FIELDS = frozenset({
+    "id", "ids", "clientMutationId",
+    "group_ids", "groups", "movie_ids", "movies", "gallery_ids", "custom_fields",
+    "resume_time", "play_duration", "play_count", "o_counter",
+})
+
+
+def is_unread_scene_update(json_input):
+    """True if this is a Scene.Update.Post whose update set only fields mcMetadata never reads.
+
+    Stash sends the mutation input's top-level keys as hookContext.inputFields (a group
+    add arrives as ["ids", "group_ids"]). Without them (older Stash, a scan's update,
+    a manual run) the scene is processed as before.
+    """
+    hook_context = (json_input.get("args") or {}).get("hookContext") or {}
+    fields = hook_context.get("inputFields")
+    if hook_context.get("type") != "Scene.Update.Post" or not fields:
+        return False
+    return all(field in UNREAD_SCENE_FIELDS for field in fields)
 
 
 def read_plugin_config(stash_instance):
@@ -181,18 +203,26 @@ def run(stdin_text, stash_factory=None):
         stash_factory: Builds the Stash client from server_connection; defaults to
             stashapi's StashInterface (tests pass a fake)
     """
+    # Parse JSON context passed from Stash
+    json_input = json.loads(stdin_text)
+
+    # Stash runs post hooks one scene at a time before the mutation returns, so a bulk
+    # update waits on every run. Most of a run's cost is imports: decide before any.
+    if is_unread_scene_update(json_input):
+        print(json.dumps({"output": "ok"}))
+        return
+
     # Check stashapp-tools before anything imports stashapi, and report a clear error
     # instead of a traceback. (stashapi.log is unavailable here, so use Stash's raw
-    # log protocol: \x01e\x02 prefix on stderr.)
+    # log protocol: \x01e\x02 prefix on stderr.) Imported here: importlib.metadata is slow.
+    from stashapi_check import stashapi_problem
+
     problem = stashapi_problem()
     if problem:
         sys.stderr.write(f"\x01e\x02{problem}\n")
         sys.stderr.flush()
         print(json.dumps({"error": problem}))
         return
-
-    # Parse JSON context passed from Stash
-    json_input = json.loads(stdin_text)
 
     # Initialize Stash API
     if stash_factory is None:

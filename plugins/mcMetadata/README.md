@@ -1,6 +1,6 @@
 # mcMetadata Plugin for [Stash](https://github.com/stashapp/stash)
 
-**Version**: 1.6.1
+**Version**: 1.6.2
 
 This plugin is for users who manage their collection with Stash but serve content via Jellyfin, Emby, or Plex. Instead of relying on those media servers' scrapers, mcMetadata leverages your Stash database to generate `.nfo` metadata files and performer images that your media server can use.
 
@@ -258,6 +258,8 @@ Other templates log a warning but still rename. A scene whose path is already ta
 
 If the hook is off, it does nothing and writes nothing to the log.
 
+The hook also skips an update that changed only fields mcMetadata never reads: groups, galleries, custom fields and play history. Adding many scenes to a group is then fast, because Stash waits for the hook on every scene before the update returns. On Stash versions that don't report which fields changed, every update is processed.
+
 ### Recommended Workflow
 
 1. **First Run**: Enable Dry Run Mode, configure your settings, run "Bulk Update Scenes"
@@ -362,6 +364,12 @@ STASH_PLUGINS_INTEGRATION=1 STASH_URL=http://localhost:9999 STASH_API_KEY=... py
 `tests/manual_run.py` runs the plugin against one scene by hand; see its docstring.
 
 ## Changelog
+
+### v1.6.2
+- **Faster bulk updates**: an update that changes only fields mcMetadata never reads (groups, galleries, custom fields, play history) now skips the scene before loading anything. Stash runs the hook on every scene before the update returns, so adding 2,866 scenes to a group used to take about 17 minutes.
+
+### v1.6.1
+- **Collision suffix**: two files of one scene that resolve to the same name get the numbered suffix even when one of them stays where it is (already in the base path with Skip Files Already in Path on).
 
 ### v1.6.0
 - **Safer renames**: names from the template are sanitized in one place, capped at 255 bytes each, and can't escape the base path. The base path must be inside a Stash library. Max Filepath Length is clamped to 40-800 and only shortens a path that is too long (tags first, then whole performer names). Collision suffixes such as ` (2)` respect the limit, and a template that may collide now warns instead of stopping renames. Case-only renames work on case-insensitive file systems.

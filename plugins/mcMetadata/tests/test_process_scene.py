@@ -433,17 +433,20 @@ class TestEntryPoint(_Base):
         with patch.object(sys, "stdin", stdin):
             return importlib.import_module("mcMetadata")
 
-    def _stdin(self, hook_type="Scene.Update.Post", scene_id="5"):
+    def _stdin(self, hook_type="Scene.Update.Post", scene_id="5", fields=("id", "title")):
+        """Hook input; fields=None leaves inputFields out, as Stash does for a scan's update."""
+        context = {"type": hook_type, "id": scene_id, "input": {"id": scene_id, "title": "x"}}
+        if fields is not None:
+            context["inputFields"] = list(fields)
         return json.dumps({
             "server_connection": {"Scheme": "http", "Host": "stash.invalid", "Port": 9999,
                                   "Dir": os.path.join(self.tmp, "config")},
-            "args": {"hookContext": {"type": hook_type, "id": scene_id,
-                                     "input": {"id": scene_id, "title": "x"}, "inputFields": ["id", "title"]}},
+            "args": {"hookContext": context},
         })
 
     def _run(self, entry, stash):
         out = io.StringIO()
-        with patch.object(entry, "stashapi_problem", return_value=None), redirect_stdout(out), \
+        with patch("stashapi_check.stashapi_problem", return_value=None), redirect_stdout(out), \
              patch.object(logger, "info"), patch.object(logger, "debug"), patch.object(logger, "warning"), \
              patch.object(files_module, "_urlopen", side_effect=self._urlopen):
             entry.run(self._stdin(), stash_factory=lambda connection: stash)
@@ -464,7 +467,7 @@ class TestEntryPoint(_Base):
     def _run_capturing_logs(self, entry, stash, stdin):
         """run() with every message to Stash's log recorded; returns (stdout, stash log calls)."""
         out, stash_log = io.StringIO(), MagicMock()
-        with patch.object(entry, "stashapi_problem", return_value=None), redirect_stdout(out), \
+        with patch("stashapi_check.stashapi_problem", return_value=None), redirect_stdout(out), \
              patch.object(logger, "stash_log", stash_log):
             entry.run(stdin, stash_factory=lambda connection: stash)
         return out.getvalue(), stash_log.mock_calls
@@ -522,11 +525,71 @@ class TestEntryPoint(_Base):
         self.assertTrue(os.path.exists(os.path.join(self.new_folder, "New Name.mp4")))
         self.assertTrue(os.path.exists(os.path.join(self.new_folder, "New Name.nfo")))
 
+    def _hook_stash(self):
+        video = os.path.join(self.incoming, "old.mp4")
+        _write(video)
+        return self.fake([self.make_scene(video)], plugin_config={"enableHook": True, "dryRun": True})
+
+    def _run_fields(self, entry, fields, hook_type="Scene.Update.Post"):
+        """run() on a hook with these inputFields; returns (reply, stash, factory, stashapi check)."""
+        stash = self._hook_stash()
+        factory = MagicMock(return_value=stash)
+        out = io.StringIO()
+        with patch("stashapi_check.stashapi_problem", return_value=None) as check, redirect_stdout(out), \
+             patch.object(logger, "stash_log"):
+            entry.run(self._stdin(hook_type, fields=fields), stash_factory=factory)
+        return json.loads(out.getvalue()), stash, factory, check
+
+    def test_update_of_unread_fields_exits_before_any_import_or_client(self):
+        entry = self._entry()
+        unread = ["group_ids", "groups", "movie_ids", "movies", "gallery_ids", "custom_fields",
+                  "resume_time", "play_duration", "play_count", "o_counter", "clientMutationId"]
+        cases = [["ids", "group_ids"], ["id"], ["ids"]] + [["id", f] for f in unread] + [["ids"] + unread]
+        for fields in cases:
+            with self.subTest(fields=fields):
+                reply, stash, factory, check = self._run_fields(entry, fields)
+                self.assertEqual(reply, {"output": "ok"})
+                factory.assert_not_called()
+                check.assert_not_called()
+                self.assertEqual(stash.calls, [])
+
+    def test_update_of_any_read_field_still_processes(self):
+        entry = self._entry()
+        cases = [["id", "title"], ["ids", "group_ids", "tag_ids"], ["id", "organized"],
+                 ["id", "primary_file_id"], ["id", "cover_image"], ["id", "groups", "stash_ids"],
+                 ["id", "some_future_field"]]
+        for fields in cases:
+            with self.subTest(fields=fields):
+                reply, stash, factory, check = self._run_fields(entry, fields)
+                self.assertEqual(reply, {"output": "ok"})
+                factory.assert_called_once()
+                check.assert_called_once()
+                self.assertIn(("find_scene", "5"), stash.calls)
+
+    def test_hook_without_input_fields_still_processes(self):
+        entry = self._entry()
+        for fields in (None, []):
+            with self.subTest(fields=fields):
+                reply, stash, factory, _ = self._run_fields(entry, fields)
+                self.assertEqual(reply, {"output": "ok"})
+                self.assertIn(("find_scene", "5"), stash.calls)
+
+    def test_early_exit_is_only_for_scene_updates(self):
+        entry = self._entry()
+        reply, stash, factory, _ = self._run_fields(entry, ["id", "custom_fields"], "Performer.Update.Post")
+        factory.assert_called_once()
+        self.assertIn(("get_configuration",), stash.calls)
+
+    def test_import_loads_no_dependency_check(self):
+        sys.modules.pop("stashapi_check", None)
+        self._entry()
+        self.assertNotIn("stashapi_check", sys.modules)
+
     def test_missing_stashapi_reports_error_json(self):
         entry = self._entry()
         out, err = io.StringIO(), io.StringIO()
         factory = MagicMock()
-        with patch.object(entry, "stashapi_problem", return_value="stashapp-tools missing"), \
+        with patch("stashapi_check.stashapi_problem", return_value="stashapp-tools missing"), \
              redirect_stdout(out), patch.object(sys, "stderr", err):
             entry.run(self._stdin(), stash_factory=factory)
         self.assertEqual(json.loads(out.getvalue()), {"error": "stashapp-tools missing"})
