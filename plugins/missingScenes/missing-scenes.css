@@ -278,9 +278,19 @@
 /* Scene Actions */
 .ms-scene-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 8px 12px 12px;
   border-top: 1px solid #333;
+}
+
+/* Keep every action inside the card, even with many sites or a long site URL. */
+.ms-scene-actions > .ms-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
 }
 
 /* Buttons */
