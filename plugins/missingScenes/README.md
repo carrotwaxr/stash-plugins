@@ -241,6 +241,9 @@ One request reads up to 50 stash-box pages (5000 scenes). If the page isn't full
 
 ## Changelog
 
+### 1.5.2
+- Scene card actions wrap inside the card, so **Add to Whisparr** stays visible and clickable on scenes with several site links or a long site URL.
+
 ### 1.5.1
 - Bulk scene edits are faster. The scene update hook answers an update that didn't change stash IDs (adding scenes to a group, setting tags or ratings) before loading the plugin or asking Stash for its settings. Stash waits for the hook on every scene before an update returns.
 
