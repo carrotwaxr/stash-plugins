@@ -7,6 +7,31 @@
   margin-left: 8px;
 }
 
+.ms-header-actions {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+/* Our button keeps its label when a theme turns the name row's buttons into
+   icon squares (Sticky sets a fixed width and padding: 0 !important) */
+.ms-header-actions .ms-search-button.btn {
+  width: auto !important;
+  height: auto !important;
+  padding: 0.375rem 0.75rem !important;
+  white-space: nowrap;
+}
+
+/* Our own row, used when a theme hides the name row */
+div.ms-header-actions {
+  display: flex;
+  margin-top: 0.5rem;
+}
+
+div.ms-header-actions .ms-search-button {
+  margin-left: 0;
+}
+
 .ms-button-container {
   display: inline-flex;
   align-items: center;
