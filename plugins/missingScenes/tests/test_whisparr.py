@@ -508,3 +508,78 @@ def test_no_whisparr_status_for_other_stash_boxes(monkeypatch, view, endpoint, n
     assert "whisparr_error" not in res
     assert res["missing_scenes"][0]["in_whisparr"] is False
     assert res["whisparr_configured"] is True
+
+
+# ---- monitored in the status map -----------------------------------------------------
+
+def status_of(monkeypatch, movies, queue=()):
+    def handler(req):
+        if "/queue" in req.full_url:
+            return {"records": list(queue)}
+        return movies
+    install(monkeypatch, handler)
+    return ms.whisparr_get_status_map(URL, KEY)
+
+
+def test_status_map_carries_monitored_and_splits_waiting_from_unmonitored(monkeypatch):
+    m = status_of(monkeypatch, [
+        {"id": 1, "stashId": "a", "hasFile": False, "monitored": True},
+        {"id": 2, "stashId": "b", "hasFile": False, "monitored": False},
+        {"id": 3, "stashId": "c", "hasFile": True, "monitored": False},
+        {"id": 4, "stashId": "d", "hasFile": False},  # no field: old behaviour
+        {"id": 5, "stashId": "e", "hasFile": False, "monitored": None},
+    ])
+    assert (m["a"]["status"], m["a"]["monitored"]) == ("waiting", True)
+    assert (m["b"]["status"], m["b"]["monitored"]) == ("unmonitored", False)
+    assert (m["c"]["status"], m["c"]["monitored"]) == ("downloaded", False)
+    assert (m["d"]["status"], m["d"]["monitored"]) == ("waiting", True)
+    assert (m["e"]["status"], m["e"]["monitored"]) == ("waiting", True)
+
+
+def test_queue_entries_keep_the_movies_monitored_value(monkeypatch):
+    queue = [{"movieId": 1, "status": "downloading", "size": 10, "sizeleft": 5},
+             {"movieId": 2, "status": "queued"},
+             {"movieId": 3, "status": "warning", "errorMessage": "x"},
+             {"movieId": 4, "status": "completed"}]
+    movies = [{"id": i, "stashId": f"s{i}", "hasFile": False, "monitored": i % 2 == 0} for i in (1, 2, 3, 4)]
+    m = status_of(monkeypatch, movies, queue)
+    assert [m[f"s{i}"]["monitored"] for i in (1, 2, 3, 4)] == [False, True, False, True]
+    assert m["s2"]["status"] == "queued"  # an unmonitored scene that is in the queue is not "unmonitored"
+    assert status_of(monkeypatch, [movies[0]], queue[:1])["s1"]["status"] == "downloading"
+
+
+def test_old_cache_entries_without_monitored_count_as_monitored(monkeypatch, tmp_path):
+    seen = install(monkeypatch, lambda r: [])
+    path = ms._whisparr_status_path(URL)
+    with open(path, "w") as f:
+        json.dump({"ts": time.time(), "map": {"x": {"status": "waiting", "whisparr_id": 3}}}, f)
+    m = ms.whisparr_get_status_map(URL, KEY)
+    assert seen == []  # served from the cache
+    assert m["x"]["status"] == "waiting" and m["x"]["monitored"] is True
+
+
+@pytest.mark.parametrize("view", ["find", "browse"])
+@pytest.mark.parametrize("setting,expected", [(True, True), (False, False), (None, False)])
+def test_responses_carry_whisparr_search_on_add(monkeypatch, view, setting, expected):
+    endpoint = "https://stashdb.org/graphql"
+    monkeypatch.setattr(ms, "get_stashbox_config", lambda: [{"endpoint": endpoint, "api_key": "k", "name": "StashDB"}])
+    monkeypatch.setattr(ms, "get_or_build_cache", lambda *a, **k: set())
+    monkeypatch.setattr(ms, "get_local_performer",
+                        lambda pid: {"name": "A", "stash_ids": [{"endpoint": endpoint, "stash_id": "p1"}]})
+    monkeypatch.setattr(ms, "count_local_scenes_for_entity", lambda *a: 0)
+    page = {"scenes": [{"id": "s1"}], "count": 1, "page": 1, "has_more": False}
+    monkeypatch.setattr(ms.stashbox_api, "query_scenes_browse", lambda *a, **k: page)
+    monkeypatch.setattr(ms.stashbox_api, "query_scenes_page", lambda *a, **k: page)
+    install(monkeypatch, lambda r: [] if "/queue" not in r.full_url else {"records": []})
+    settings = {"whisparrUrl": URL, "whisparrApiKey": KEY}
+    if setting is not None:
+        settings["whisparrSearchOnAdd"] = setting
+    res = (ms.find_missing_scenes_paginated("performer", "1", settings) if view == "find"
+           else ms.browse_stashdb(plugin_settings=settings, page_size=50))
+    assert res["whisparr_search_on_add"] is expected
+
+
+def test_empty_favorites_responses_carry_whisparr_search_on_add():
+    settings = {"whisparrUrl": URL, "whisparrApiKey": KEY, "whisparrSearchOnAdd": True}
+    res = ms._empty_browse_result("StashDB", "https://stashdb.org/graphql", settings, ["performers"])
+    assert res["whisparr_search_on_add"] is True and res["whisparr_configured"] is True

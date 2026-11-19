@@ -10,6 +10,7 @@
     addToWhisparr,
     isStashdbEndpoint,
     describeWhisparrAdd,
+    describeWhisparrMonitor,
     describeWhisparrStatusError,
     buildFingerprintIndex,
     describeFingerprintIndex,
@@ -31,6 +32,7 @@
   let requestToken = 0; // bumped by every new search and when the modal closes
   let currentWarning = null; // {message, retryLabel} shown above partial results
   let whisparrConfigured = false;
+  let whisparrSearchOnAdd = false;
   let whisparrError = null; // set when the Whisparr status map could not be fetched
   let stashdbUrl = "";
   let stashdbName = "";
@@ -591,6 +593,7 @@
       const item = coreCreateSceneCard(scene, {
         stashdbUrl: stashdbUrl,
         whisparrConfigured: whisparrConfigured,
+        whisparrSearchOnAdd: whisparrSearchOnAdd,
         endpoint: currentEndpoint(),
         activeFilterTagIds: activeFilterTagIds,
         onWhisparrAdd: (scene, success, detail) => {
@@ -598,6 +601,13 @@
             setStatus(describeWhisparrAdd(scene, detail), detail && detail.search_triggered === false ? "error" : "success");
           } else {
             setStatus(`Failed to add: ${detail?.message || "Unknown error"}`, "error");
+          }
+        },
+        onWhisparrMonitor: (scene, success, detail) => {
+          if (success) {
+            setStatus(describeWhisparrMonitor(scene, detail), detail && detail.search_error ? "error" : "success");
+          } else {
+            setStatus(`Failed to monitor: ${detail?.message || "Unknown error"}`, "error");
           }
         }
       });
@@ -903,6 +913,7 @@
       missingScenes = [...missingScenes, ...newScenes];
 
       whisparrConfigured = result.whisparr_configured || false;
+      whisparrSearchOnAdd = result.whisparr_search_on_add || false;
       whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
       stashdbName = result.stashdb_name || stashdbName;
@@ -981,77 +992,109 @@
     return btn;
   }
 
+  const SEARCH_BUTTON_ROW = "ms-header-actions";
+  const ENTITY_TYPES = { performers: "performer", studios: "studio", tags: "tag" };
+
   /**
-   * Check if we're on a performer page
+   * The performer, studio or tag a detail page shows, read from its path
+   * (works under a base path too), or null on any other page.
    */
-  function getPerformerPageInfo() {
-    const match = window.location.pathname.match(/\/performers\/(\d+)/);
-    if (match) {
-      return { type: "performer", id: match[1] };
+  function pageEntity(pathname) {
+    const m = String(pathname || "").match(/\/(performers|studios|tags)\/(\d+)(?:\/|$)/);
+    return m ? { type: ENTITY_TYPES[m[1]], id: m[2] } : null;
+  }
+
+  function isShown(el) {
+    return !!el && el.offsetParent !== null;
+  }
+
+  function childWithClass(parent, cls) {
+    return Array.from(parent.children || []).find((c) => c.classList && c.classList.contains(cls)) || null;
+  }
+
+  /** Remove a node and, when that empties one of our rows, the row too. */
+  function removeAndTidy(el) {
+    const parent = el.parentNode;
+    el.remove();
+    if (parent && parent.classList && parent.classList.contains(SEARCH_BUTTON_ROW) &&
+        parent.children.length === 0) {
+      parent.remove();
     }
-    return null;
   }
 
   /**
-   * Check if we're on a studio page
+   * Where the button goes when the name row is hidden: the last visible block of
+   * the header's container (a theme's own panel, e.g. Sticky's tag page), else the
+   * header itself. Never after the container: the header has a fixed height.
    */
-  function getStudioPageInfo() {
-    const match = window.location.pathname.match(/\/studios\/(\d+)/);
-    if (match) {
-      return { type: "studio", id: match[1] };
-    }
-    return null;
+  function fallbackTarget(header) {
+    const container = header.querySelector(".detail-container");
+    const shown = container ? Array.from(container.children || []).filter(isShown) : [];
+    return shown.length ? shown[shown.length - 1] : header;
   }
 
   /**
-   * Check if we're on a tag page
+   * Put the Missing Scenes button on the current detail page, or take it away.
+   *
+   * The button sits in the name row, in a row of its own after Stash's icons:
+   * themes such as Sticky hide .name-icons and redraw the header. When the name
+   * row itself is hidden (Sticky's tag page), the row goes at the end of the
+   * header's last visible block instead. Each button is tied to its entity, so one left over from
+   * another page is removed rather than blocking the new one (#189).
+   *
+   * Returns the button, or null when the page has none (or isn't rendered yet).
    */
-  function getTagPageInfo() {
-    const match = window.location.pathname.match(/\/tags\/(\d+)/);
-    if (match) {
-      return { type: "tag", id: match[1] };
+  function placeSearchButton(doc, pathname) {
+    const entity = pageEntity(pathname);
+    const key = entity ? `${entity.type}:${entity.id}` : null;
+
+    let button = null;
+    for (const b of Array.from(doc.querySelectorAll(".ms-search-button"))) {
+      if (!button && key && b.dataset.entity === key && b.isConnected !== false) button = b;
+      else removeAndTidy(b);
     }
-    return null;
+    if (!entity) return null;
+
+    currentEntityType = entity.type;
+    currentEntityId = entity.id;
+
+    // Stash's compact header (.sticky) appears on scroll; the full one is what we want
+    const header = doc.querySelector(".detail-header:not(.sticky)");
+    if (!header) {
+      if (button) removeAndTidy(button);
+      return null;
+    }
+    const title = header.querySelector(`.${entity.type}-head > h2`);
+    const target = isShown(title) ? title : fallbackTarget(header);
+
+    let row = childWithClass(target, SEARCH_BUTTON_ROW);
+    if (button && row && button.parentNode === row) return button;
+
+    if (!row) {
+      row = doc.createElement(target === title ? "span" : "div");
+      row.className = SEARCH_BUTTON_ROW;
+      target.appendChild(row);
+    }
+    if (button) {
+      const oldParent = button.parentNode;
+      row.appendChild(button);
+      if (oldParent && oldParent !== row && oldParent.classList &&
+          oldParent.classList.contains(SEARCH_BUTTON_ROW) && oldParent.children.length === 0) {
+        oldParent.remove();
+      }
+    } else {
+      button = createSearchButton();
+      button.dataset.entity = key;
+      row.appendChild(button);
+    }
+    return button;
   }
 
   /**
-   * Add the search button to the page
+   * Add, move or remove the search button for the current page
    */
   function addSearchButton() {
-    // Check if button already exists
-    if (document.querySelector(".ms-search-button")) {
-      return;
-    }
-
-    // Determine page type
-    const performerInfo = getPerformerPageInfo();
-    const studioInfo = getStudioPageInfo();
-    const tagInfo = getTagPageInfo();
-
-    if (!performerInfo && !studioInfo && !tagInfo) {
-      return;
-    }
-
-    const entityInfo = performerInfo || studioInfo || tagInfo;
-    currentEntityType = entityInfo.type;
-    currentEntityId = entityInfo.id;
-
-    // Find a place to add the button - use same selectors as Performer Image Search
-    // to ensure buttons appear together
-    const buttonContainer =
-      document.querySelector(".detail-header-buttons") ||
-      document.querySelector('[class*="detail"] [class*="button"]')?.parentElement ||
-      document.querySelector(".performer-head") ||
-      document.querySelector(".studio-head") ||
-      document.querySelector(".tag-head");
-
-    if (!buttonContainer) {
-      // Try again later - page might not be fully loaded
-      return;
-    }
-
-    const searchBtn = createSearchButton();
-    buttonContainer.appendChild(searchBtn);
+    placeSearchButton(document, window.location.pathname);
   }
 
   /**
@@ -1109,6 +1152,8 @@
       removeModal,
       renderFingerprintNote,
       handleBuildFingerprintIndex,
+      placeSearchButton,
+      pageEntity,
       SORT_OPTIONS,
       directionFor,
       setSortField: (value) => { sortField = value; },

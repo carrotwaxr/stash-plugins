@@ -10,6 +10,7 @@
     describeFailure,
     escapeHtml,
     describeWhisparrAdd,
+    describeWhisparrMonitor,
     describeWhisparrStatusError,
     buildFingerprintIndex,
     describeFingerprintIndex,
@@ -63,6 +64,7 @@
   let activeFilterTagIds = [];
   let pageSize = 50;
   let whisparrConfigured = false;
+  let whisparrSearchOnAdd = false;
   let whisparrError = null; // set when the Whisparr status map could not be fetched
   let stashdbUrl = "";
   let stashdbName = "";
@@ -315,6 +317,7 @@
           const card = createSceneCard(scene, {
             stashdbUrl: stashdbUrl || "https://stashdb.org",
             whisparrConfigured: whisparrConfigured,
+            whisparrSearchOnAdd: whisparrSearchOnAdd,
             endpoint: selectedEndpoint || stashdbUrl,
             activeFilterTagIds: activeFilterTagIds,
             onWhisparrAdd: (sc, success, detail) => {
@@ -326,6 +329,15 @@
               el.textContent = msg;
               el.className = "ms-status " +
                 (!success || detail?.search_triggered === false ? "ms-status-error" : "ms-status-success");
+            },
+            onWhisparrMonitor: (sc, success, detail) => {
+              const el = container.querySelector('#ms-browse-status');
+              if (!el) return;
+              el.textContent = success
+                ? describeWhisparrMonitor(sc, detail)
+                : `Failed to monitor: ${detail?.message || "Unknown error"}`;
+              el.className = "ms-status " +
+                (!success || detail?.search_error ? "ms-status-error" : "ms-status-success");
             },
           });
           grid.appendChild(card);
@@ -394,6 +406,7 @@
       hasMore = !!result.has_more;
       isComplete = !!result.is_complete;
       whisparrConfigured = result.whisparr_configured;
+      whisparrSearchOnAdd = result.whisparr_search_on_add || false;
       whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
       stashdbName = result.stashdb_name || stashdbName;

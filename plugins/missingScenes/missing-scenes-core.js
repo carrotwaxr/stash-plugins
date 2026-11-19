@@ -271,6 +271,19 @@
   }
 
   /**
+   * Status-line text for a successful monitor_in_whisparr result. Plain text.
+   */
+  function describeWhisparrMonitor(scene, result) {
+    const title = scene && scene.title ? scene.title : "scene";
+    if (result && result.already_has_file) return `"${title}" already has a file in Whisparr`;
+    if (result && result.search_triggered) return `Monitored "${title}" in Whisparr and started a search`;
+    if (result && result.search_error) {
+      return `Monitored "${title}" in Whisparr, but the search did not start (${result.search_error})`;
+    }
+    return `Monitored "${title}" in Whisparr`;
+  }
+
+  /**
    * Banner text when the Whisparr status map could not be fetched. Plain text.
    */
   function describeWhisparrStatusError(error) {
@@ -294,6 +307,78 @@
       throw new Error(result.error || "Whisparr add failed");
     }
     return result;
+  }
+
+  /**
+   * Monitor a scene that is already in Whisparr (and search for it when the Search on Add
+   * setting is on). Resolves with the result; throws when it fails.
+   */
+  async function monitorInWhisparr(stashId, title, endpoint) {
+    const args = {
+      operation: "monitor_in_whisparr",
+      stash_id: stashId,
+      title: title,
+    };
+    if (endpoint) args.endpoint = endpoint;
+    const result = await runPluginOperation(args);
+    if (result && result.success === false) {
+      throw new Error(result.error || "Whisparr monitor failed");
+    }
+    return result;
+  }
+
+  /**
+   * Handle the Monitor / Monitor + Search button of an unmonitored scene (manages button state)
+   * @param {Object} scene - Scene object with stash_id and title
+   * @param {HTMLElement} button - The button element to update
+   * @param {Object} config - Configuration object
+   * @param {string} config.endpoint - The view's stash-box endpoint URL
+   * @param {Function} config.onSuccess - Optional callback on success (scene, result)
+   * @param {Function} config.onError - Optional callback on error
+   */
+  async function handleMonitorInWhisparr(scene, button, config = {}) {
+    const originalText = button.textContent;
+    button.textContent = "Monitoring...";
+    button.disabled = true;
+    button.classList.add("ms-btn-loading");
+
+    try {
+      const result = await monitorInWhisparr(scene.stash_id, scene.title, config.endpoint);
+
+      button.classList.remove("ms-btn-loading");
+      button.classList.add("ms-btn-success", "ms-btn-disabled");
+      button.title = "";
+      if (result && result.already_has_file) {
+        button.textContent = "Downloaded";
+        scene.whisparr_status = { ...scene.whisparr_status, status: "downloaded" };
+      } else {
+        button.textContent = result && result.search_triggered ? "Searching" : "Monitored";
+        // Monitored, not grabbed yet: what a re-render of this scene should show
+        scene.whisparr_status = { ...scene.whisparr_status, status: "waiting", monitored: true };
+      }
+      scene.in_whisparr = true;
+
+      if (config.onSuccess) {
+        config.onSuccess(scene, result);
+      }
+    } catch (error) {
+      console.error("[MissingScenes] Failed to monitor in Whisparr:", error);
+      button.textContent = "Failed";
+      button.title = (error && error.message) || "Whisparr monitor failed";
+      button.classList.remove("ms-btn-loading");
+      button.classList.add("ms-btn-error");
+      button.disabled = false;
+
+      if (config.onError) {
+        config.onError(error, scene);
+      }
+
+      setTimeout(() => {
+        button.textContent = originalText;
+        button.title = "";
+        button.classList.remove("ms-btn-error");
+      }, 3000);
+    }
   }
 
   /**
@@ -356,12 +441,18 @@
    * @param {Object} config - Configuration
    * @param {string} config.stashdbUrl - Base URL for StashDB links
    * @param {boolean} config.whisparrConfigured - Whether Whisparr is configured
+   * @param {boolean} config.whisparrSearchOnAdd - The Search on Add setting: an unmonitored scene's
+   *   button says "Monitor + Search" when on, "Monitor" when off
    * @param {string} config.endpoint - Stash-box endpoint of the view (Whisparr is StashDB only)
    * @param {Function} config.onWhisparrAdd - Callback when Whisparr add completes: (scene, true, result) or (scene, false, error)
+   * @param {Function} config.onWhisparrMonitor - Same, for the Monitor button of an unmonitored scene
    * @returns {HTMLElement} The scene card element
    */
   function createSceneCard(scene, config) {
-    const { stashdbUrl = "https://stashdb.org", whisparrConfigured = false, onWhisparrAdd, endpoint } = config;
+    const {
+      stashdbUrl = "https://stashdb.org", whisparrConfigured = false, whisparrSearchOnAdd = false,
+      onWhisparrAdd, onWhisparrMonitor, endpoint,
+    } = config;
 
     const card = document.createElement("div");
     card.className = "ms-scene-card";
@@ -488,7 +579,22 @@
       const whisparrBtn = document.createElement("button");
       whisparrBtn.className = "ms-btn ms-btn-small ms-btn-whisparr";
 
-      if (scene.in_whisparr && scene.whisparr_status) {
+      if (scene.in_whisparr && scene.whisparr_status && scene.whisparr_status.status === "unmonitored") {
+        // In Whisparr with no file and not monitored, so Whisparr won't look for it: offer to monitor it
+        whisparrBtn.textContent = whisparrSearchOnAdd ? "Monitor + Search" : "Monitor";
+        whisparrBtn.classList.add("ms-btn-unmonitored");
+        whisparrBtn.title = whisparrSearchOnAdd
+          ? "In Whisparr but not monitored. Monitor it and search for it"
+          : "In Whisparr but not monitored. Monitor it";
+        whisparrBtn.onclick = (e) => {
+          e.stopPropagation();
+          handleMonitorInWhisparr(scene, whisparrBtn, {
+            endpoint: endpoint || stashdbUrl,
+            onSuccess: onWhisparrMonitor ? (sc, result) => onWhisparrMonitor(scene, true, result) : undefined,
+            onError: onWhisparrMonitor ? (err) => onWhisparrMonitor(scene, false, err) : undefined,
+          });
+        };
+      } else if (scene.in_whisparr && scene.whisparr_status) {
         // Show detailed status based on whisparr_status object
         const status = scene.whisparr_status.status;
         const progress = scene.whisparr_status.progress;
@@ -572,8 +678,11 @@
     // Whisparr
     addToWhisparr,
     handleAddToWhisparr,
+    monitorInWhisparr,
+    handleMonitorInWhisparr,
     isStashdbEndpoint,
     describeWhisparrAdd,
+    describeWhisparrMonitor,
     describeWhisparrStatusError,
 
     // Components
@@ -599,8 +708,11 @@
       formatDuration,
       addToWhisparr,
       handleAddToWhisparr,
+      monitorInWhisparr,
+      handleMonitorInWhisparr,
       isStashdbEndpoint,
       describeWhisparrAdd,
+      describeWhisparrMonitor,
       describeWhisparrStatusError,
       createSceneCard,
     };

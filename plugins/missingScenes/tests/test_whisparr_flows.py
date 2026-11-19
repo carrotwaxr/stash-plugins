@@ -524,3 +524,167 @@ def test_cleanup_never_trusts_a_cache_written_meanwhile(monkeypatch):
     res = ms.task_cleanup_whisparr({"whisparrUrl": URL, "whisparrApiKey": KEY})
     assert res["success"] is True and res["cleaned"] == 0
     assert writes(seen) == []
+
+
+# ---- monitor_in_whisparr: an unmonitored scene already in Whisparr ---------------
+
+UNMON = {"id": 7, "stashId": SID, "hasFile": False, "monitored": False, "title": "T"}
+
+
+def status_cache_files(tmp_path):
+    return [f for f in tmp_path.iterdir() if f.name.startswith("whisparr_status_")]
+
+
+def put_bodies(seen):
+    return [json.loads(r.data) for r in seen if r.get_method() == "PUT"]
+
+
+@pytest.mark.parametrize("endpoint", [TPDB, FANSDB])
+def test_monitor_refuses_non_stashdb_endpoint(monkeypatch, endpoint):
+    seen = install(monkeypatch, whisparr(movies=[UNMON]))
+    res = ms.monitor_in_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=True), endpoint=endpoint)
+    assert res["success"] is False and "StashDB" in res["error"]
+    assert seen == []
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"endpoint": ""}, {"endpoint": STASHDB}])
+def test_monitor_stashdb_or_missing_endpoint_monitors(monkeypatch, kwargs):
+    seen = install(monkeypatch, whisparr(movies=[UNMON]))
+    res = ms.monitor_in_whisparr(SID, "T", ADD_SETTINGS, **kwargs)
+    assert res["success"] is True
+    assert writes(seen) == ["PUT movie/7"]
+
+
+def test_monitor_with_search_on_sets_monitored_then_searches(monkeypatch):
+    seen = install(monkeypatch, whisparr(movies=[UNMON]))
+    res = ms.monitor_in_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=True), endpoint=STASHDB)
+    assert res["success"] is True and res["search_triggered"] is True
+    assert "search_error" not in res and "error" not in res
+    assert writes(seen) == ["PUT movie/7", "POST command"]  # monitor first: Whisparr won't want it otherwise
+    assert put_bodies(seen)[0]["monitored"] is True
+    assert put_bodies(seen)[0]["id"] == 7  # the whole movie goes back, not a stub
+
+
+def test_monitor_with_search_off_does_not_search(monkeypatch):
+    seen = install(monkeypatch, whisparr(movies=[UNMON]))
+    res = ms.monitor_in_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=False), endpoint=STASHDB)
+    assert res["success"] is True and res["search_triggered"] is False
+    assert "search_error" not in res
+    assert writes(seen) == ["PUT movie/7"]
+
+
+def test_monitor_search_failure_is_success_with_search_error(monkeypatch):
+    fail = lambda m, p: http_error(500, {"message": "indexers down"}) if p == "command" else None
+    seen = install(monkeypatch, whisparr(movies=[UNMON], fail=fail))
+    res = ms.monitor_in_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=True), endpoint=STASHDB)
+    assert res["success"] is True and res["search_triggered"] is False
+    assert "indexers down" in res["search_error"]
+    assert "error" not in res
+    assert put_bodies(seen)[0]["monitored"] is True
+
+
+def test_monitor_put_failure_is_an_error_and_no_search(monkeypatch):
+    fail = lambda m, p: http_error(500, {"message": "db locked"}) if m == "PUT" else None
+    seen = install(monkeypatch, whisparr(movies=[UNMON], fail=fail))
+    res = ms.monitor_in_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=True), endpoint=STASHDB)
+    assert res["success"] is False
+    assert "db locked" in res["error"] and res["whisparr_error"] == res["error"]
+    assert "POST command" not in calls(seen)
+
+
+def test_monitor_lookup_failure_is_an_error_not_missing(monkeypatch):
+    fail = lambda m, p: http_error(503, {"message": "Whisparr is starting"}) if p.startswith("movie?") else None
+    seen = install(monkeypatch, whisparr(movies=[UNMON], fail=fail))
+    res = ms.monitor_in_whisparr(SID, "T", ADD_SETTINGS, endpoint=STASHDB)
+    assert res["success"] is False and "Whisparr is starting" in res["error"]
+    assert writes(seen) == []
+
+
+def test_monitor_scene_gone_from_whisparr_is_a_clear_error(monkeypatch):
+    seen = install(monkeypatch, whisparr(movies=[]))
+    res = ms.monitor_in_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=True), endpoint=STASHDB)
+    assert res["success"] is False
+    assert "not in Whisparr" in res["error"]
+    assert writes(seen) == []
+
+
+def test_monitor_scene_deleted_between_lookup_and_put(monkeypatch):
+    fail = lambda m, p: http_error(404) if m == "PUT" else None
+    install(monkeypatch, whisparr(movies=[UNMON], fail=fail))
+    res = ms.monitor_in_whisparr(SID, "T", ADD_SETTINGS, endpoint=STASHDB)
+    assert res["success"] is False and "404" in res["error"]
+
+
+def test_monitor_scene_with_file_changes_nothing(monkeypatch):
+    seen = install(monkeypatch, whisparr(movies=[dict(UNMON, hasFile=True)]))
+    res = ms.monitor_in_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=True), endpoint=STASHDB)
+    assert res["success"] is True and res["already_has_file"] is True
+    assert res["search_triggered"] is False
+    assert writes(seen) == []
+
+
+def test_monitor_already_monitored_scene_only_searches(monkeypatch):
+    seen = install(monkeypatch, whisparr(movies=[dict(UNMON, monitored=True)]))
+    res = ms.monitor_in_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=True), endpoint=STASHDB)
+    assert res["success"] is True and res["search_triggered"] is True
+    assert writes(seen) == ["POST command"]
+
+
+def test_monitor_needs_whisparr_configured(monkeypatch):
+    seen = install(monkeypatch, whisparr())
+    res = ms.monitor_in_whisparr(SID, "T", {}, endpoint=STASHDB)
+    assert res["success"] is False and "not configured" in res["error"]
+    assert seen == []
+
+
+def test_monitor_invalidates_the_status_cache(monkeypatch, tmp_path):
+    install(monkeypatch, whisparr(movies=[UNMON]))
+    ms.whisparr_get_status_map(URL, KEY)
+    assert status_cache_files(tmp_path)
+    ms.monitor_in_whisparr(SID, "T", ADD_SETTINGS, endpoint=STASHDB)
+    assert not status_cache_files(tmp_path)
+
+
+def test_main_dispatches_monitor(monkeypatch, tmp_path, capsys):
+    seen = install(monkeypatch, whisparr(movies=[UNMON]))
+    out = run_main(monkeypatch, tmp_path, capsys,
+                   {"operation": "monitor_in_whisparr", "stash_id": SID, "title": "T", "endpoint": STASHDB},
+                   dict(ADD_SETTINGS, whisparrSearchOnAdd=True))
+    assert out["output"]["success"] is True and out["output"]["search_triggered"] is True
+    assert writes(seen) == ["PUT movie/7", "POST command"]
+    out = run_main(monkeypatch, tmp_path, capsys, {"operation": "monitor_in_whisparr"}, ADD_SETTINGS)
+    assert "stash_id" in out["error"]
+
+
+# ---- add_to_whisparr on an unmonitored scene ----------------------------------------
+
+def test_add_existing_unmonitored_scene_is_monitored_before_the_search(monkeypatch):
+    seen = install(monkeypatch, whisparr(movies=[UNMON]))
+    res = ms.add_to_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=True), endpoint=STASHDB)
+    assert res["success"] is True and res["already_exists"] is True and res["search_triggered"] is True
+    assert writes(seen) == ["PUT movie/7", "POST command"]
+    assert put_bodies(seen)[0]["monitored"] is True
+
+
+def test_add_existing_unmonitored_scene_is_monitored_even_without_search(monkeypatch):
+    seen = install(monkeypatch, whisparr(movies=[UNMON]))
+    res = ms.add_to_whisparr(SID, "T", ADD_SETTINGS, endpoint=STASHDB)
+    assert res["success"] is True and res["search_triggered"] is False
+    assert writes(seen) == ["PUT movie/7"]
+
+
+def test_add_existing_monitored_scene_is_not_rewritten(monkeypatch):
+    seen = install(monkeypatch, whisparr(movies=[dict(UNMON, monitored=True)]))
+    ms.add_to_whisparr(SID, "T", ADD_SETTINGS, endpoint=STASHDB)
+    assert writes(seen) == []
+    seen = install(monkeypatch, whisparr(movies=[{"id": 7, "stashId": SID, "hasFile": False}]))  # no field
+    ms.add_to_whisparr(SID, "T", ADD_SETTINGS, endpoint=STASHDB)
+    assert writes(seen) == []
+
+
+def test_add_existing_unmonitored_scene_put_failure_is_an_error(monkeypatch):
+    fail = lambda m, p: http_error(500, {"message": "db locked"}) if m == "PUT" else None
+    seen = install(monkeypatch, whisparr(movies=[UNMON], fail=fail))
+    res = ms.add_to_whisparr(SID, "T", dict(ADD_SETTINGS, whisparrSearchOnAdd=True), endpoint=STASHDB)
+    assert res["success"] is False and "db locked" in res["error"]
+    assert "POST command" not in calls(seen)
