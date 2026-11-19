@@ -52,6 +52,9 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ## Tag Manager
 
+### 0.7.1
+- The Fuzzy Match Threshold and Tags Per Page descriptions explain why Stash shows 0 before you first open Tag Manager (the plugin uses 80 and 25 until then) and what an explicit 0 means.
+
 ### 0.7.0
 - Python 3.9+ with no required packages. `thefuzz` is optional. `stashapp-tools` is no longer used (fixes #129).
 - A full StashDB tag fetch takes about 5 seconds instead of 30-40+. Stash-box errors show in the UI, and a rejected API key (HTTP 401/403) says so. Requests send a `User-Agent`, which fixes HTTP 403 from ThePornDB and JAVStash. ThePornDB tag fetches now get every tag instead of the first 100.
