@@ -1,6 +1,6 @@
 name: Tag Manager
 description: Match and sync local tags with stash-box endpoints. Features multi-endpoint support, tag caching, layered search (exact, fuzzy, synonym), and field-by-field merge dialog.
-version: 0.7.0
+version: 0.7.1
 url: https://github.com/carrotwaxr/stash-plugins
 
 ui:
@@ -23,11 +23,11 @@ settings:
     type: BOOLEAN
   fuzzyThreshold:
     displayName: Fuzzy Match Threshold
-    description: Minimum score (0-100) for fuzzy matches. Default is 80.
+    description: Minimum score (0-100) for fuzzy matches. Tag Manager saves 80 here the first time you open it; until then Stash shows 0, and 80 is used. 0 accepts every fuzzy match.
     type: NUMBER
   pageSize:
     displayName: Tags Per Page
-    description: Number of tags to show per page. Default is 25.
+    description: Number of tags to show per page. Tag Manager saves 25 here the first time you open it; until then Stash shows 0, and 25 is used. 0 also means 25.
     type: NUMBER
   syncDryRun:
     displayName: Scene Tag Sync - Dry Run

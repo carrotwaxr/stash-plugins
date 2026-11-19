@@ -83,8 +83,8 @@ Go to **Settings → Plugins → Tag Manager**:
 |---------|-------------|---------|
 | Enable Fuzzy Search | Use fuzzy matching for typos | Enabled |
 | Enable Synonym Search | Use custom synonym mappings | Enabled |
-| Fuzzy Match Threshold | Minimum score (0-100) for fuzzy matches. 0 is allowed | 80 |
-| Tags Per Page | Number of tags shown per page (at least 1) | 25 |
+| Fuzzy Match Threshold | Minimum score (0-100) for fuzzy matches. 0 accepts every fuzzy match | 80 |
+| Tags Per Page | Number of tags shown per page. 0 means the default | 25 |
 | Scene Tag Sync - Dry Run | Preview sync without making changes. Checks at most 200 scenes | Enabled |
 | Default to Stash-Box Name | In the merge dialog, pick the stash-box name instead of keeping the local name | Off |
 | Default to Stash-Box Description | In the merge dialog, pick the stash-box description instead of keeping the local one | Off |
@@ -93,6 +93,8 @@ Go to **Settings → Plugins → Tag Manager**:
 | Tag Blacklist | Patterns to exclude from matching and sync. Separate with `,` or `;`, or use the Blacklist button on the Match tab. See the [User Guide](USERGUIDE.md#tag-blacklist) | Empty |
 
 The backend reads these settings from Stash's saved plugin config, so a change applies after you save it in Stash.
+
+Tag Manager saves the defaults into its settings the first time you open the Tag Manager page. Before that, Stash shows an unset number setting as 0 while the plugin uses the default.
 
 ### Default Settings File
 
@@ -207,6 +209,10 @@ Caches and sync history live in Stash's config folder, not the plugin folder, so
 The `cache/` folder inside the plugin folder from older versions is no longer used. You can delete it.
 
 ## Changelog
+
+### v0.7.1
+
+- The Fuzzy Match Threshold and Tags Per Page descriptions explain why Stash shows 0 before you first open Tag Manager (the plugin uses 80 and 25 until then) and what an explicit 0 means.
 
 ### v0.7.0
 
