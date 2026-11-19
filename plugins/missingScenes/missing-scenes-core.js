@@ -580,7 +580,7 @@
       whisparrBtn.className = "ms-btn ms-btn-small ms-btn-whisparr";
 
       if (scene.in_whisparr && scene.whisparr_status && scene.whisparr_status.status === "unmonitored") {
-        // In Whisparr with no file and not monitored, so Whisparr won't look for it: offer to
+        // In Whisparr with no file and not monitored, so Whisparr won't look for it: offer to monitor it
         whisparrBtn.textContent = whisparrSearchOnAdd ? "Monitor + Search" : "Monitor";
         whisparrBtn.classList.add("ms-btn-unmonitored");
         whisparrBtn.title = whisparrSearchOnAdd

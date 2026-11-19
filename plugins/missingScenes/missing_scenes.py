@@ -2406,10 +2406,10 @@ def add_to_whisparr(stash_id, title, plugin_settings, endpoint=None):
                     "search_triggered": False,
                 }
             # Whisparr won't treat an unmonitored scene as wanted, so a search would be pointless
-            monitored_now = _is_unmonitored(existing_scene)
-            if monitored_now:
+            was_unmonitored = _is_unmonitored(existing_scene)
+            if was_unmonitored:
                 whisparr_set_monitored(whisparr_url, whisparr_api_key, existing_scene["id"], True)
-            note = " It is now monitored." if monitored_now else ""
+            note = " It is now monitored." if was_unmonitored else ""
             if not search_on_add:
                 return {
                     "success": True,
