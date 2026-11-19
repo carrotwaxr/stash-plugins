@@ -10,6 +10,7 @@
     addToWhisparr,
     isStashdbEndpoint,
     describeWhisparrAdd,
+    describeWhisparrMonitor,
     describeWhisparrStatusError,
     buildFingerprintIndex,
     describeFingerprintIndex,
@@ -31,6 +32,7 @@
   let requestToken = 0; // bumped by every new search and when the modal closes
   let currentWarning = null; // {message, retryLabel} shown above partial results
   let whisparrConfigured = false;
+  let whisparrSearchOnAdd = false;
   let whisparrError = null; // set when the Whisparr status map could not be fetched
   let stashdbUrl = "";
   let stashdbName = "";
@@ -591,6 +593,7 @@
       const item = coreCreateSceneCard(scene, {
         stashdbUrl: stashdbUrl,
         whisparrConfigured: whisparrConfigured,
+        whisparrSearchOnAdd: whisparrSearchOnAdd,
         endpoint: currentEndpoint(),
         activeFilterTagIds: activeFilterTagIds,
         onWhisparrAdd: (scene, success, detail) => {
@@ -598,6 +601,13 @@
             setStatus(describeWhisparrAdd(scene, detail), detail && detail.search_triggered === false ? "error" : "success");
           } else {
             setStatus(`Failed to add: ${detail?.message || "Unknown error"}`, "error");
+          }
+        },
+        onWhisparrMonitor: (scene, success, detail) => {
+          if (success) {
+            setStatus(describeWhisparrMonitor(scene, detail), detail && detail.search_error ? "error" : "success");
+          } else {
+            setStatus(`Failed to monitor: ${detail?.message || "Unknown error"}`, "error");
           }
         }
       });
@@ -903,6 +913,7 @@
       missingScenes = [...missingScenes, ...newScenes];
 
       whisparrConfigured = result.whisparr_configured || false;
+      whisparrSearchOnAdd = result.whisparr_search_on_add || false;
       whisparrError = result.whisparr_error || null;
       stashdbUrl = result.stashdb_url || "https://stashdb.org";
       stashdbName = result.stashdb_name || stashdbName;

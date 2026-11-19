@@ -715,6 +715,11 @@ def normalize_whisparr_url(raw):
     return url.rstrip("/")
 
 
+def whisparr_search_on_add_setting(settings):
+    """Whether adding or monitoring a scene also searches for it (the whisparrSearchOnAdd setting)."""
+    return bool((settings or {}).get("whisparrSearchOnAdd", False))
+
+
 def whisparr_url_setting(settings):
     """The Whisparr URL setting, stripped and normalized ('' when unset)."""
     return normalize_whisparr_url(str((settings or {}).get("whisparrUrl") or "").strip())
@@ -954,6 +959,10 @@ def _read_whisparr_status_cache(whisparr_url):
         with open(_whisparr_status_path(whisparr_url)) as f:
             data = json.load(f)
         if time.time() - float(data["ts"]) < WHISPARR_STATUS_TTL_SECONDS and isinstance(data["map"], dict):
+            # Entries cached before "monitored" existed were all treated as monitored
+            for entry in data["map"].values():
+                if isinstance(entry, dict):
+                    entry.setdefault("monitored", True)
             return data["map"]
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -988,12 +997,15 @@ def whisparr_get_status_map(whisparr_url, api_key):
         - "downloading": Actively downloading (with progress %)
         - "queued": In queue, waiting to start
         - "stalled": In queue but stalled/warning
-        - "waiting": In Whisparr, no file, not in queue (needs search)
+        - "waiting": In Whisparr, monitored, no file, not in queue (not grabbed yet)
+        - "unmonitored": In Whisparr, no file, not in queue, and not monitored, so Whisparr
+          won't search for it until it is monitored
         - "downloaded": Has file
 
     Returns:
-        Dict mapping stash_id -> {"status", "progress", "eta", "error", "whisparr_id"}
-        (progress/eta/error only where they apply).
+        Dict mapping stash_id -> {"status", "monitored", "progress", "eta", "error", "whisparr_id"}
+        (progress/eta/error only where they apply). "monitored" is the movie's own flag, kept
+        on queue-derived entries too; a movie that doesn't say counts as monitored.
 
     Raises:
         WhisparrError if Whisparr can't be queried (errors are never cached).
@@ -1010,6 +1022,7 @@ def whisparr_get_status_map(whisparr_url, api_key):
 
     # Build a map of whisparr movie ID -> stash_id for queue lookups
     whisparr_id_to_stash_id = {}
+    monitored_by_stash_id = {}
 
     for scene in scenes:
         # Whisparr stores the StashDB ID in stashId field directly (UUID format)
@@ -1020,12 +1033,19 @@ def whisparr_get_status_map(whisparr_url, api_key):
 
         whisparr_id = scene.get("id")
         has_file = scene.get("hasFile", False)
+        monitored = scene.get("monitored") is not False  # missing or null: as before, monitored
 
         whisparr_id_to_stash_id[whisparr_id] = stash_id
+        monitored_by_stash_id[stash_id] = monitored
 
-        # Initial status based on hasFile; "waiting" may be updated by the queue check
+        # Initial status based on hasFile and monitored; the queue check may replace it
+        if has_file:
+            status = "downloaded"
+        else:
+            status = "waiting" if monitored else "unmonitored"
         status_map[stash_id] = {
-            "status": "downloaded" if has_file else "waiting",
+            "status": status,
+            "monitored": monitored,
             "whisparr_id": whisparr_id
         }
 
@@ -1059,6 +1079,7 @@ def whisparr_get_status_map(whisparr_url, api_key):
                 "progress": progress,
                 "eta": eta,
                 "error": error_message,
+                "monitored": monitored_by_stash_id[stash_id],
                 "whisparr_id": movie_id
             }
         elif queue_status == "downloading" or tracked_state == "downloading":
@@ -1066,12 +1087,14 @@ def whisparr_get_status_map(whisparr_url, api_key):
                 "status": "downloading",
                 "progress": progress,
                 "eta": eta,
+                "monitored": monitored_by_stash_id[stash_id],
                 "whisparr_id": movie_id
             }
         elif queue_status == "queued":
             status_map[stash_id] = {
                 "status": "queued",
                 "eta": eta,
+                "monitored": monitored_by_stash_id[stash_id],
                 "whisparr_id": movie_id
             }
         else:
@@ -1080,6 +1103,7 @@ def whisparr_get_status_map(whisparr_url, api_key):
                 "status": "queued",
                 "progress": progress,
                 "eta": eta,
+                "monitored": monitored_by_stash_id[stash_id],
                 "whisparr_id": movie_id
             }
 
@@ -1791,6 +1815,8 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
             - is_complete: true if we've checked all StashDB scenes
             - missing_scenes: array of scene objects
             - whisparr_configured: boolean
+            - whisparr_search_on_add: boolean (the whisparrSearchOnAdd setting; the card labels
+              its button "Monitor + Search" or "Monitor" by it)
             - owned_by_fingerprint: stash-box scenes this response left out only because a
               local scene without their stash_id matches them by fingerprint
             - fingerprint_matching: false when the ignoreFingerprintMatches setting is on
@@ -1938,6 +1964,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
             "missing_scenes": [],
             "whisparr_configured": bool(whisparr_url_setting(plugin_settings) and
                                         plugin_settings.get("whisparrApiKey")),
+            "whisparr_search_on_add": whisparr_search_on_add_setting(plugin_settings),
             "empty_filter_types": empty_filters  # Frontend can use this for messaging
         }
 
@@ -2024,6 +2051,7 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         "is_complete": is_complete,
         "missing_scenes": formatted_scenes,
         "whisparr_configured": whisparr_configured,
+        "whisparr_search_on_add": whisparr_search_on_add_setting(plugin_settings),
         **({"whisparr_error": whisparr_error} if whisparr_error else {}),
         "filters_active": filters_active,
         "active_filters": active_filters,
@@ -2287,6 +2315,7 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         "is_complete": result["is_complete"],
         "missing_scenes": formatted_scenes,
         "whisparr_configured": whisparr_configured,
+        "whisparr_search_on_add": whisparr_search_on_add_setting(plugin_settings),
         **({"whisparr_error": whisparr_error} if whisparr_error else {}),
         "filters_active": filters_active,
         "active_filter_tag_ids": list(tag_ids) if tag_ids else [],
@@ -2315,6 +2344,7 @@ def _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, empty_filte
         "missing_scenes": [],
         "whisparr_configured": bool(whisparr_url_setting(plugin_settings) and
                                     plugin_settings.get("whisparrApiKey")),
+        "whisparr_search_on_add": whisparr_search_on_add_setting(plugin_settings),
         "filters_active": True,
         "excluded_tags_applied": False,
         "empty_filter_types": empty_filter_types
@@ -2328,7 +2358,8 @@ def add_to_whisparr(stash_id, title, plugin_settings, endpoint=None):
     1. Check if scene already exists (movie?stashId=X)
     2. Lookup scene in TPDB (lookup/scene?term=stash:X)
     3. Add scene to Whisparr (POST movie; with whisparrSearchOnAdd, Whisparr searches on add)
-    4. For a scene already in Whisparr without a file, trigger a search if whisparrSearchOnAdd
+    4. For a scene already in Whisparr without a file: monitor it if it is unmonitored, then
+       trigger a search if whisparrSearchOnAdd
 
     Args:
         stash_id: StashDB scene ID (UUID)
@@ -2353,7 +2384,7 @@ def add_to_whisparr(stash_id, title, plugin_settings, endpoint=None):
     whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
     quality_profile = int(plugin_settings.get("whisparrQualityProfile") or 1)  # Default to first profile
     root_folder = whisparr_root_folder_setting(plugin_settings)
-    search_on_add = bool(plugin_settings.get("whisparrSearchOnAdd", False))  # Default to False for manual control
+    search_on_add = whisparr_search_on_add_setting(plugin_settings)  # Default to False for manual control
 
     if not whisparr_url or not whisparr_api_key:
         return {"success": False,
@@ -2374,10 +2405,15 @@ def add_to_whisparr(stash_id, title, plugin_settings, endpoint=None):
                     "already_exists": True,
                     "search_triggered": False,
                 }
+            # Whisparr won't treat an unmonitored scene as wanted, so a search would be pointless
+            monitored_now = _is_unmonitored(existing_scene)
+            if monitored_now:
+                whisparr_set_monitored(whisparr_url, whisparr_api_key, existing_scene["id"], True)
+            note = " It is now monitored." if monitored_now else ""
             if not search_on_add:
                 return {
                     "success": True,
-                    "message": f"Scene '{title}' already in Whisparr (no file yet). Use Whisparr to search.",
+                    "message": f"Scene '{title}' already in Whisparr (no file yet).{note} Use Whisparr to search.",
                     "already_exists": True,
                     "search_triggered": False,
                 }
@@ -2394,7 +2430,7 @@ def add_to_whisparr(stash_id, title, plugin_settings, endpoint=None):
                 }
             return {
                 "success": True,
-                "message": f"Scene '{title}' already in Whisparr. Triggered search.",
+                "message": f"Scene '{title}' already in Whisparr.{note} Triggered search.",
                 "already_exists": True,
                 "search_triggered": True,
             }
@@ -2465,28 +2501,121 @@ def whisparr_delete_scene(whisparr_url, api_key, movie_id, delete_files=False):
     return True
 
 
-def whisparr_unmonitor_scene(whisparr_url, api_key, movie_id):
-    """Unmonitor a scene in Whisparr (keeps it but prevents re-downloading).
+def _is_unmonitored(scene):
+    """True when Whisparr says the scene is not monitored (a missing field counts as monitored)."""
+    return isinstance(scene, dict) and scene.get("monitored") is False
 
-    Args:
-        whisparr_url: Whisparr base URL
-        api_key: Whisparr API key
-        movie_id: Whisparr movie/scene ID
 
-    Returns:
-        Updated scene data, raises on failure
+def whisparr_set_monitored(whisparr_url, api_key, movie_id, monitored):
+    """Set a scene's monitored flag in Whisparr (GET movie/{id}, then PUT the whole movie back).
+
+    Returns the updated scene data; raises WhisparrError on failure or when Whisparr has no
+    scene with that id.
     """
+    verb = "monitor" if monitored else "unmonitor"
     endpoint = f"movie/{movie_id}"
     scene = whisparr_request(whisparr_url, api_key, endpoint)
     if not isinstance(scene, dict):
-        raise WhisparrError(f"Whisparr has no scene with id {movie_id} to unmonitor.",
+        raise WhisparrError(f"Whisparr has no scene with id {movie_id} to {verb}.",
                             url=f"{normalize_whisparr_url(whisparr_url)}/api/v3/{endpoint}")
 
-    scene["monitored"] = False
-    result = whisparr_request(whisparr_url, api_key, endpoint, method="PUT", payload=scene)
-    log.LogInfo(f"Unmonitored scene {movie_id} in Whisparr")
-    invalidate_whisparr_status(whisparr_url)
+    scene["monitored"] = bool(monitored)
+    try:
+        result = whisparr_request(whisparr_url, api_key, endpoint, method="PUT", payload=scene)
+    finally:
+        invalidate_whisparr_status(whisparr_url)
+    log.LogInfo(f"{'Monitored' if monitored else 'Unmonitored'} scene {movie_id} in Whisparr")
     return result
+
+
+def whisparr_unmonitor_scene(whisparr_url, api_key, movie_id):
+    """Unmonitor a scene in Whisparr (keeps it but prevents re-downloading).
+
+    Returns updated scene data, raises on failure.
+    """
+    return whisparr_set_monitored(whisparr_url, api_key, movie_id, False)
+
+
+def whisparr_monitor_scene(whisparr_url, api_key, movie_id):
+    """Monitor a scene in Whisparr so it counts as wanted. Returns updated scene data, raises on failure."""
+    return whisparr_set_monitored(whisparr_url, api_key, movie_id, True)
+
+
+def monitor_in_whisparr(stash_id, title, plugin_settings, endpoint=None):
+    """Monitor a scene that is already in Whisparr, unmonitored, and search for it if
+    whisparrSearchOnAdd is on. For the card button on an "unmonitored" scene.
+
+    The search comes after the monitor: Whisparr doesn't want an unmonitored scene. Nothing is
+    added to Whisparr; a scene it no longer has is an error.
+
+    Args:
+        stash_id: StashDB scene ID (UUID)
+        title: Scene title (for logging/error messages)
+        plugin_settings: Plugin configuration from Stash
+        endpoint: stash-box endpoint the scene came from; anything but StashDB (or None/"",
+            which older UI builds send) is refused without calling Whisparr.
+
+    Returns:
+        On success {success: True, message, search_triggered, already_has_file?, search_error?};
+        search_error means the scene is monitored but its search didn't start.
+        On failure {success: False, error, whisparr_error?}.
+    """
+    if str(endpoint or "").strip() and not is_stashdb_endpoint(endpoint):
+        msg = (f"Can't monitor '{title}' in Whisparr: Whisparr matches scenes by StashDB ID, and this "
+               f"scene is from {endpoint}. Only StashDB scenes are in Whisparr.")
+        log.LogWarning(msg)
+        return {"success": False, "error": msg}
+
+    whisparr_url = whisparr_url_setting(plugin_settings)
+    whisparr_api_key = plugin_settings.get("whisparrApiKey", "")
+    search_on_add = whisparr_search_on_add_setting(plugin_settings)
+
+    if not whisparr_url or not whisparr_api_key:
+        return {"success": False,
+                "error": "Whisparr is not configured. Please set URL and API key in plugin settings."}
+
+    try:
+        scene = whisparr_get_scene_by_stash_id(whisparr_url, whisparr_api_key, stash_id)
+        if not scene:
+            # The status list we showed is up to a minute old (or the scene was deleted since)
+            invalidate_whisparr_status(whisparr_url)
+            return {"success": False,
+                    "error": f"Scene '{title}' is not in Whisparr any more, so it can't be monitored. "
+                             "Reload the list to add it again."}
+        if scene.get("hasFile", False):
+            invalidate_whisparr_status(whisparr_url)
+            return {"success": True,
+                    "message": f"Scene '{title}' already has a file in Whisparr.",
+                    "already_has_file": True,
+                    "search_triggered": False}
+
+        if _is_unmonitored(scene):
+            whisparr_set_monitored(whisparr_url, whisparr_api_key, scene["id"], True)
+        else:
+            invalidate_whisparr_status(whisparr_url)  # the list we showed was stale
+
+        if not search_on_add:
+            return {"success": True,
+                    "message": f"Scene '{title}' is now monitored in Whisparr.",
+                    "search_triggered": False}
+        try:
+            whisparr_trigger_search(whisparr_url, whisparr_api_key, scene["id"])
+        except WhisparrError as e:
+            log.LogWarning(f"'{title}' is monitored in Whisparr, but its search could not be started: {e}")
+            return {"success": True,
+                    "message": f"Scene '{title}' is now monitored in Whisparr, but the search could not be started.",
+                    "search_triggered": False,
+                    "search_error": str(e)}
+        return {"success": True,
+                "message": f"Scene '{title}' is now monitored in Whisparr. Triggered search.",
+                "search_triggered": True}
+
+    except WhisparrError as e:
+        log.LogError(f"Error monitoring scene in Whisparr: {e}")
+        return {"success": False, "error": str(e), "whisparr_error": str(e)}
+    except Exception as e:
+        log.LogError(f"Error monitoring scene in Whisparr: {e}")
+        return {"success": False, "error": str(e)}
 
 
 # ============================================================================
@@ -3086,6 +3215,16 @@ def main(input_data=None):
                 output = {"error": "stash_id is required"}
             else:
                 output = add_to_whisparr(stash_id, title, plugin_settings, endpoint=endpoint)
+
+        elif operation == "monitor_in_whisparr":
+            stash_id = args.get("stash_id", "")
+            title = args.get("title", "Unknown")
+            endpoint = args.get("endpoint")
+
+            if not stash_id:
+                output = {"error": "stash_id is required"}
+            else:
+                output = monitor_in_whisparr(stash_id, title, plugin_settings, endpoint=endpoint)
 
         elif operation == "get_endpoints":
             entity_type = args.get("entity_type", "")

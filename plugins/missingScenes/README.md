@@ -154,7 +154,8 @@ Scenes show their state in Whisparr:
 - **Downloading**: Currently downloading, with progress percentage
 - **Queued**: Waiting to start downloading
 - **Stalled**: Download stalled (with error message)
-- **Waiting**: In Whisparr but not yet searching
+- **Waiting**: In Whisparr and monitored, but not grabbed yet
+- **Monitor** / **Monitor + Search**: In Whisparr with no file but not monitored, so Whisparr won't look for it (a performer's scene list that Whisparr imported unmonitored looks like this). The button is live: it monitors the scene, and it also searches when **Search on Add** is on (hence the label). It then shows **Monitored** or **Searching**.
 
 The plugin uses `stash:{scene_id}` as the foreign ID format. Adding a scene doesn't start a download unless **Search on Add** is on.
 

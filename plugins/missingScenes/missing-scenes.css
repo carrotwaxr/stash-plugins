@@ -386,6 +386,11 @@
   border-color: #20c997 !important;
 }
 
+.ms-btn-unmonitored {
+  background: #6f42c1 !important;
+  border-color: #6f42c1 !important;
+}
+
 @keyframes ms-pulse {
   0%, 100% {
     opacity: 1;

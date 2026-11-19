@@ -266,6 +266,216 @@ test("browse: whisparr_error banner", async () => {
   assert.ok(findButton(browseResults(c), "Add to Whisparr"));
 });
 
+// ---------------- unmonitored scenes: Monitor / Monitor + Search ----------------
+
+const unmon = (id, extra = {}) => ({
+  ...scene(id), in_whisparr: true,
+  whisparr_status: { status: "unmonitored", monitored: false, whisparr_id: 7 }, ...extra,
+});
+const monitorCalls = (ms) => ms.fetchCalls.filter((c) => c.body && c.body.variables && c.body.variables.args
+  && c.body.variables.args.operation === "monitor_in_whisparr").map((c) => c.body.variables.args);
+const CARD_CFG = { stashdbUrl: "https://stashdb.org", whisparrConfigured: true, endpoint: "https://stashdb.org/graphql" };
+
+function cardFor(sc, cfg = {}, responses = {}) {
+  const ms = loadMissingScenes({ fetchResponses: responses });
+  const card = ms.exports.core.createSceneCard(sc, { ...CARD_CFG, ...cfg });
+  return { ms, card };
+}
+const whisparrBtn = (card) => {
+  const find = (el) => {
+    if (el.className && el.className.includes("ms-btn-whisparr")) return el;
+    for (const c of el.children || []) { const b = find(c); if (b) return b; }
+    return null;
+  };
+  return find(card);
+};
+
+test("card: unmonitored scene gets an enabled Monitor + Search button when search on add is on", () => {
+  const { card } = cardFor(unmon("a"), { whisparrSearchOnAdd: true });
+  const b = whisparrBtn(card);
+  assert.strictEqual(b.textContent, "Monitor + Search");
+  assert.strictEqual(b.disabled, false);
+  assert.ok(typeof b.onclick === "function");
+});
+
+test("card: unmonitored scene gets a plain Monitor button when search on add is off or unset", () => {
+  for (const cfg of [{ whisparrSearchOnAdd: false }, {}]) {
+    const b = whisparrBtn(cardFor(unmon("a"), cfg).card);
+    assert.strictEqual(b.textContent, "Monitor");
+    assert.strictEqual(b.disabled, false);
+  }
+});
+
+test("card: waiting (monitored) stays a disabled Waiting button; so do the other statuses", () => {
+  for (const [status, label] of [["waiting", "Waiting"], ["queued", "Queued"], ["downloaded", "Downloaded"]]) {
+    const { card } = cardFor({ ...scene("a"), in_whisparr: true, whisparr_status: { status, monitored: true } },
+      { whisparrSearchOnAdd: true });
+    const b = whisparrBtn(card);
+    assert.strictEqual(b.textContent, label);
+    assert.strictEqual(b.disabled, true);
+    assert.ok(!b.onclick, "no click handler");
+  }
+});
+
+test("card: an old cache entry without monitored that says waiting is still Waiting", () => {
+  const { card } = cardFor({ ...scene("a"), in_whisparr: true, whisparr_status: { status: "waiting" } });
+  assert.strictEqual(whisparrBtn(card).textContent, "Waiting");
+  assert.strictEqual(whisparrBtn(card).disabled, true);
+});
+
+test("card click: monitor with a search shows Searching, disables, and keeps the scene from flipping back", async () => {
+  const sc = unmon("a");
+  const seenResults = [];
+  const { ms, card } = cardFor(sc, { whisparrSearchOnAdd: true, onWhisparrMonitor: (s, ok, d) => seenResults.push([ok, d]) },
+    { RunPluginOperation: () => wrap({ success: true, message: "m", search_triggered: true }) });
+  const b = whisparrBtn(card);
+  b.onclick(ev);
+  assert.strictEqual(b.textContent, "Monitoring...");
+  assert.strictEqual(b.disabled, true);
+  await ms.settle();
+  assert.deepStrictEqual(monitorCalls(ms), [{
+    operation: "monitor_in_whisparr", stash_id: "a", title: "Scene a", endpoint: "https://stashdb.org/graphql" }]);
+  assert.strictEqual(b.textContent, "Searching");
+  assert.strictEqual(b.disabled, true);
+  assert.strictEqual(sc.whisparr_status.status, "waiting");
+  assert.strictEqual(sc.whisparr_status.monitored, true);
+  assert.strictEqual(sc.in_whisparr, true);
+  assert.strictEqual(seenResults.length, 1);
+  assert.strictEqual(seenResults[0][0], true);
+  // a re-render builds a disabled, non-clickable button
+  const again = whisparrBtn(ms.exports.core.createSceneCard(sc, { ...CARD_CFG, whisparrSearchOnAdd: true }));
+  assert.strictEqual(again.textContent, "Waiting");
+  assert.strictEqual(again.disabled, true);
+});
+
+test("card click: monitor without a search shows Monitored", async () => {
+  const { ms, card } = cardFor(unmon("a"), { whisparrSearchOnAdd: false },
+    { RunPluginOperation: () => wrap({ success: true, message: "m", search_triggered: false }) });
+  const b = whisparrBtn(card);
+  b.onclick(ev);
+  await ms.settle();
+  assert.strictEqual(b.textContent, "Monitored");
+  assert.strictEqual(b.disabled, true);
+  assert.strictEqual(monitorCalls(ms).length, 1);
+});
+
+test("card click: a search that could not start still says Monitored and reports search_error", async () => {
+  const got = [];
+  const { ms, card } = cardFor(unmon("a"), { whisparrSearchOnAdd: true, onWhisparrMonitor: (s, ok, d) => got.push(d) },
+    { RunPluginOperation: () => wrap({ success: true, message: "m", search_triggered: false, search_error: "indexers down" }) });
+  const b = whisparrBtn(card);
+  b.onclick(ev);
+  await ms.settle();
+  assert.strictEqual(b.textContent, "Monitored");
+  assert.strictEqual(got[0].search_error, "indexers down");
+});
+
+test("card click: a scene that already has a file becomes Downloaded", async () => {
+  const sc = unmon("a");
+  const { ms, card } = cardFor(sc, { whisparrSearchOnAdd: true },
+    { RunPluginOperation: () => wrap({ success: true, message: "m", already_has_file: true, search_triggered: false }) });
+  const b = whisparrBtn(card);
+  b.onclick(ev);
+  await ms.settle();
+  assert.strictEqual(b.textContent, "Downloaded");
+  assert.strictEqual(b.disabled, true);
+  assert.strictEqual(sc.whisparr_status.status, "downloaded");
+});
+
+test("card click: failure shows Failed with the error as the title, re-enables, and keeps the status", async () => {
+  const sc = unmon("a");
+  const errs = [];
+  const { ms, card } = cardFor(sc, { whisparrSearchOnAdd: true, onWhisparrMonitor: (s, ok, d) => errs.push([ok, d]) },
+    { RunPluginOperation: () => wrap({ success: false, error: "Scene 'x' is not in Whisparr any more" }) });
+  const b = whisparrBtn(card);
+  b.onclick(ev);
+  await ms.settle();
+  assert.strictEqual(b.textContent, "Failed");
+  assert.strictEqual(b.title, "Scene 'x' is not in Whisparr any more");
+  assert.strictEqual(b.disabled, false);
+  assert.ok(b.classList.contains("ms-btn-error"));
+  assert.strictEqual(sc.whisparr_status.status, "unmonitored");
+  assert.strictEqual(errs[0][0], false);
+  ms.flushTimers();
+  assert.strictEqual(b.textContent, "Monitor + Search");
+  assert.ok(!b.classList.contains("ms-btn-error"));
+  assert.strictEqual(b.disabled, false);
+});
+
+test("card: no Monitor button on a non-StashDB view", () => {
+  const { card } = cardFor(unmon("a"), { endpoint: "https://pmvstash.org/graphql", stashdbUrl: "https://pmvstash.org" });
+  assert.ok(!whisparrBtn(card));
+});
+
+test("modal: unmonitored scene shows Monitor + Search per the response's setting; click reports in the status line", async () => {
+  const { ms, els, m } = modalSetup({
+    RunPluginOperation: (body) => body.variables.args.operation === "monitor_in_whisparr"
+      ? wrap({ success: true, message: "m", search_triggered: true })
+      : wrap(okPage({ whisparr_search_on_add: true, missing_scenes: [unmon("a")] })),
+  });
+  await m.performSearch(true);
+  const btn = findButton(els["ms-results"], "Monitor + Search");
+  assert.ok(btn, text(els["ms-results"]));
+  assert.ok(!findButton(els["ms-results"], "Add to Whisparr"));
+  click(btn);
+  await ms.settle();
+  assert.strictEqual(monitorCalls(ms)[0].endpoint, "https://stashdb.org");
+  assert.strictEqual(btn.textContent, "Searching");
+  const s = els["ms-status"].textContent;
+  assert.ok(s.includes("Scene a") && /monitor/i.test(s), s);
+  assert.ok(!els["ms-status"].classList.contains("ms-status-error"));
+});
+
+test("modal: Monitor label without the search setting; failure shows the error text, not HTML", async () => {
+  const { ms, els, m } = modalSetup({
+    RunPluginOperation: (body) => body.variables.args.operation === "monitor_in_whisparr"
+      ? wrap({ success: false, error: "Whisparr said <b>no</b>" })
+      : wrap(okPage({ whisparr_search_on_add: false, missing_scenes: [unmon("a")] })),
+  });
+  await m.performSearch(true);
+  const btn = findButton(els["ms-results"], "Monitor");
+  assert.strictEqual(btn.textContent, "Monitor");
+  click(btn);
+  await ms.settle();
+  assert.strictEqual(btn.textContent, "Failed");
+  const status = els["ms-status"];
+  assert.ok(status.textContent.includes("Whisparr said <b>no</b>"), status.textContent);
+  assert.ok(!status.innerHTML.includes("<b>"));
+  assert.ok(status.classList.contains("ms-status-error"));
+});
+
+test("modal: Add All ignores unmonitored scenes (they are already in Whisparr)", async () => {
+  const { ms, els, m } = modalSetup({
+    RunPluginOperation: () => wrap(okPage({ missing_scenes: [unmon("a"), scene("b")] })),
+  });
+  await m.performSearch(true);
+  assert.ok(els["ms-add-all-btn"].textContent.includes("(1)"), els["ms-add-all-btn"].textContent);
+  await drive(ms, els["ms-add-all-btn"].onclick());
+  assert.deepStrictEqual(addCalls(ms).map((a) => a.stash_id), ["b"]);
+  assert.strictEqual(monitorCalls(ms).length, 0);
+});
+
+test("browse: unmonitored scene shows Monitor + Search; click goes to the status line", async () => {
+  const { ms, c } = await browseSetup((body) => body.variables.args.operation === "monitor_in_whisparr"
+    ? wrap({ success: true, message: "m", search_triggered: false, search_error: "no indexers" })
+    : wrap(okPage({ whisparr_search_on_add: true, missing_scenes: [unmon("a")] })));
+  const btn = findButton(browseResults(c), "Monitor + Search");
+  assert.ok(btn, text(c));
+  click(btn);
+  await ms.settle();
+  assert.strictEqual(monitorCalls(ms)[0].endpoint, "https://stashdb.org");
+  assert.strictEqual(btn.textContent, "Monitored");
+  const s = c.els["#ms-browse-status"].textContent;
+  assert.ok(s.includes("no indexers"), s);
+  assert.ok(c.els["#ms-browse-status"].className.includes("ms-status-error"));
+});
+
+test("browse: Monitor label when the response says search on add is off", async () => {
+  const { c } = await browseSetup(() => wrap(okPage({ whisparr_search_on_add: false, missing_scenes: [unmon("a")] })));
+  assert.ok(findButton(browseResults(c), "Monitor"));
+  assert.ok(!findButton(browseResults(c), "Monitor + Search"));
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {
