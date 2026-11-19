@@ -242,6 +242,10 @@ One request reads up to 50 stash-box pages (5000 scenes). If the page isn't full
 
 ## Changelog
 
+### 1.6.0
+- A scene that Whisparr has but doesn't monitor (as when Whisparr imports a performer's whole scene list) no longer shows a disabled **Waiting** button. It shows **Monitor**, or **Monitor + Search** when **Search on Add** is on, which monitors the scene in Whisparr and searches for it. **Waiting** now means monitored and not grabbed yet. **Add to Whisparr** on a scene that is already in Whisparr also monitors it.
+- The **Missing Scenes** button shows on performer, studio and tag pages with themes that redraw the page header, such as Sticky. It sits in the name row beside Stash's icons rather than inside them. A button left over from another page is removed when you navigate.
+
 ### 1.5.2
 - Scene card actions wrap inside the card, so **Add to Whisparr** stays visible and clickable on scenes with several site links or a long site URL.
 

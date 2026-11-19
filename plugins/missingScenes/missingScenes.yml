@@ -1,6 +1,6 @@
 name: Missing Scenes
 description: Discover scenes from StashDB, other stash-boxes and ThePornDB that you don't have locally. View missing scenes for performers, studios and tags, with optional Whisparr v3 integration (StashDB scenes) for automated downloading and cleanup.
-version: 1.5.2
+version: 1.6.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer/studio pages
