@@ -1,6 +1,6 @@
 name: Missing Scenes
 description: Discover scenes from StashDB, other stash-boxes and ThePornDB that you don't have locally. View missing scenes for performers, studios and tags, with optional Whisparr v3 integration (StashDB scenes) for automated downloading and cleanup.
-version: 1.6.0
+version: 1.7.0
 url: https://github.com/carrotwaxr/stash-plugins
 
 # UI plugin - injects button and modal on performer/studio pages
@@ -78,7 +78,7 @@ settings:
     type: STRING
   favoriteLimit:
     displayName: Favorite Limit
-    description: Maximum number of favorites to use per filter type (default 100). Favorites are sorted by engagement (performers by last activity, studios/tags by scene count).
+    description: Maximum number of favorites to use per filter type (default 100). Favorites are sorted by engagement (performers by last activity, studios/tags by scene count). With Include sub-studios or Include sub-tags, those count toward it, after your favorites.
     type: NUMBER
 
   # Fingerprint index

@@ -4,6 +4,10 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ## Missing Scenes
 
+### 1.7.0
+- New **Include sub-studios** and **Include sub-tags** checkboxes beside **Favorite Studios** and **Favorite Tags**, on performer, studio and tag pages and on the Browse page. With one on, the filter also matches the sub-studios or sub-tags of your favorites, at every level, so you only need to favorite the parent. Each works only with its favorites filter and is off by default.
+- On the Browse page, sub-studios and sub-tags count toward the **Favorite Limit**, after your favorites. When the limit leaves some out, the page says so.
+
 ### 1.6.0
 - A scene that Whisparr has but doesn't monitor (as when Whisparr imports a performer's whole scene list) no longer shows a disabled **Waiting** button. It shows **Monitor**, or **Monitor + Search** when **Search on Add** is on, which monitors the scene in Whisparr and searches for it. **Waiting** now means monitored and not grabbed yet. **Add to Whisparr** on a scene that is already in Whisparr also monitors it.
 - The **Missing Scenes** button shows on performer, studio and tag pages with themes that redraw the page header, such as Sticky. It sits in the name row beside Stash's icons rather than inside them. A button left over from another page is removed when you navigate.

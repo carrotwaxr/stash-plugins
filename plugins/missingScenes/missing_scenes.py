@@ -437,7 +437,114 @@ def get_local_tag(tag_id):
     return None
 
 
-def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
+# The direct children of a set of local studios or tags. Tags filter at depth 0 (direct
+# children only): the walk goes level by level itself, so it can stop on a cycle.
+_CHILDREN_QUERIES = {
+    "studio": ("""
+    query FindChildStudios($filter: FindFilterType, $parents: [ID!]) {
+        findStudios(
+            filter: $filter
+            studio_filter: { parents: { value: $parents, modifier: INCLUDES } }
+        ) {
+            count
+            studios {
+                id
+                name
+                stash_ids {
+                    endpoint
+                    stash_id
+                }
+            }
+        }
+    }
+    """, "findStudios", "studios", "sub-studios"),
+    "tag": ("""
+    query FindChildTags($filter: FindFilterType, $parents: [ID!]) {
+        findTags(
+            filter: $filter
+            tag_filter: { parents: { value: $parents, modifier: INCLUDES, depth: 0 } }
+        ) {
+            count
+            tags {
+                id
+                name
+                stash_ids {
+                    endpoint
+                    stash_id
+                }
+            }
+        }
+    }
+    """, "findTags", "tags", "sub-tags"),
+}
+
+
+def iter_descendants(entity_type: str, root_ids):
+    """Yield the descendants of local studios or tags, breadth first, without the roots.
+
+    One query per level asks for the children of the whole level, most scenes first.
+    Each entity comes once: tags can have several parents, and a visited set stops a
+    corrupted studio cycle. Children without a stash_id are walked through too, since
+    their own children may have one.
+
+    Args:
+        entity_type: "studio" or "tag"
+        root_ids: local Stash ids of the roots
+
+    Yields:
+        {id, name, stash_ids} of each descendant.
+
+    Raises:
+        RuntimeError when Stash doesn't answer a children query (an empty answer would
+        read as "no sub-studios").
+    """
+    query, result_key, items_key, label = _CHILDREN_QUERIES[entity_type]
+    visited = {str(r) for r in root_ids}
+    level = list(dict.fromkeys(str(r) for r in root_ids))
+    per_page = 100
+
+    while level:
+        next_level = []
+        page = 1
+        while True:
+            data = stash_graphql(query, {
+                "filter": {"page": page, "per_page": per_page,
+                           "sort": "scenes_count", "direction": "DESC"},
+                "parents": level,
+            })
+            if not data or result_key not in data:
+                raise RuntimeError(f"Stash didn't list the {label} of your favorite {entity_type}s")
+
+            result = data[result_key]
+            items = result.get(items_key) or []
+            for item in items:
+                item_id = str(item.get("id"))
+                if item_id in visited:
+                    continue
+                visited.add(item_id)
+                next_level.append(item_id)
+                yield item
+
+            if not items or page * per_page >= result.get("count", 0):
+                break
+            page += 1
+        level = next_level
+
+
+def get_descendants(entity_type: str, root_ids) -> list[dict]:
+    """The descendants of local studios or tags, as iter_descendants yields them."""
+    return list(iter_descendants(entity_type, root_ids))
+
+
+def _endpoint_stash_id(item, endpoint):
+    """The item's stash_id on this endpoint, or None."""
+    for sid in item.get("stash_ids") or []:
+        if sid.get("endpoint") == endpoint:
+            return sid.get("stash_id")
+    return None
+
+
+def get_favorite_stash_ids(entity_type: str, endpoint: str, include_children: bool = False) -> set[str]:
     """Get stash_ids for all favorited entities of a given type.
 
     Fetches all favorited performers/studios/tags from local Stash and returns
@@ -446,6 +553,8 @@ def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
     Args:
         entity_type: "performer", "studio", or "tag"
         endpoint: StashDB endpoint URL to match stash_ids against
+        include_children: studios and tags only: also every descendant (sub-studio,
+            sub-tag) of every favorite, linked or not
 
     Returns:
         Set of StashDB IDs for favorites linked to that endpoint
@@ -519,6 +628,7 @@ def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
         return set()
 
     stash_ids = set()
+    root_ids = []
     page = 1
     per_page = 100
 
@@ -540,6 +650,7 @@ def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
             break
 
         for item in items:
+            root_ids.append(item.get("id"))
             for sid in item.get("stash_ids", []):
                 if sid.get("endpoint") == endpoint:
                     stash_ids.add(sid.get("stash_id"))
@@ -552,6 +663,14 @@ def get_favorite_stash_ids(entity_type: str, endpoint: str) -> set[str]:
         page += 1
 
     log.LogInfo(f"Found {len(stash_ids)} favorite {entity_type}s linked to {endpoint}")
+
+    if include_children and entity_type in _CHILDREN_QUERIES and root_ids:
+        before = len(stash_ids)
+        for item in iter_descendants(entity_type, root_ids):
+            sid = _endpoint_stash_id(item, endpoint)
+            if sid:
+                stash_ids.add(sid)
+        log.LogInfo(f"Added {len(stash_ids) - before} descendants of favorite {entity_type}s")
     return stash_ids
 
 
@@ -569,6 +688,48 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
         The stash_ids of the top favorites, in that order (no duplicates). Callers that
         test membership make a set of it; ThePornDB browse uses the first few.
     """
+    return _top_favorites(entity_type, endpoint, limit)[0]
+
+
+def get_favorite_stash_ids_limited_with_children(entity_type: str, endpoint: str,
+                                                 limit: int = 100) -> tuple[list[str], bool]:
+    """The top favorites, then their descendants, with the total capped at limit.
+
+    The favorites come first, in get_favorite_stash_ids_limited's order, then the
+    descendants (sub-studios, sub-tags) of the favorites it looked at, breadth first
+    (iter_descendants' order), each stash_id once. ThePornDB browse uses only the first
+    few, so the favorites themselves always come before any descendant.
+
+    Args:
+        entity_type: "studio" or "tag"
+        endpoint: StashDB endpoint URL
+        limit: Maximum number of stash_ids to return, favorites and descendants together
+
+    Returns:
+        (stash_ids, truncated): truncated is True when the cap left out a descendant
+        linked to this endpoint.
+    """
+    stash_ids, root_ids = _top_favorites(entity_type, endpoint, limit)
+    truncated = False
+    if root_ids:
+        seen = set(stash_ids)
+        for item in iter_descendants(entity_type, root_ids):
+            sid = _endpoint_stash_id(item, endpoint)
+            if not sid or sid in seen:
+                continue
+            if len(stash_ids) >= limit:
+                truncated = True
+                break
+            stash_ids.append(sid)
+            seen.add(sid)
+    log.LogInfo(f"Using {len(stash_ids)} favorite {entity_type}s and descendants (limit: {limit})"
+                f"{', descendants cut' if truncated else ''}")
+    return stash_ids, truncated
+
+
+def _top_favorites(entity_type: str, endpoint: str, limit: int) -> tuple[list[str], list[str]]:
+    """get_favorite_stash_ids_limited's list, plus the local ids of every favorite it looked
+    at before the limit (linked to the endpoint or not): the roots for their descendants."""
     # Determine sort field based on entity type
     if entity_type == "performer":
         sort_field = "last_o_at"
@@ -638,9 +799,10 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
         items_key = "tags"
     else:
         log.LogWarning(f"Unknown entity type for favorites: {entity_type}")
-        return []
+        return [], []
 
     stash_ids = []
+    root_ids = []
     collected = 0
     page = 1
     per_page = min(100, limit)  # Don't fetch more than needed
@@ -667,6 +829,7 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
         for item in items:
             if collected >= limit:
                 break
+            root_ids.append(item.get("id"))
             for sid in item.get("stash_ids", []):
                 if sid.get("endpoint") == endpoint:
                     if sid.get("stash_id") not in stash_ids:
@@ -681,7 +844,7 @@ def get_favorite_stash_ids_limited(entity_type: str, endpoint: str, limit: int =
         page += 1
 
     log.LogInfo(f"Found {len(stash_ids)} favorite {entity_type}s (limit: {limit}) linked to {endpoint}")
-    return stash_ids
+    return stash_ids, root_ids
 
 
 # ============================================================================
@@ -1782,7 +1945,9 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
                                    cursor=None, sort="DATE", direction="DESC",
                                    filter_favorite_performers=False,
                                    filter_favorite_studios=False,
-                                   filter_favorite_tags=False):
+                                   filter_favorite_tags=False,
+                                   favorite_studios_include_children=False,
+                                   favorite_tags_include_children=False):
     """
     Find missing scenes with pagination support.
 
@@ -1801,6 +1966,10 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
         filter_favorite_performers: If True, only show scenes with favorite performers
         filter_favorite_studios: If True, only show scenes from favorite studios
         filter_favorite_tags: If True, only show scenes with favorite tags
+        favorite_studios_include_children: with filter_favorite_studios, also match the
+            sub-studios (every descendant) of each favorite studio
+        favorite_tags_include_children: with filter_favorite_tags, also match the sub-tags
+            of each favorite tag
 
     Returns:
         Dict with:
@@ -1936,12 +2105,14 @@ def find_missing_scenes_paginated(entity_type, entity_id, plugin_settings,
             empty_filters.append("performers")
 
     if filter_favorite_studios:
-        favorite_studio_ids = get_favorite_stash_ids("studio", stashdb_url)
+        favorite_studio_ids = get_favorite_stash_ids(
+            "studio", stashdb_url, include_children=bool(favorite_studios_include_children))
         if not favorite_studio_ids:
             empty_filters.append("studios")
 
     if filter_favorite_tags:
-        favorite_tag_ids = get_favorite_stash_ids("tag", stashdb_url)
+        favorite_tag_ids = get_favorite_stash_ids(
+            "tag", stashdb_url, include_children=bool(favorite_tags_include_children))
         if not favorite_tag_ids:
             empty_filters.append("tags")
 
@@ -2137,7 +2308,8 @@ def format_scene(scene, stash_id):
 def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor=None,
                    sort="DATE", direction="DESC",
                    filter_favorite_performers=False, filter_favorite_studios=False,
-                   filter_favorite_tags=False):
+                   filter_favorite_tags=False, favorite_studios_include_children=False,
+                   favorite_tags_include_children=False):
     """
     Browse all StashDB scenes without entity context.
 
@@ -2151,10 +2323,15 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         filter_favorite_performers: Filter by favorite performers
         filter_favorite_studios: Filter by favorite studios
         filter_favorite_tags: Filter by favorite tags
+        favorite_studios_include_children: with filter_favorite_studios, also match the
+            sub-studios of the favorites (after the favorites, within the Favorite Limit)
+        favorite_tags_include_children: the same for filter_favorite_tags and sub-tags
 
     Returns:
         Dict with missing scenes and metadata, including owned_by_fingerprint,
-        fingerprint_matching and fingerprint_index as in find_missing_scenes_paginated.
+        fingerprint_matching and fingerprint_index as in find_missing_scenes_paginated,
+        and warnings: plain-text notes for the user (sub-studios or sub-tags the
+        Favorite Limit cut).
         After a stash-box failure it also has error, partial, auth_error, rate_limited
         (and retry_after), as in find_missing_scenes_paginated; total_on_stashdb is None
         when the first page failed. A bad cursor gives just {"error"}.
@@ -2223,20 +2400,26 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
     studio_ids = None
     tag_ids = None
 
+    warnings = []
+
     if filter_favorite_performers:
         performer_ids = get_favorite_stash_ids_limited("performer", stashdb_url, limit=favorite_limit)
         if not performer_ids:
             return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["performers"])
 
     if filter_favorite_studios:
-        studio_ids = get_favorite_stash_ids_limited("studio", stashdb_url, limit=favorite_limit)
+        studio_ids = _browse_favorites("studio", stashdb_url, favorite_limit,
+                                       favorite_studios_include_children, warnings)
         if not studio_ids:
-            return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["studios"])
+            return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["studios"],
+                                        warnings)
 
     if filter_favorite_tags:
-        tag_ids = get_favorite_stash_ids_limited("tag", stashdb_url, limit=favorite_limit)
+        tag_ids = _browse_favorites("tag", stashdb_url, favorite_limit,
+                                    favorite_tags_include_children, warnings)
         if not tag_ids:
-            return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["tags"])
+            return _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, ["tags"],
+                                        warnings)
 
     performer_set = set(performer_ids) if performer_ids is not None else None
     studio_set = set(studio_ids) if studio_ids is not None else None
@@ -2327,11 +2510,29 @@ def browse_stashdb(plugin_settings, endpoint_override=None, page_size=50, cursor
         "cache_info": _get_cache_info(stashdb_url),
         "owned_by_fingerprint": counter.count,
         **fingerprint_fields,
+        "warnings": warnings,
         **{key: result[key] for key in FETCH_FAILURE_KEYS if key in result},
     }
 
 
-def _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, empty_filter_types):
+_CHILDREN_LABELS = {"studio": ("Favorite Studios", "sub-studios"), "tag": ("Favorite Tags", "sub-tags")}
+
+
+def _browse_favorites(entity_type, endpoint, limit, include_children, warnings):
+    """The browse page's favorite stash_ids for one filter: the top favorites, then with
+    include_children their descendants, capped at limit. A cap that cut descendants adds
+    a note to `warnings`."""
+    if not include_children:
+        return get_favorite_stash_ids_limited(entity_type, endpoint, limit=limit)
+    stash_ids, truncated = get_favorite_stash_ids_limited_with_children(entity_type, endpoint, limit)
+    if truncated:
+        filter_name, children = _CHILDREN_LABELS[entity_type]
+        warnings.append(f"{filter_name}: {children} cut at the Favorite Limit of {limit}; "
+                        f"raise it in the plugin settings to include them all.")
+    return stash_ids
+
+
+def _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, empty_filter_types, warnings=None):
     """Return empty result when a filter has no favorites."""
     return {
         "stashdb_name": stashdb_name,
@@ -2347,7 +2548,8 @@ def _empty_browse_result(stashdb_name, stashdb_url, plugin_settings, empty_filte
         "whisparr_search_on_add": whisparr_search_on_add_setting(plugin_settings),
         "filters_active": True,
         "excluded_tags_applied": False,
-        "empty_filter_types": empty_filter_types
+        "empty_filter_types": empty_filter_types,
+        "warnings": list(warnings or []),
     }
 
 
@@ -3167,6 +3369,9 @@ def main(input_data=None):
             filter_favorite_performers = args.get("filter_favorite_performers", False)
             filter_favorite_studios = args.get("filter_favorite_studios", False)
             filter_favorite_tags = args.get("filter_favorite_tags", False)
+            # Also match the favorites' sub-studios / sub-tags
+            studios_include_children = bool(args.get("favorite_studios_include_children", False))
+            tags_include_children = bool(args.get("favorite_tags_include_children", False))
 
             if not entity_id:
                 output = {"error": "entity_id is required"}
@@ -3180,7 +3385,9 @@ def main(input_data=None):
                     direction=direction,
                     filter_favorite_performers=filter_favorite_performers,
                     filter_favorite_studios=filter_favorite_studios,
-                    filter_favorite_tags=filter_favorite_tags
+                    filter_favorite_tags=filter_favorite_tags,
+                    favorite_studios_include_children=studios_include_children,
+                    favorite_tags_include_children=tags_include_children,
                 )
 
         elif operation == "browse_stashdb":
@@ -3192,6 +3399,8 @@ def main(input_data=None):
             filter_favorite_performers = args.get("filter_favorite_performers", False)
             filter_favorite_studios = args.get("filter_favorite_studios", False)
             filter_favorite_tags = args.get("filter_favorite_tags", False)
+            studios_include_children = bool(args.get("favorite_studios_include_children", False))
+            tags_include_children = bool(args.get("favorite_tags_include_children", False))
 
             output = browse_stashdb(
                 plugin_settings=plugin_settings,
@@ -3202,7 +3411,9 @@ def main(input_data=None):
                 direction=direction,
                 filter_favorite_performers=filter_favorite_performers,
                 filter_favorite_studios=filter_favorite_studios,
-                filter_favorite_tags=filter_favorite_tags
+                filter_favorite_tags=filter_favorite_tags,
+                favorite_studios_include_children=studios_include_children,
+                favorite_tags_include_children=tags_include_children,
             )
 
         elif operation == "add_to_whisparr":

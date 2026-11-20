@@ -40,6 +40,12 @@ Starting with Stash 0.30, tags can have Stash ID associations. On a Tag page lin
 
 On the Scenes page, click **Missing Scenes** in the toolbar to open the Browse page (`/plugins/missing-scenes`). It lists missing scenes for your favorite performers, studios and tags (up to **Favorite Limit** of each type), with sorting and an endpoint dropdown.
 
+### Favorite Filters
+
+The **Favorite Performers**, **Favorite Studios** and **Favorite Tags** checkboxes show only scenes with a performer, studio or tag you favorited in Stash. On a performer, studio or tag page you get the two that don't match the page's type; the Browse page has all three.
+
+**Include sub-studios** (with **Favorite Studios**) and **Include sub-tags** (with **Favorite Tags**) also match the sub-studios or sub-tags of your favorites, at every level, using the parents set in Stash. Favorite a network and its sites match too. Each works only with its favorites filter and is off by default. On the Browse page they count toward the **Favorite Limit**, after your favorites; when the limit leaves some out, the page says so.
+
 ### Trending
 
 Trending is stash-box's own ordering. It only includes scenes that had fingerprint activity in the last 7 days, so an empty Trending list does not mean you have every scene. Switch to Release Date to see the full list. Trending is always most active first; the direction control does not apply.
@@ -95,7 +101,7 @@ Configure in **Settings > Plugins > Missing Scenes**:
 | **Request Delay (seconds)** | `stashbox_request_delay` | Delay between paginated stash-box requests (default 0.5). Increase if you see rate limit errors. |
 | **Max Retries** | `stashbox_max_retries` | Retries for failed stash-box requests (default 3). |
 | **Excluded Tags** | `excludedTags` | Comma-separated stash-box tag UUIDs to leave out of results. Not applied to ThePornDB. |
-| **Favorite Limit** | `favoriteLimit` | Maximum favorites per type used on the Browse page (default 100). |
+| **Favorite Limit** | `favoriteLimit` | Maximum favorites per type used on the Browse page (default 100). With **Include sub-studios** or **Include sub-tags**, the sub-studios or sub-tags count toward it. |
 | **Ignore Fingerprint Matches** | `ignoreFingerprintMatches` | Off by default: fingerprint matches count as owned. On: only scenes linked by stash ID count. |
 
 ## Whisparr Integration
@@ -241,6 +247,10 @@ One request reads up to 50 stash-box pages (5000 scenes). If the page isn't full
 - **Pagination**: 100 scenes per page from the stash-box
 
 ## Changelog
+
+### 1.7.0
+- New **Include sub-studios** and **Include sub-tags** checkboxes beside **Favorite Studios** and **Favorite Tags**, on performer, studio and tag pages and on the Browse page. With one on, the filter also matches the sub-studios or sub-tags of your favorites, at every level, so you only need to favorite the parent. Each works only with its favorites filter and is off by default.
+- On the Browse page, sub-studios and sub-tags count toward the **Favorite Limit**, after your favorites. When the limit leaves some out, the page says so.
 
 ### 1.6.0
 - A scene that Whisparr has but doesn't monitor (as when Whisparr imports a performer's whole scene list) no longer shows a disabled **Waiting** button. It shows **Monitor**, or **Monitor + Search** when **Search on Add** is on, which monitors the scene in Whisparr and searches for it. **Waiting** now means monitored and not grabbed yet. **Add to Whisparr** on a scene that is already in Whisparr also monitors it.
