@@ -42,6 +42,10 @@ Changes to each plugin, newest first. Stash shows the installed and available ve
 
 ## Performer Image Search
 
+### 1.5.1
+- The **Search Images** button shows with themes that redraw the performer header, such as Sticky. It sits next to the name icons instead of inside them, and moves into the theme's visible panel when the name row is hidden.
+- Moving from one performer to another replaces the button, so it always searches the performer on screen.
+
 ### 1.5.0
 - **DuckDuckGo is now off by default, even if you never changed the toggle.** It often rate-limits searches. Turn on **Enable DuckDuckGo Images** in the plugin settings to use it again.
 - Each source shows a status chip in the modal: ok, empty, partial, error, blocked or timeout. Hover a chip to see the error. Sources have a 25 second limit and load gallery pages in parallel.
