@@ -62,6 +62,9 @@
   let filterFavoritePerformers = false;
   let filterFavoriteStudios = false;
   let filterFavoriteTags = false;
+  // "Include sub-studios" / "Include sub-tags": kept while their filter is off, sent only with it
+  let filterFavoriteStudiosChildren = false;
+  let filterFavoriteTagsChildren = false;
   let activeFilterTagIds = [];
   let emptyFilterTypes = []; // favorites filters with no favorites linked to this box
 
@@ -89,9 +92,11 @@
     }
     if (options.filterFavoriteStudios) {
       args.filter_favorite_studios = true;
+      if (options.filterFavoriteStudiosChildren) args.favorite_studios_include_children = true;
     }
     if (options.filterFavoriteTags) {
       args.filter_favorite_tags = true;
+      if (options.filterFavoriteTagsChildren) args.favorite_tags_include_children = true;
     }
     return runPluginOperation(args);
   }
@@ -147,6 +152,12 @@
     fingerprintNote.id = "ms-fingerprint";
     fingerprintNote.style.display = "none";
 
+    // Notes from the response's warnings (sub-studios cut at the Favorite Limit, ...)
+    const notices = document.createElement("div");
+    notices.className = "ms-notices";
+    notices.id = "ms-notices";
+    notices.style.display = "none";
+
     // Sort controls
     const sortControls = document.createElement("div");
     sortControls.className = "ms-sort-controls";
@@ -186,6 +197,7 @@
     modal.appendChild(header);
     modal.appendChild(stats);
     modal.appendChild(fingerprintNote);
+    modal.appendChild(notices);
     modal.appendChild(sortControls);
     modal.appendChild(filterControls);
     modal.appendChild(body);
@@ -281,6 +293,19 @@
         checked: filterFavoriteStudios,
         onChange: (checked) => {
           filterFavoriteStudios = checked;
+          updateFilterControls(); // enables or disables "Include sub-studios"
+          handleFilterChange();
+        }
+      });
+      checkboxes.push({
+        id: "ms-filter-studios-children",
+        label: "Include sub-studios",
+        title: "Also match the sub-studios of your favorite studios",
+        sub: true,
+        disabled: !filterFavoriteStudios,
+        checked: filterFavoriteStudiosChildren,
+        onChange: (checked) => {
+          filterFavoriteStudiosChildren = checked;
           handleFilterChange();
         }
       });
@@ -293,6 +318,19 @@
         checked: filterFavoriteTags,
         onChange: (checked) => {
           filterFavoriteTags = checked;
+          updateFilterControls(); // enables or disables "Include sub-tags"
+          handleFilterChange();
+        }
+      });
+      checkboxes.push({
+        id: "ms-filter-tags-children",
+        label: "Include sub-tags",
+        title: "Also match the sub-tags of your favorite tags",
+        sub: true,
+        disabled: !filterFavoriteTags,
+        checked: filterFavoriteTagsChildren,
+        onChange: (checked) => {
+          filterFavoriteTagsChildren = checked;
           handleFilterChange();
         }
       });
@@ -301,12 +339,14 @@
     // Create checkbox elements
     for (const cb of checkboxes) {
       const label = document.createElement("label");
-      label.className = "ms-filter-checkbox";
+      label.className = cb.sub ? "ms-filter-checkbox ms-filter-sub" : "ms-filter-checkbox";
+      if (cb.title) label.title = cb.title;
 
       const input = document.createElement("input");
       input.type = "checkbox";
       input.id = cb.id;
       input.checked = cb.checked;
+      input.disabled = !!cb.disabled;
       input.onchange = () => cb.onChange(input.checked);
 
       const span = document.createElement("span");
@@ -383,6 +423,17 @@
     fingerprintInfo = null;
     ownedByFingerprint = 0;
     fingerprintBuild = { running: false, message: null };
+  }
+
+  /**
+   * Render the response's warnings (plain text) above the results; hidden when none
+   */
+  function renderNotices(warnings) {
+    const el = document.getElementById("ms-notices");
+    if (!el) return;
+    const list = Array.isArray(warnings) ? warnings : [];
+    el.innerHTML = list.map((w) => `<div class="ms-notice">${escapeHtml(String(w))}</div>`).join("");
+    el.style.display = list.length ? "" : "none";
   }
 
   /**
@@ -871,6 +922,7 @@
       fingerprintInfo = null;
       ownedByFingerprint = 0;
       renderFingerprintNote();
+      renderNotices([]);
       showLoading();
     }
 
@@ -891,6 +943,8 @@
         filterFavoritePerformers: filterFavoritePerformers,
         filterFavoriteStudios: filterFavoriteStudios,
         filterFavoriteTags: filterFavoriteTags,
+        filterFavoriteStudiosChildren: filterFavoriteStudiosChildren,
+        filterFavoriteTagsChildren: filterFavoriteTagsChildren,
       });
       if (token !== requestToken) return;
 
@@ -933,6 +987,7 @@
 
       updateStats(result);
       renderFingerprintNote();
+      renderNotices(result.warnings);
       renderResults();
 
       if (failureText) {
@@ -1151,6 +1206,8 @@
       createModal,
       removeModal,
       renderFingerprintNote,
+      renderNotices,
+      updateFilterControls,
       handleBuildFingerprintIndex,
       placeSearchButton,
       pageEntity,

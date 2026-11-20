@@ -43,6 +43,13 @@
       filter_favorite_studios: options.filterFavoriteStudios || false,
       filter_favorite_tags: options.filterFavoriteTags || false,
     };
+    // Sub-studios / sub-tags only go with their filter
+    if (options.filterFavoriteStudios && options.filterFavoriteStudiosChildren) {
+      args.favorite_studios_include_children = true;
+    }
+    if (options.filterFavoriteTags && options.filterFavoriteTagsChildren) {
+      args.favorite_tags_include_children = true;
+    }
     if (selectedEndpoint) {
       args.endpoint = selectedEndpoint;
     }
@@ -61,6 +68,9 @@
   let filterFavoritePerformers = false;
   let filterFavoriteStudios = false;
   let filterFavoriteTags = false;
+  // "Include sub-studios" / "Include sub-tags": kept while their filter is off, sent only with it
+  let filterFavoriteStudiosChildren = false;
+  let filterFavoriteTagsChildren = false;
   let activeFilterTagIds = [];
   let pageSize = 50;
   let whisparrConfigured = false;
@@ -100,6 +110,15 @@
     const filterPerformersChecked = filterFavoritePerformers ? 'checked' : '';
     const filterStudiosChecked = filterFavoriteStudios ? 'checked' : '';
     const filterTagsChecked = filterFavoriteTags ? 'checked' : '';
+    const subCheckbox = (id, label, title, checked, enabled) => `
+            <label class="ms-filter-checkbox ms-filter-sub" title="${title}">
+              <input type="checkbox" id="${id}" ${checked ? 'checked' : ''} ${enabled ? '' : 'disabled'}>
+              <span>${label}</span>
+            </label>`;
+    const studiosChildrenCheckbox = subCheckbox("ms-filter-studios-children", "Include sub-studios",
+      "Also match the sub-studios of your favorite studios", filterFavoriteStudiosChildren, filterFavoriteStudios);
+    const tagsChildrenCheckbox = subCheckbox("ms-filter-tags-children", "Include sub-tags",
+      "Also match the sub-tags of your favorite tags", filterFavoriteTagsChildren, filterFavoriteTags);
 
     // Build sort options
     const sortOptions = [
@@ -158,6 +177,11 @@
       const n = Number(stats.favorites_query_limit) || 10;
       favoritesNote = `<div class="ms-browse-note">${escapeHtml(`Only your first ${n} favorite performers/studios are searched on ThePornDB (most engaged first).`)}</div>`;
     }
+
+    // The response's warnings (sub-studios or sub-tags cut at the Favorite Limit, ...)
+    const warningsNote = (stats && Array.isArray(stats.warnings) ? stats.warnings : [])
+      .map((w) => `<div class="ms-browse-note ms-notice">${escapeHtml(String(w))}</div>`)
+      .join('');
 
     // Fingerprint note: the count owned by fingerprint, or the Build button
     const fpNote = describeFingerprintIndex(fingerprintInfo, ownedByFingerprint, fingerprintBuild, stashdbName);
@@ -263,11 +287,11 @@
             <label class="ms-filter-checkbox">
               <input type="checkbox" id="ms-filter-studios" ${filterStudiosChecked}>
               <span>Favorite Studios</span>
-            </label>
+            </label>${studiosChildrenCheckbox}
             <label class="ms-filter-checkbox">
               <input type="checkbox" id="ms-filter-tags" ${filterTagsChecked}>
               <span>Favorite Tags</span>
-            </label>
+            </label>${tagsChildrenCheckbox}
           </div>
 
           <div class="ms-sort-controls">
@@ -287,6 +311,7 @@
 
         <div class="ms-browse-stats">${escapeHtml(statsText)}</div>
         ${favoritesNote}
+        ${warningsNote}
         ${trendingNote}
         ${fingerprintHtml}
         ${whisparrConfigured && whisparrError ? `<div class="ms-warning ms-whisparr-banner"><span class="ms-warning-text">${escapeHtml(describeWhisparrStatusError(whisparrError))}</span></div>` : ''}
@@ -382,6 +407,8 @@
         filterFavoritePerformers,
         filterFavoriteStudios,
         filterFavoriteTags,
+        filterFavoriteStudiosChildren,
+        filterFavoriteTagsChildren,
       });
       if (token !== requestToken) return;
 
@@ -430,6 +457,7 @@
           favorites_limited: result.favorites_limited,
           empty_filter_types: result.empty_filter_types || [],
           favorites_query_limit: result.favorites_query_limit,
+          warnings: result.warnings || [],
           cache_info: result.cache_info || null,
         }
       });
@@ -500,6 +528,16 @@
 
     container.querySelector('#ms-filter-tags')?.addEventListener('change', (e) => {
       filterFavoriteTags = e.target.checked;
+      performSearch(container, true);
+    });
+
+    container.querySelector('#ms-filter-studios-children')?.addEventListener('change', (e) => {
+      filterFavoriteStudiosChildren = e.target.checked;
+      performSearch(container, true);
+    });
+
+    container.querySelector('#ms-filter-tags-children')?.addEventListener('change', (e) => {
+      filterFavoriteTagsChildren = e.target.checked;
       performSearch(container, true);
     });
 

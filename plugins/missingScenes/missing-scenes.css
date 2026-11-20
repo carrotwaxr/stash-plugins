@@ -840,3 +840,26 @@ div.ms-header-actions .ms-search-button {
 .ms-fingerprint-note .ms-build-fp-btn {
   flex-shrink: 0;
 }
+
+/* Notes from the response's warnings (entity modal; the browse page uses .ms-browse-note) */
+.ms-notices {
+  padding: 8px 20px;
+  background: #1c1c1c;
+  border-bottom: 1px solid #333;
+  font-size: 13px;
+  color: #ffc107;
+}
+
+.ms-browse-note.ms-notice {
+  color: #ffc107;
+}
+
+/* "Include sub-studios" / "Include sub-tags": usable only with their favorites filter */
+.ms-filter-checkbox.ms-filter-sub:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ms-filter-checkbox.ms-filter-sub input:disabled {
+  cursor: not-allowed;
+}
