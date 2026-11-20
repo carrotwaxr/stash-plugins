@@ -940,14 +940,6 @@
   }
 
   /**
-   * Extract performer ID from current URL
-   */
-  function getPerformerIdFromUrl() {
-    const match = window.location.pathname.match(/\/performers\/(\d+)/);
-    return match ? match[1] : null;
-  }
-
-  /**
    * Get performer name from the page
    */
   function getPerformerNameFromPage() {
@@ -975,62 +967,141 @@
     return "Unknown Performer";
   }
 
-  /**
-   * Add the "Search Images" button to the performer page
-   */
-  function addSearchButton() {
-    // Check if we're on a performer page
-    const performerId = getPerformerIdFromUrl();
-    if (!performerId) return;
+  const SEARCH_BUTTON_ROW = "pis-header-actions";
 
-    // Check if button already exists
-    if (document.getElementById("pis-search-button")) return;
+  /** The performer id a performer page shows (base path or not), else null. */
+  function performerIdFromPath(pathname) {
+    const m = String(pathname || "").match(/(?:^|\/)performers\/(\d+)(?:\/|$)/);
+    if (!m) return null;
+    // "/studios/6/performers" is a studio tab, not a performer page
+    const before = String(pathname).slice(0, m.index);
+    return /\/(studios|tags|groups|galleries|scenes)\/\d+\/?$/.test(before) ? null : m[1];
+  }
 
-    // Find a good place to insert the button
-    // Look for the operations/edit buttons area
-    const buttonContainer =
-      document.querySelector(".detail-header-buttons") ||
-      document.querySelector('[class*="detail"] [class*="button"]')?.parentElement ||
-      document.querySelector(".performer-head");
+  function isShown(el) {
+    return !!el && el.offsetParent !== null;
+  }
 
-    if (!buttonContainer) {
-      // Try again later - page might not be fully loaded
-      setTimeout(addSearchButton, 500);
-      return;
+  function childWithClass(parent, cls) {
+    return Array.from(parent.children || []).find((c) => c.classList && c.classList.contains(cls)) || null;
+  }
+
+  /** Remove a node and, when that empties one of our rows, the row too. */
+  function removeAndTidy(el) {
+    const parent = el.parentNode;
+    el.remove();
+    if (parent && parent.classList && parent.classList.contains(SEARCH_BUTTON_ROW) &&
+        parent.children.length === 0) {
+      parent.remove();
     }
+  }
 
-    // Create the button
+  /**
+   * Where the button goes when the name row is hidden: the last visible block of
+   * the header's container (a theme's own panel), else the header itself.
+   */
+  function fallbackTarget(header) {
+    const container = header.querySelector(".detail-container");
+    const shown = container ? Array.from(container.children || []).filter(isShown) : [];
+    return shown.length ? shown[shown.length - 1] : header;
+  }
+
+  function createSearchButton(performerId) {
     const button = document.createElement("button");
     button.id = "pis-search-button";
     button.className = "btn btn-secondary pis-search-button";
+    button.dataset.performerId = performerId;
     button.innerHTML = `
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="16" height="16" fill="currentColor" style="margin-right: 6px;">
         <path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352a144 144 0 1 0 0-288 144 144 0 1 0 0 288z"/>
       </svg>
       Search Images
     `;
-
     button.addEventListener("click", () => {
-      const performerName = getPerformerNameFromPage();
-      showModal(performerId, performerName);
+      showModal(performerId, getPerformerNameFromPage());
     });
-
-    // Insert the button
-    buttonContainer.appendChild(button);
+    return button;
   }
 
   /**
-   * Initialize plugin when on performer page
+   * Put the Search Images button on the current performer page, or take it away.
+   *
+   * The button sits in the name row, in a span of its own after Stash's icons:
+   * themes such as Sticky hide .name-icons and copy the icons elsewhere. When the
+   * name row itself is hidden, it goes at the end of the header's last visible
+   * block. Each button is tied to its performer, so one left from another page is
+   * replaced rather than opening the wrong performer (#193; Missing Scenes #189).
+   *
+   * Returns the button, or null when the page has none (or isn't rendered yet).
+   */
+  function placeSearchButton(doc, pathname) {
+    const performerId = performerIdFromPath(pathname);
+
+    let button = null;
+    for (const b of Array.from(doc.querySelectorAll(".pis-search-button"))) {
+      if (!button && performerId && b.dataset.performerId === performerId && b.isConnected !== false) {
+        button = b;
+      } else {
+        removeAndTidy(b);
+      }
+    }
+    if (!performerId) return null;
+
+    // Stash's compact header (.sticky) appears on scroll; the full one is what we want
+    const header = doc.querySelector(".detail-header:not(.sticky)");
+    if (!header) {
+      if (button) removeAndTidy(button);
+      return null;
+    }
+    const title = header.querySelector(".performer-head > h2");
+    const target = isShown(title) ? title : fallbackTarget(header);
+
+    let row = childWithClass(target, SEARCH_BUTTON_ROW);
+    if (button && row && button.parentNode === row) return button;
+
+    if (!row) {
+      row = doc.createElement(target === title ? "span" : "div");
+      row.className = SEARCH_BUTTON_ROW;
+      target.appendChild(row);
+    }
+    if (button) {
+      const oldParent = button.parentNode;
+      row.appendChild(button);
+      if (oldParent && oldParent !== row && oldParent.classList &&
+          oldParent.classList.contains(SEARCH_BUTTON_ROW) && oldParent.children.length === 0) {
+        oldParent.remove();
+      }
+    } else {
+      button = createSearchButton(performerId);
+      row.appendChild(button);
+    }
+    return button;
+  }
+
+  /** Add, move or remove the button for the current page. */
+  function addSearchButton() {
+    placeSearchButton(document, window.location.pathname);
+  }
+
+  /**
+   * Initialize plugin. The header renders after navigation and themes redraw it,
+   * so re-place the button on DOM changes (coalesced to one pass per 100 ms).
    */
   function init() {
-    // Listen for page changes (Stash is a SPA)
-    PluginApi.Event.addEventListener("stash:location", () => {
-      // Small delay to let page render
-      setTimeout(addSearchButton, 100);
-    });
+    let pending = null;
+    const schedule = () => {
+      if (pending !== null) return;
+      pending = setTimeout(() => {
+        pending = null;
+        addSearchButton();
+      }, 100);
+    };
 
-    // Also try to add button immediately if already on performer page
-    setTimeout(addSearchButton, 100);
+    PluginApi.Event.addEventListener("stash:location", schedule);
+    if (typeof MutationObserver !== "undefined" && document.body) {
+      new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+    }
+    schedule();
   }
 
   // Start the plugin
@@ -1060,6 +1131,8 @@
       showStatus,
       escapeHtml,
       addSearchButton,
+      placeSearchButton,
+      performerIdFromPath,
     };
     hook.getState = () => ({
       SOURCES,

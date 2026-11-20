@@ -109,6 +109,10 @@ Some sources sit behind Cloudflare. Babepedia does, for one. They may block requ
 
 ## Changelog
 
+### 1.5.1
+- The **Search Images** button shows with themes that redraw the performer header, such as Sticky. It sits next to the name icons instead of inside them, and moves into the theme's visible panel when the name row is hidden.
+- Moving from one performer to another replaces the button, so it always searches the performer on screen.
+
 ### 1.5.0
 - DuckDuckGo is now off by default, even if you never changed the toggle. Turn it on in the plugin settings.
 - Each source shows a status chip: ok, empty, partial, error, blocked or timeout. Hover to see the error.
